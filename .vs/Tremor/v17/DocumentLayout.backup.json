@@ -5,6 +5,14 @@
     {
       "AbsoluteMoniker": "D:0:0:{6E4BFEC7-04B9-47E5-B95F-202907935ECA}|Tremor.vcxproj|E:\\Tremor\\main.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
       "RelativeMoniker": "D:0:0:{6E4BFEC7-04B9-47E5-B95F-202907935ECA}|Tremor.vcxproj|solutionrelative:main.cpp||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6E4BFEC7-04B9-47E5-B95F-202907935ECA}|Tremor.vcxproj|E:\\Tremor\\atomics.h||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{6E4BFEC7-04B9-47E5-B95F-202907935ECA}|Tremor.vcxproj|solutionrelative:atomics.h||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{6E4BFEC7-04B9-47E5-B95F-202907935ECA}|Tremor.vcxproj|E:\\Tremor\\q_stdinc.h||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{6E4BFEC7-04B9-47E5-B95F-202907935ECA}|Tremor.vcxproj|solutionrelative:q_stdinc.h||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
     }
   ],
   "DocumentGroupContainers": [
@@ -14,17 +22,43 @@
       "DocumentGroups": [
         {
           "DockedWidth": 198,
-          "SelectedChildIndex": 0,
+          "SelectedChildIndex": 2,
           "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "q_stdinc.h",
+              "DocumentMoniker": "E:\\Tremor\\q_stdinc.h",
+              "RelativeDocumentMoniker": "q_stdinc.h",
+              "ToolTip": "E:\\Tremor\\q_stdinc.h",
+              "RelativeToolTip": "q_stdinc.h",
+              "ViewState": "AgIAAKEAAAAAAAAAAAAAANMAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2025-04-24T19:10:09.026Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "atomics.h",
+              "DocumentMoniker": "E:\\Tremor\\atomics.h",
+              "RelativeDocumentMoniker": "atomics.h",
+              "ToolTip": "E:\\Tremor\\atomics.h",
+              "RelativeToolTip": "atomics.h",
+              "ViewState": "AgIAAB8AAAAAAAAAAAAewDcAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2025-04-24T18:11:11.358Z",
+              "EditorCaption": ""
+            },
             {
               "$type": "Document",
               "DocumentIndex": 0,
               "Title": "main.cpp",
               "DocumentMoniker": "E:\\Tremor\\main.cpp",
               "RelativeDocumentMoniker": "main.cpp",
-              "ToolTip": "E:\\Tremor\\main.cpp*",
-              "RelativeToolTip": "main.cpp*",
-              "ViewState": "AgIAAAkAAAAAAAAAAAAAABUAAAAJAAAAAAAAAA==",
+              "ToolTip": "E:\\Tremor\\main.cpp",
+              "RelativeToolTip": "main.cpp",
+              "ViewState": "AgIAAFQAAAAAAAAAAAAewHEAAAALAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000677|",
               "WhenOpened": "2025-04-23T03:36:20.372Z",
               "EditorCaption": ""
