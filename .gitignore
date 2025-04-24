@@ -13,7 +13,10 @@
 *.pdb
 *.db
 
-/.vs/
+.vs/
+
+x64/
+Tremor/
 
 # Precompiled Headers
 *.gch
