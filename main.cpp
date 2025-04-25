@@ -49,6 +49,7 @@
 
 
 #include <iostream>
+#include <cstring>
 
 #define SDL_MAIN_HANDLED
 #define NO_SDL_VULKAN_TYPEDEFS
@@ -63,6 +64,9 @@
 #define COMMA ,
 #define NO_COMMA
 
+#define MAX_MAPSTRING 2048
+#define MAX_DEMOS	  8
+#define MAX_DEMONAME  16
 
 #define TREMOR_VER_STRING	  QS_STRINGIFY (VKQUAKE_VERSION) "." QS_STRINGIFY (VKQUAKE_VER_PATCH) VKQUAKE_VER_SUFFIX
 
@@ -100,6 +104,15 @@
 
 #define THREAD_LOCAL  __declspec (thread)
 
+#define SIGNONS 4
+
+#define MAXPRINTMSG 4096
+
+static char	   cvar_null_string[] = "";
+
+static char logfilename[MAX_OSPATH]; // current logfile name
+static int	log_fd = -1;			 // log file descriptor
+
 typedef uint64_t task_handle_t;
 typedef void (*task_func_t) (void*);
 typedef void (*task_indexed_func_t) (int, void*);
@@ -124,6 +137,14 @@ static void* Max(void* a, void* b)
 	return (*(int*)a > *(int*)b) ? a : b;
 }
 
+typedef struct sizebuf_s
+{
+	bool allowoverflow; // if false, do a Sys_Error
+	bool overflowed;	// set to true if the buffer size failed
+	byte* data;
+	int		 maxsize;
+	int		 cursize;
+} sizebuf_t;
 
 typedef enum
 {
@@ -177,6 +198,56 @@ static THREAD_LOCAL int		 tl_worker_index;
 
 
 typedef unsigned char byte;
+typedef int64_t qfileofs_t;
+
+
+typedef enum
+{
+	ca_dedicated,	 // a dedicated server with no ability to start a client
+	ca_disconnected, // full screen console with no connection
+	ca_connected	 // valid netcon, talking to a server
+} cactive_t;
+
+typedef struct
+{
+	cactive_t state;
+
+	// personalization data sent to server
+	char spawnparms[MAX_MAPSTRING]; // to restart a level
+
+	// demo loop control
+	int	 demonum;						 // -1 = don't play demos
+	char demos[MAX_DEMOS][MAX_DEMONAME]; // when not playing
+
+	// demo recording info must be here, because record is started before
+	// entering a map (and clearing client_state_t)
+	bool demorecording;
+	bool demoplayback;
+
+	// did the user pause demo playback? (separate from cl.paused because we don't
+	// want a svc_setpause inside the demo to actually pause demo playback).
+	bool demopaused;
+	bool demoseeking;
+	float	 seektime;
+	float	 demospeed;
+
+	// demo file position where the current level starts (after signon packets)
+	qfileofs_t demo_prespawn_end;
+
+	bool timedemo;
+	int		 forcetrack; // -1 = use normal cd track
+	FILE* demofile;
+	int		 td_lastframe;	// to meter out one message a frame
+	int		 td_startframe; // host_framecount at start
+	float	 td_starttime;	// realtime at second frame of timedemo
+
+	// connection information
+	int				  signon; // 0 to SIGNONS
+	struct qsocket_s* netcon;
+	sizebuf_t		  message; // writing buffer to send to server
+
+	char userinfo[8192];
+} client_static_t;
 
 typedef enum
 {
@@ -235,14 +306,7 @@ typedef struct cvar_s
 	struct cvar_s* next;
 } cvar_t;
 
-typedef struct sizebuf_s
-{
-	bool allowoverflow; // if false, do a Sys_Error
-	bool overflowed;	// set to true if the buffer size failed
-	byte* data;
-	int		 maxsize;
-	int		 cursize;
-} sizebuf_t;
+
 
 static const char errortxt1[] = "\nERROR-OUT BEGIN\n\n";
 static const char errortxt2[] = "\nQUAKE ERROR: ";
@@ -263,6 +327,82 @@ public:
 		q(Engine e) {
 			engine = &e;
 		}
+		static inline int toupper(int c)
+		{
+			return ((islower(c)) ? (c & ~('a' - 'A')) : c);
+		}
+		static inline int tolower(int c)
+		{
+			return ((isupper(c)) ? (c | ('a' - 'A')) : c);
+		}
+		static inline int to_ascii(int c)
+		{
+			return (c & 0x7f);
+		}
+		static inline int isprint(int c)
+		{
+			return (c >= 0x20 && c <= 0x7e);
+		}
+		static inline int isgraph(int c)
+		{
+			return (c > 0x20 && c <= 0x7e);
+		}
+
+		static inline int isspace(int c)
+		{
+			switch (c)
+			{
+			case ' ':
+			case '\t':
+			case '\n':
+			case '\r':
+			case '\f':
+			case '\v':
+				return 1;
+			}
+			return 0;
+		}
+
+		static inline int isblank(int c)
+		{
+			return (c == ' ' || c == '\t');
+		}
+
+		static inline int is_ascii(int c)
+		{
+			return ((c & ~0x7f) == 0);
+		}
+
+		static inline int islower(int c)
+		{
+			return (c >= 'a' && c <= 'z');
+		}
+
+		static inline int isupper(int c)
+		{
+			return (c >= 'A' && c <= 'Z');
+		}
+
+		static inline int isalpha(int c)
+		{
+			return (islower(c) || isupper(c));
+		}
+
+		static inline int isdigit(int c)
+		{
+			return (c >= '0' && c <= '9');
+		}
+
+		static inline int isxdigit(int c)
+		{
+			return (isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'));
+		}
+
+		static inline int isalnum(int c)
+		{
+			return (isalpha(c) || isdigit(c));
+		}
+
 		int vsnprintf(char* str, size_t size, const char* format, va_list args)
 		{
 			int ret;
@@ -277,6 +417,240 @@ public:
 				str[size - 1] = '\0';
 
 			return ret;
+		}
+		int strcasecmp(const char* s1, const char* s2)
+		{
+			const char* p1 = s1;
+			const char* p2 = s2;
+			char		c1, c2;
+
+			if (p1 == p2)
+				return 0;
+
+			do
+			{
+				c1 = tolower(*p1++);
+				c2 = tolower(*p2++);
+				if (c1 == '\0')
+					break;
+			} while (c1 == c2);
+
+			return (int)(c1 - c2);
+		}
+
+		int strncasecmp(const char* s1, const char* s2, size_t n)
+		{
+			const char* p1 = s1;
+			const char* p2 = s2;
+			char		c1, c2;
+
+			if (p1 == p2 || n == 0)
+				return 0;
+
+			do
+			{
+				c1 = tolower(*p1++);
+				c2 = tolower(*p2++);
+				if (c1 == '\0' || c1 != c2)
+					break;
+			} while (--n > 0);
+
+			return (int)(c1 - c2);
+		}
+
+		char* strcasestr(const char* haystack, const char* needle)
+		{
+			const size_t len = strlen(needle);
+
+			if (!len)
+				return (char*)haystack;
+
+			while (*haystack)
+			{
+				if (!strncasecmp(haystack, needle, len))
+					return (char*)haystack;
+
+				++haystack;
+			}
+
+			return NULL;
+		}
+
+		char* q_strlwr(char* str)
+		{
+			char* c;
+			c = str;
+			while (*c)
+			{
+				*c = tolower(*c);
+				c++;
+			}
+			return str;
+		}
+
+		char* q_strupr(char* str)
+		{
+			char* c;
+			c = str;
+			while (*c)
+			{
+				*c = toupper(*c);
+				c++;
+			}
+			return str;
+		}
+
+		char* strdup(const char* str)
+		{
+			size_t len = strlen(str) + 1;
+			char* newstr = (char*)mem->Alloc(len);
+			memcpy(newstr, str, len);
+			return newstr;
+		}
+
+		int snprintf(char* str, size_t size, const char* format, ...)
+		{
+			int		ret;
+			va_list argptr;
+
+			va_start(argptr, format);
+			ret = vsnprintf(str, size, format, argptr);
+			va_end(argptr);
+
+			return ret;
+		}
+
+		int wildcmp(const char* wild, const char* string)
+		{ // case-insensitive string compare with wildcards. returns true for a match.
+			while (*string)
+			{
+				if (*wild == '*')
+				{
+					if (*string == '/' || *string == '\\')
+					{
+						//* terminates if we get a match on the char following it, or if its a \ or / char
+						wild++;
+						continue;
+					}
+					if (wildcmp(wild + 1, string))
+						return true;
+					string++;
+				}
+				else if ((tolower(*wild) == tolower(*string)) || (*wild == '?'))
+				{
+					// this char matches
+					wild++;
+					string++;
+				}
+				else
+				{
+					// failure
+					return false;
+				}
+			}
+
+			while (*wild == '*')
+			{
+				wild++;
+			}
+			return !*wild;
+		}
+
+		void Info_RemoveKey(char* info, const char* key)
+		{ // only shrinks, so no need for max size.
+			size_t keylen = strlen(key);
+
+			while (*info)
+			{
+				char* l = info;
+				if (*info++ != '\\')
+					break; // error / end-of-string
+
+				if (!strncmp(info, key, keylen) && info[keylen] == '\\')
+				{
+					// skip the key name
+					info += keylen + 1;
+					// this is the old value for the key. skip over it
+					while (*info && *info != '\\')
+						info++;
+
+					// okay, we found it. strip it out now.
+					memmove(l, info, strlen(info) + 1);
+					return;
+				}
+				else
+				{
+					// skip the key
+					while (*info && *info != '\\')
+						info++;
+
+					// validate that its a value now
+					if (*info++ != '\\')
+						break; // error
+					// skip the value
+					while (*info && *info != '\\')
+						info++;
+				}
+			}
+		}
+
+		void Info_SetKey(char* info, size_t infosize, const char* key, const char* val)
+		{
+			size_t keylen = strlen(key);
+			size_t vallen = strlen(val);
+
+			Info_RemoveKey(info, key);
+
+			if (vallen)
+			{
+				char* o = info + strlen(info);
+				char* e = info + infosize - 1;
+
+				if (!*key || strchr(key, '\\') || strchr(val, '\\'))
+					con->Warning("Info_SetKey(%s): invalid key/value\n", key);
+				else if (o + 2 + keylen + vallen >= e)
+					con->Warning("Info_SetKey(%s): length exceeds max\n", key);
+				else
+				{
+					*o++ = '\\';
+					memcpy(o, key, keylen);
+					o += keylen;
+					*o++ = '\\';
+					memcpy(o, val, vallen);
+					o += vallen;
+
+					*o = 0;
+				}
+			}
+		}
+
+		size_t strlcat(char* dst, const char* src, size_t siz)
+		{
+			char* d = dst;
+			const char* s = src;
+			size_t		n = siz;
+			size_t		dlen;
+
+			/* Find the end of dst and adjust bytes left but don't go past end */
+			while (n-- != 0 && *d != '\0')
+				d++;
+			dlen = d - dst;
+			n = siz - dlen;
+
+			if (n == 0)
+				return (dlen + strlen(s));
+			while (*s != '\0')
+			{
+				if (n != 1)
+				{
+					*d++ = *s;
+					n--;
+				}
+				s++;
+			}
+			*d = '\0';
+
+			return (dlen + (s - src)); /* count does not include NUL */
 		}
 	};
 	class VID {
@@ -471,25 +845,308 @@ public:
 		CL(Engine e) {
 			engine = &e;
 		}
+		client_static_t s;
 	};
 	class Con {
 	public:
 		Engine* engine;
+		int linewidth;
+
+		float cursorspeed = 4;
+
+		#define CON_TEXTSIZE (1024 * 1024) // ericw -- was 65536. johnfitz -- new default size
+		#define CON_MINSIZE	 16384		   // johnfitz -- old default, now the minimum size
+
+		int buffersize; // johnfitz -- user can now override default
+
+		bool forcedup; // because no entities to refresh
+
+		int	  totallines; // total lines in console scrollback
+		int	  backscroll; // lines up from bottom to display
+		int	  current;	  // where next message will be printed
+		int	  x;		  // offset in current line for next print
+		char* text = NULL;
+
+		cvar_t notifytime = { "con_notifytime", "3", CVAR_NONE };			// seconds
+		cvar_t logcenterprint = { "con_logcenterprint", "1", CVAR_NONE }; // johnfitz
+
+		char lastcenterstring[1024];				 // johnfitz
+		void (*redirect_flush) (const char* buffer); // call this to flush the redirection buffer (for rcon)
+		char redirect_buffer[8192];
+
+		#define NUM_CON_TIMES 4
+		float times[NUM_CON_TIMES]; // realtime time the line was generated
+		// for transparent notify lines
+
+		int vislines;
+
+		bool debuglog = false;
+
+		bool initialized;
+
+		SDL_mutex* mutex;
+
+		int history_line;
+		
 		Con(Engine e) {
 			engine = &e;
 		}
+
+		const char* Quakebar(int len)
+		{
+			static char bar[42];
+			int			i;
+
+			len = (int)Min((void*)len, (void*)((int)sizeof(bar) - 2));
+			len = (int)Min((void*)len, (void*)linewidth);
+
+			bar[0] = '\35';
+			for (i = 1; i < len - 1; i++)
+				bar[i] = '\36';
+			bar[len - 1] = '\37';
+
+			if (len < linewidth)
+			{
+				bar[len] = '\n';
+				bar[len + 1] = 0;
+			}
+			else
+				bar[len] = 0;
+
+			return bar;
+		}
+
+		
+
+		void DebugLog(const char* msg)
+		{
+			if (log_fd == -1)
+				return;
+
+			size_t msg_len = strlen(msg);
+			if (_write(log_fd, msg, msg_len) != msg_len)
+				return; // Nonsense to supress warning
+		}
+
+		static void Linefeed(void)
+		{
+			// johnfitz -- improved scrolling
+			if (con->backscroll)
+				con->backscroll++;
+			if (con->backscroll > con->totallines - (vid->GetCurrentHeight() >> 3) - 1)
+				con->backscroll = con->totallines - (vid->GetCurrentHeight() >> 3) - 1;
+			// johnfitz
+
+			con->x = 0;
+			con->current++;
+			memset(&con->text[(con->current % con->totallines) * con->linewidth], ' ', con->linewidth);
+		}
+
+
+		void Con_Warning(const char* fmt, ...)
+		{
+			va_list argptr;
+			char	msg[MAXPRINTMSG];
+
+			va_start(argptr, fmt);
+			qk->vsnprintf(msg, sizeof(msg), fmt, argptr);
+			va_end(argptr);
+
+			SafePrintf("\x02Warning: ");
+			Printf("%s", msg);
+		}
+
+
+		static void Print(const char* txt)
+		{
+			int		   y;
+			int		   c, l;
+			static int cr;
+			int		   mask;
+			bool   boundary;
+
+			SDL_LockMutex(con->mutex);
+
+			// con_backscroll = 0; //johnfitz -- better console scrolling
+
+			if (txt[0] == 1)
+			{
+				mask = 128;						// go to colored text
+				//S_LocalSound("misc/talk.wav"); // play talk wav
+				txt++;
+			}
+			else if (txt[0] == 2)
+			{
+				mask = 128; // go to colored text
+				txt++;
+			}
+			else
+				mask = 0;
+
+			boundary = true;
+
+			while ((c = *txt))
+			{
+				if (c <= ' ')
+				{
+					boundary = true;
+				}
+				else if (boundary)
+				{
+					// count word length
+					for (l = 0; l < con->linewidth; l++)
+						if (txt[l] <= ' ')
+							break;
+
+					// word wrap
+					if (l != con->linewidth && (con->x + l > con->linewidth))
+						con->x = 0;
+
+					boundary = false;
+				}
+
+				txt++;
+
+				if (cr)
+				{
+					con->current--;
+					cr = false;
+				}
+
+				if (!con->x)
+				{
+					Linefeed();
+					// mark time for transparent overlay
+					if (con->current >= 0)
+						con->times[con->current % NUM_CON_TIMES] = host->realtime;
+				}
+
+				switch (c)
+				{
+				case '\n':
+					con->x = 0;
+					break;
+
+				case '\r':
+					con->x = 0;
+					cr = 1;
+					break;
+
+				default: // display character and advance
+					y = con->current % con->totallines;
+					con->text[y * con->linewidth + con->x] = c | mask;
+					con->x++;
+					if (con->x >= con->linewidth)
+						con->x = 0;
+					break;
+				}
+			}
+			SDL_UnlockMutex(con->mutex);
+		}
+
+		#define MAXPRINTMSG 4096
+		void Printf(const char* fmt, ...)
+		{
+			va_list			argptr;
+			char			msg[MAXPRINTMSG];
+			static bool inupdate;
+
+			va_start(argptr, fmt);
+			qk->vsnprintf(msg, sizeof(msg), fmt, argptr);
+			va_end(argptr);
+
+			if (redirect_flush)
+				qk->strlcat(redirect_buffer, msg, sizeof(redirect_buffer));
+			// also echo to debugging console
+			sys->Printf("%s", msg);
+
+			// log all messages to file
+			if (debuglog)
+				DebugLog(msg);
+
+			if (!initialized)
+				return;
+
+			if (cl->s.state == ca_dedicated)
+				return; // no graphics mode
+
+			// write it to the scrollable buffer
+			Print(msg);
+
+			// update the screen if the console is displayed
+			if (cl->s.signon != SIGNONS && !scr->disabled_for_loading && !t->IsWorker())
+			{
+				// protect against infinite loop if something in SCR_UpdateScreen calls
+				// Con_Printd
+				if (!inupdate)
+				{
+					inupdate = true;
+					//SCR_UpdateScreen(false); //remember to uncomment when implemented
+					inupdate = false;
+				}
+			}
+		}
+	
+		void Warning(const char* fmt, ...)
+		{
+			va_list argptr;
+			char	msg[MAXPRINTMSG];
+
+			va_start(argptr, fmt);
+			qk->vsnprintf(msg, sizeof(msg), fmt, argptr);
+			va_end(argptr);
+
+			SafePrintf("\x02Warning: ");
+			Printf("%s", msg);
+		}
+
+		void Con_DPrintf(const char* fmt, ...)
+		{
+			va_list argptr;
+			char	msg[MAXPRINTMSG];
+
+			if (!host->developer.value)
+				return; // don't confuse non-developers with techie stuff...
+
+			va_start(argptr, fmt);
+			qk->vsnprintf(msg, sizeof(msg), fmt, argptr);
+			va_end(argptr);
+
+			SafePrintf("%s", msg); // johnfitz -- was Con_Printf
+		}
+
+		void SafePrintf(const char* fmt, ...)
+		{
+			va_list argptr;
+			char	msg[MAXPRINTMSG];
+			int		temp;
+
+			va_start(argptr, fmt);
+			qk->vsnprintf(msg, sizeof(msg), fmt, argptr);
+			va_end(argptr);
+
+			SDL_LockMutex(con->mutex);
+			temp = scr->disabled_for_loading;
+			scr->disabled_for_loading = true;
+			Printf("%s", msg);
+			scr->disabled_for_loading = temp;
+			SDL_UnlockMutex(con->mutex);
+		}
+
+
 	};
 	class Cmd {
 	public:
 		Engine* engine;
 		bool wait = false;
+		sizebuf_t text;
 		typedef enum
 		{
 			src_client,	 // came in over a net connection as a clc_stringcmd. host_client will be valid during this state.
 			src_command, // from the command buffer
 			src_server	 // from a svc_stufftext
 		} cmd_source_t;
-		cmd_source_t cmd_source;
+		cmd_source_t cmd_source = src_command;
 		typedef void (*xcommand_t) (void);
 		typedef struct cmd_function_s
 		{
@@ -499,24 +1156,109 @@ public:
 			cmd_source_t		   srctype;
 			bool			   dynamic;
 		} cmd_function_t;
+
+		cmd_function_t* functions;
+
 		void Wait_f() {
 			wait = true;
 		}
 		Cmd(Engine e) {
 			engine = &e;
 		}
+
+		cmd_function_t* AddCommand(const char* cmd_name, xcommand_t function, cmd_source_t srctype)
+		{
+			cmd_function_t* cmd;
+			cmd_function_t* cursor, * prev; // johnfitz -- sorted list insert
+
+			// fail if the command is a variable name
+			if (cvar->VariableString(cmd_name)[0])
+			{
+				con->Printf("Cmd_AddCommand: %s already defined as a var\n", cmd_name);
+				return NULL;
+			}
+
+			// fail if the command already exists
+			for (cmd = functions; cmd; cmd = cmd->next)
+			{
+				if (!strcmp(cmd_name, cmd->name) && cmd->srctype == srctype)
+				{
+					if (cmd->function != function && function)
+						con->Printf("Cmd_AddCommand: %s already defined\n", cmd_name);
+					return NULL;
+				}
+			}
+
+			if (host->initialized)
+			{
+				cmd = (cmd_function_t*)mem->Alloc(sizeof(*cmd) + strlen(cmd_name) + 1);
+				cmd->name = (const char*)strcpy_s((char*)(cmd + 1), sizeof((char*)(cmd + 1)), cmd_name);
+				cmd->dynamic = true;
+			}
+			else
+			{
+				cmd = (cmd_function_t*)mem->Alloc(sizeof(*cmd));
+				cmd->name = cmd_name;
+				cmd->dynamic = false;
+			}
+			cmd->function = function;
+			cmd->srctype = srctype;
+
+			// johnfitz -- insert each entry in alphabetical order
+			if (functions == NULL || strcmp(cmd->name, functions->name) < 0) // insert at front
+			{
+				cmd->next = functions;
+				functions = cmd;
+			}
+			else // insert later
+			{
+				prev = functions;
+				cursor = functions->next;
+				while ((cursor != NULL) && (strcmp(cmd->name, cursor->name) > 0))
+				{
+					prev = cursor;
+					cursor = cursor->next;
+				}
+				cmd->next = prev->next;
+				prev->next = cmd;
+			}
+			// johnfitz
+
+			if (cmd->dynamic)
+				return cmd;
+			return NULL;
+		}
 	};
 	class Cbuf {
 	public:
 		Engine* engine;
 		Cbuf(Engine e) {
-			engine = &e;
+			engine = &e;			
+			sz->Alloc(&cmd->text, 1 << 18);
+
+		}
+
+		void AddText(const char* text)
+		{
+			int l;
+
+			l = strlen(text);
+
+			if (&cmd->text.cursize + l >= &cmd->text.maxsize)
+			{
+				con->Printf("Cbuf_AddText: overflow\n");
+				return;
+			}
+
+			sz->Write(&cmd->text, text, l);
 		}
 
 	};
 	class Cvar {
 	public:
 		Engine* engine;
+		static cvar_t* vars;
+
 		Cvar(Engine e) {
 			engine = &e;
 		}
@@ -531,6 +1273,27 @@ public:
 			char value[512];
 			bool set_rom;
 			Cvar* cursor, *prev;
+		}
+		cvar_t* FindVar(const char* var_name)
+		{
+			cvar_t* var;
+
+			for (var = vars; var; var = var->next)
+			{
+				if (!strcmp(var_name, var->name))
+					return var;
+			}
+
+			return NULL;
+		}
+		const char* VariableString(const char* var_name)
+		{
+			cvar_t* var;
+
+			var = FindVar(var_name);
+			if (!var)
+				return cvar_null_string;
+			return var->string;
 		}
 	};
 	class Mem {
@@ -560,6 +1323,8 @@ public:
 		double realtime;
 		double oldrealtime;
 
+		cvar_t developer = { "developer", "0", CVAR_NONE };
+
 		int framecount;
 
 		int minimum_memory;
@@ -573,7 +1338,7 @@ public:
 
 			engine->mem = new Mem(*engine);
 			engine->t = new Tasks(*engine);
-
+			engine->cbuf = new Cbuf(*engine);
 
 			engine->com = new COM(*engine);
 
@@ -613,7 +1378,7 @@ public:
 			worker_threads = (SDL_Thread**)mem->Alloc(sizeof(SDL_Thread*) * num_workers);
 			for (int i = 0; i < num_workers; ++i)
 			{
-				worker_threads[i] = SDL_CreateThread(Task_Worker, "Task_Worker", (void*)(intptr_t)i);
+				worker_threads[i] = SDL_CreateThread(Worker, "Task_Worker", (void*)(intptr_t)i);
 			}
 		}
 		static inline int IndexedTaskCounterIndex(int task_index, int worker_index)
@@ -706,7 +1471,7 @@ public:
 
 			return val;
 		}
-		static inline void Task_ExecuteIndexed(int worker_index, task_t* task, uint32_t task_index)
+		static inline void ExecuteIndexed(int worker_index, task_t* task, uint32_t task_index)
 		{
 			for (int i = 0; i < num_workers; ++i)
 			{
@@ -720,7 +1485,7 @@ public:
 				}
 			}
 		}
-		static int Task_Worker(void* data)
+		static int Worker(void* data)
 		{
 			is_worker = true;
 
@@ -738,7 +1503,7 @@ public:
 				}
 				else if (task->task_type == TASK_TYPE_INDEXED)
 				{
-					Task_ExecuteIndexed(worker_index, task, task_index);
+					ExecuteIndexed(worker_index, task, task_index);
 				}
 
 #if defined(USE_HELGRIND)
@@ -762,7 +1527,7 @@ public:
 				{
 					SDL_LockMutex(task->epoch_mutex);
 					for (int i = 0; i < task->num_dependents; ++i)
-						t->Task_Submit(task->dependent_task_handles[i]);
+						t->Submit(task->dependent_task_handles[i]);
 					task->epoch += 1;
 					SDL_CondBroadcast(task->epoch_condition);
 					SDL_UnlockMutex(task->epoch_mutex);
@@ -776,19 +1541,19 @@ public:
 			}
 			return 0;
 		}
-		int Tasks_NumWorkers(void)
+		int NumWorkers(void)
 		{
 			return num_workers;
 		}
-		bool Tasks_IsWorker(void)
+		bool IsWorker(void)
 		{
 			return is_worker;
 		}
-		int Tasks_GetWorkerIndex(void)
+		int GetWorkerIndex(void)
 		{
 			return tl_worker_index;
 		}
-		task_handle_t Task_Allocate(void)
+		task_handle_t Allocate(void)
 		{
 			uint32_t task_index = TaskQueuePop(free_task_queue);
 			task_t* task = &tasks[task_index];
@@ -799,7 +1564,7 @@ public:
 			task->func = NULL;
 			return CreateTaskHandle(task_index, task->epoch);
 		}
-		void Task_AssignFunc(task_handle_t handle, task_func_t func, void* payload, size_t payload_size)
+		void AssignFunc(task_handle_t handle, task_func_t func, void* payload, size_t payload_size)
 		{
 			assert(payload_size <= MAX_PAYLOAD_SIZE);
 			task_t* task = &tasks[IndexFromTaskHandle(handle)];
@@ -808,7 +1573,7 @@ public:
 			if (payload)
 				memcpy(&task->payload, payload, payload_size);
 		}
-		void Task_AssignIndexedFunc(task_handle_t handle, task_indexed_func_t func, uint32_t limit, void* payload, size_t payload_size)
+		void AssignIndexedFunc(task_handle_t handle, task_indexed_func_t func, uint32_t limit, void* payload, size_t payload_size)
 		{
 			assert(payload_size <= MAX_PAYLOAD_SIZE);
 			uint32_t task_index = IndexFromTaskHandle(handle);
@@ -829,7 +1594,7 @@ public:
 			if (payload)
 				memcpy(&task->payload, payload, payload_size);
 		}
-		void Task_Submit(task_handle_t handle)
+		void Submit(task_handle_t handle)
 		{
 			uint32_t task_index = IndexFromTaskHandle(handle);
 			task_t* task = &tasks[task_index];
@@ -1089,7 +1854,6 @@ public:
 		vid = new VID(*this);
 		msg = new MSG(*this);
 		qk = new q(*this);
-		cbuf = new Cbuf(*this);
 	}
 };
 
