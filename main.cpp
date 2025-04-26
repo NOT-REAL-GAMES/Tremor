@@ -152,12 +152,19 @@
 #define NUM_BASIC_SPAWN_PARMS 16
 #define NUM_TOTAL_SPAWN_PARMS 64
 
+#define MAX_CHANNELS		 1024
+#define MAX_DYNAMIC_CHANNELS 128
+
 #define MAX_SCOREBOARD	   16
 #define MAX_SCOREBOARDNAME 32
 
 #define DEF_SAVEGLOBAL (1 << 15)
 
 #define QCEXTFUNC(n, t) func_t n;
+
+#define NUM_AMBIENTS 4 // automatic ambient sounds
+
+#define MAX_QPATH 64
 
 #define VA_NUM_BUFFS 4
 #if (MAX_OSPATH >= 1024)
@@ -168,6 +175,56 @@
 
 #define countof(x) (sizeof (x) / sizeof ((x)[0]))
 
+#define DotProduct(x, y)				((x)[0] * (y)[0] + (x)[1] * (y)[1] + (x)[2] * (y)[2])
+#define DotProduct2(x, y)				((x)[0] * (y)[0] + (x)[1] * (y)[1])
+#define DoublePrecisionDotProduct(x, y) ((double)(x)[0] * (y)[0] + (double)(x)[1] * (y)[1] + (double)(x)[2] * (y)[2])
+#define VectorSubtract2(a, b, c)  \
+	do                            \
+	{                             \
+		(c)[0] = (a)[0] - (b)[0]; \
+		(c)[1] = (a)[1] - (b)[1]; \
+	} while (false)
+#define VectorSubtract(a, b, c)   \
+	do                            \
+	{                             \
+		(c)[0] = (a)[0] - (b)[0]; \
+		(c)[1] = (a)[1] - (b)[1]; \
+		(c)[2] = (a)[2] - (b)[2]; \
+	} while (false)
+#define VectorAdd2(a, b, c)       \
+	do                            \
+	{                             \
+		(c)[0] = (a)[0] + (b)[0]; \
+		(c)[1] = (a)[1] + (b)[1]; \
+	} while (false)
+#define VectorAdd(a, b, c)        \
+	do                            \
+	{                             \
+		(c)[0] = (a)[0] + (b)[0]; \
+		(c)[1] = (a)[1] + (b)[1]; \
+		(c)[2] = (a)[2] + (b)[2]; \
+	} while (false)
+#define VectorCopy(a, b) \
+	do                   \
+	{                    \
+		(b)[0] = (a)[0]; \
+		(b)[1] = (a)[1]; \
+		(b)[2] = (a)[2]; \
+	} while (0)
+#define Vector4Copy(a, b) \
+	do                    \
+	{                     \
+		(b)[0] = (a)[0];  \
+		(b)[1] = (a)[1];  \
+		(b)[2] = (a)[2];  \
+		(b)[3] = (a)[3];  \
+	} while (0)
+
+#define sound_nominal_clip_dist 1000.0
+
+#define sfunc net_drivers[sock->driver]
+#define dfunc net_drivers[net_driverlevel]
+
 static char	   cvar_null_string[] = "";
 static char	 argvdummy[] = " ";
 
@@ -177,6 +234,16 @@ typedef enum
 	CPE_NOTRUNC,	// return parse error in case of overflow
 	CPE_ALLOWTRUNC, // truncate com_token in case of overflow
 } cpe_mode;
+
+typedef struct
+{
+	int rate;
+	int width;
+	int channels;
+	int loopstart;
+	int samples;
+	int dataofs; /* chunk starts this many bytes from file start	*/
+} wavinfo_t;
 
 static char logfilename[MAX_OSPATH]; // current logfile name
 static int	log_fd = -1;			 // log file descriptor
@@ -580,6 +647,37 @@ static double counter_freq;
 
 size_t max_thread_stack_alloc_size = 0;
 
+typedef struct
+{
+	int	 length;
+	int	 loopstart;
+	int	 speed;
+	int	 width;
+	int	 stereo;
+	byte data[1]; /* variable sized	*/
+} sfxcache_t;
+
+typedef struct sfx_s
+{
+	char		name[64];
+	sfxcache_t* cache;
+} sfx_t;
+
+typedef struct
+{
+	sfx_t* sfx;		 /* sfx number					*/
+	int	   leftvol;	 /* 0-255 volume					*/
+	int	   rightvol; /* 0-255 volume					*/
+	int	   end;		 /* end time in global paintsamples		*/
+	int	   pos;		 /* sample position in sfx			*/
+	int	   looping;	 /* where to loop, -1 = no looping		*/
+	int	   entnum;	 /* to allow overriding a specific sound		*/
+	int	   entchannel;
+	vec3_t origin;	   /* origin of sound effect			*/
+	vec_t  dist_mult;  /* distance multiplier (attenuation/clipK)	*/
+	int	   master_vol; /* 0-255 master volume				*/
+} channel_t;
+
 typedef enum
 {
 	ss_loading,
@@ -671,6 +769,8 @@ typedef struct entity_state_s
 
 typedef struct {} entvars_t;
 
+THREAD_LOCAL qfileofs_t com_filesize;
+
 typedef Q_ALIGN(4) int64_t qcsint64_t;
 typedef Q_ALIGN(4) uint64_t qcuint64_t;
 typedef Q_ALIGN(4) double qcdouble_t;
@@ -747,6 +847,31 @@ typedef struct client_s
 
 	// client known data for deltas
 	int old_frags;
+
+	typedef struct
+	{
+		char name[MAX_QPATH];
+		int	 filepos, filelen;
+	} packfile_t;
+
+	typedef struct pack_s
+	{
+		char		filename[MAX_OSPATH];
+		int			handle;
+		int			numfiles;
+		packfile_t* files;
+	} pack_t;
+
+	typedef struct searchpath_s
+	{
+		unsigned int		 path_id; // identifier assigned to the game directory
+		// Note that <install_dir>/game1 and
+		// <userdir>/game1 have the same id.
+		char				 filename[MAX_OSPATH];
+		pack_t* pack;			 // only one of filename / pack will be used
+		char				 dir[MAX_QPATH]; // directory name: "id1", "rogue", etc.
+		struct searchpath_s* next;
+	} searchpath_t;
 
 	sizebuf_t datagram;
 	byte	  datagram_buf[MAX_DATAGRAM];
@@ -1109,6 +1234,19 @@ extern keydest_t key_dest;
 jmp_buf host_abortserver;
 jmp_buf screen_error;
 
+typedef struct
+{
+	int			   channels;
+	int			   samples;			 /* mono samples in buffer			*/
+	int			   submission_chunk; /* don't mix less than this #			*/
+	int			   samplepos;		 /* in mono samples				*/
+	int			   samplebits;
+	int			   signed8; /* device opened for S8 format? (e.g. Amiga AHI) */
+	int			   speed;
+	unsigned char* buffer;
+} dma_t;
+
+volatile dma_t* shm = NULL;
 
 static const char errortxt1[] = "\nERROR-OUT BEGIN\n\n";
 static const char errortxt2[] = "\nTREMOR ERROR: ";
@@ -1117,6 +1255,8 @@ void ErrorDialog(const char* errorMsg)
 {
 	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Tremor Error", errorMsg, NULL);
 }
+
+static cvar_t nosound = { "nosound", "0", CVAR_NONE };
 
 
 class Engine {
@@ -1690,6 +1830,149 @@ public:
 				std::cout << ("Unsupported endianism. Only little endian is supported") << std::endl;
 		}
 
+		int OpenFile(const char* filename, int* handle, unsigned int* path_id)
+		{
+			return FindFile(filename, handle, NULL, path_id);
+		}
+		static int FindFile(const char* filename, int* handle, FILE** file, unsigned int* path_id)
+		{
+			searchpath_t* search;
+			char		  netpath[MAX_OSPATH];
+			pack_t* pak;
+			int			  i;
+			bool	  is_config = !qk->strcasecmp(filename, "config.cfg"), found = false;
+
+			if (file && handle)
+				sys->Error("COM_FindFile: both handle and file set");
+
+			file_from_pak = 0;
+
+			//
+			// search through the path, one element at a time
+			//
+			for (search = com_searchpaths; search; search = search->next)
+			{
+				if (search->pack) /* look through all the pak file elements */
+				{
+					pak = search->pack;
+					for (i = 0; i < pak->numfiles; i++)
+					{
+						if (strcmp(pak->files[i].name, filename) != 0)
+							continue;
+						// found it!
+						com_filesize = pak->files[i].filelen;
+						file_from_pak = 1;
+						if (path_id)
+							*path_id = search->path_id;
+						if (handle)
+						{
+							*handle = pak->handle;
+							Sys_FileSeek(pak->handle, pak->files[i].filepos);
+							return com_filesize;
+						}
+						else if (file)
+						{ /* open a new file on the pakfile */
+							*file = fopen(pak->filename, "rb");
+							if (*file)
+								fseek(*file, pak->files[i].filepos, SEEK_SET);
+							return com_filesize;
+						}
+						else /* for COM_FileExists() */
+						{
+							return com_filesize;
+						}
+					}
+				}
+				else /* check a file in the directory tree */
+				{
+					if (!registered.value)
+					{ /* if not a registered version, don't ever go beyond base */
+						if (strchr(filename, '/') || strchr(filename, '\\'))
+							continue;
+					}
+
+					if (is_config)
+					{
+						q_snprintf(netpath, sizeof(netpath), "%s/" CONFIG_NAME, search->filename);
+						if (Sys_FileType(netpath) & FS_ENT_FILE)
+							found = true;
+					}
+
+					if (!found)
+					{
+						q_snprintf(netpath, sizeof(netpath), "%s/%s", search->filename, filename);
+						if (!(Sys_FileType(netpath) & FS_ENT_FILE))
+							continue;
+					}
+
+					if (path_id)
+						*path_id = search->path_id;
+					if (handle)
+					{
+						com_filesize = Sys_FileOpenRead(netpath, &i);
+						*handle = i;
+						return com_filesize;
+					}
+					else if (file)
+					{
+						*file = fopen(netpath, "rb");
+						com_filesize = (*file == NULL) ? -1 : COM_filelength(*file);
+						return com_filesize;
+					}
+					else
+					{
+						return 0; /* dummy valid value for COM_FileExists() */
+					}
+				}
+			}
+
+			if (strcmp(COM_FileGetExtension(filename), "pcx") != 0 && strcmp(COM_FileGetExtension(filename), "tga") != 0 &&
+				strcmp(COM_FileGetExtension(filename), "lit") != 0 && strcmp(COM_FileGetExtension(filename), "vis") != 0 &&
+				strcmp(COM_FileGetExtension(filename), "ent") != 0)
+				Con_DPrintf("FindFile: can't find %s\n", filename);
+			else
+				Con_DPrintf2("FindFile: can't find %s\n", filename);
+
+			if (handle)
+				*handle = -1;
+			if (file)
+				*file = NULL;
+			com_filesize = -1;
+			return com_filesize;
+		}
+
+
+		byte* LoadFile(const char* path, unsigned int* path_id)
+		{
+			int	  h;
+			byte* buf;
+			char  base[32];
+			int	  len;
+
+			buf = NULL; // quiet compiler warning
+
+			// look for it in the filesystem or pack files
+			len = OpenFile(path, &h, path_id);
+			if (h == -1)
+				return NULL;
+
+			// extract the filename base name for hunk tag
+			COM_FileBase(path, base, sizeof(base));
+
+			buf = (byte*)Mem_AllocNonZero(len + 1);
+
+			if (!buf)
+				Sys_Error("COM_LoadFile: not enough space for %s", path);
+
+			((byte*)buf)[len] = 0;
+
+			Sys_FileRead(h, buf, len);
+			COM_CloseFile(h);
+
+			return buf;
+		}
+
+
 		void InitArgv(int c, char** v)
 		{
 			int i, j, n;
@@ -1879,7 +2162,7 @@ public:
 				key->EndChat(); // don't get stuck in chat mode
 
 			// stop sounds (especially looping!)
-			S_StopAllSounds(true, false);
+			engine->s->StopAllSounds(true, false);
 			BGM_Stop();
 			CDAudio_Stop();
 
@@ -3311,11 +3594,94 @@ public:
 	public:
 		Engine* engine;
 		bool initialized;
+		bool started;
 		SDL_mutex* mutex;
+
+		int paintedtime;
+
+		channel_t channels[MAX_CHANNELS];
+		int		  total_channels;
 
 		S(Engine e) {
 			engine = &e;
 		}
+		sfxcache_t* LoadSound(sfx_t* s)
+		{
+			char		namebuffer[256];
+			byte* data = NULL;
+			wavinfo_t	info;
+			int			len;
+			float		stepscale;
+			sfxcache_t* sc = NULL;
+
+			SDL_LockMutex(mutex);
+
+			// see if still in memory
+			if (s->cache)
+			{
+				sc = s->cache;
+				goto unlock_mutex;
+			}
+
+			//	Con_Printf ("S_LoadSound: %x\n", (int)stackbuf);
+
+			// load it in
+			qk->strlcpy(namebuffer, "sound/", sizeof(namebuffer));
+			qk->strlcat(namebuffer, s->name, sizeof(namebuffer));
+
+			//	Con_Printf ("loading %s\n",namebuffer);
+
+			data = com->LoadFile(namebuffer, NULL);
+
+			if (!data)
+			{
+				con->Printf("Couldn't load %s\n", namebuffer);
+				goto unlock_mutex;
+			}
+
+			info = GetWavinfo(s->name, data, com_filesize);
+			if (info.channels != 1)
+			{
+				con->Printf("%s is a stereo sample\n", s->name);
+				goto unlock_mutex;
+			}
+
+			if (info.width != 1 && info.width != 2)
+			{
+				con->Printf("%s is not 8 or 16 bit\n", s->name);
+				goto unlock_mutex;
+			}
+
+			stepscale = (float)info.rate / shm->speed;
+			len = info.samples / stepscale;
+
+			len = len * info.width * info.channels;
+
+			if (info.samples == 0 || len == 0)
+			{
+				con->Printf("%s has zero samples\n", s->name);
+				goto unlock_mutex;
+			}
+
+			sc = (sfxcache_t*)mem->Alloc(len + sizeof(sfxcache_t));
+			if (!sc)
+				goto unlock_mutex;
+			sc->length = info.samples;
+			sc->loopstart = info.loopstart;
+			sc->speed = info.rate;
+			sc->width = info.width;
+			sc->stereo = info.channels;
+
+			s->cache = sc;
+			ResampleSfx(s, sc->speed, sc->width, data + info.dataofs);
+
+		unlock_mutex:
+			mem->Free(data);
+			SDL_UnlockMutex(mutex);
+			return sc;
+		}
+
+
 		void StopAllSounds(bool clear, bool keep_statics)
 		{
 			int i;
@@ -3324,7 +3690,7 @@ public:
 				return;
 
 			SDL_LockMutex(mutex);
-			if (!sound_started)
+			if (!started)
 				goto unlock_mutex;
 
 			if (!keep_statics)
@@ -3332,7 +3698,7 @@ public:
 
 			for (i = 0; i < MAX_CHANNELS; i++)
 			{
-				if (!keep_statics || snd_channels[i].entnum || !snd_channels[i].sfx || !S_LoadSound(snd_channels[i].sfx) ||
+				if (!keep_statics || channels[i].entnum || !channels[i].sfx || !S_LoadSound(snd_channels[i].sfx) ||
 					S_LoadSound(snd_channels[i].sfx)->loopstart == -1)
 					memset(&snd_channels[i], 0, sizeof(channel_t));
 				else
@@ -3343,10 +3709,154 @@ public:
 			}
 
 			if (clear)
-				S_ClearBuffer();
+				ClearBuffer();
 
 		unlock_mutex:
-			SDL_UnlockMutex(snd_mutex);
+			SDL_UnlockMutex(mutex);
+		}
+
+		channel_t* PickChannel(int entnum, int entchannel)
+		{
+			int ch_idx;
+			int first_to_die;
+			int life_left;
+
+			// Check for replacement sound, or find the best one to replace
+			first_to_die = -1;
+			life_left = 0x7fffffff;
+			for (ch_idx = NUM_AMBIENTS; ch_idx < NUM_AMBIENTS + MAX_DYNAMIC_CHANNELS; ch_idx++)
+			{
+				if (entchannel != 0 // channel 0 never overrides
+					&& channels[ch_idx].entnum == entnum && (channels[ch_idx].entchannel == entchannel || entchannel == -1))
+				{ // always override sound from same entity
+					first_to_die = ch_idx;
+					break;
+				}
+
+				// don't let monster sounds override player sounds
+				if (channels[ch_idx].entnum == cl->state.viewentity && entnum != cl->state.viewentity && channels[ch_idx].sfx)
+					continue;
+
+				if (channels[ch_idx].end - paintedtime < life_left)
+				{
+					life_left = channels[ch_idx].end - paintedtime;
+					first_to_die = ch_idx;
+				}
+			}
+
+			if (first_to_die == -1)
+				return NULL;
+
+			if (channels[first_to_die].sfx)
+				channels[first_to_die].sfx = NULL;
+
+			return &channels[first_to_die];
+		}
+
+
+
+		void StartSound(int entnum, int entchannel, sfx_t* sfx, vec3_t origin, float fvol, float attenuation)
+		{
+			channel_t* target_chan, * check;
+			sfxcache_t* sc;
+			int			ch_idx;
+			int			skip;
+
+			SDL_LockMutex(mutex);
+			if (!started || !sfx || nosound.value)
+				goto unlock_mutex;
+
+			// pick a channel to play on
+			target_chan = PickChannel(entnum, entchannel);
+			if (!target_chan)
+				goto unlock_mutex;
+
+			// spatialize
+			memset(target_chan, 0, sizeof(*target_chan));
+			VectorCopy(origin, target_chan->origin);
+			target_chan->dist_mult = attenuation / sound_nominal_clip_dist;
+			target_chan->master_vol = (int)(fvol * 255);
+			target_chan->entnum = entnum;
+			target_chan->entchannel = entchannel;
+			SND_Spatialize(target_chan);
+
+			if (!target_chan->leftvol && !target_chan->rightvol)
+				goto unlock_mutex;
+
+			// new channel
+			sc = S_LoadSound(sfx);
+			if (!sc)
+			{
+				target_chan->sfx = NULL;
+				goto unlock_mutex; // couldn't load the sound's data
+			}
+
+			target_chan->sfx = sfx;
+			target_chan->pos = 0.0;
+			target_chan->end = paintedtime + sc->length;
+
+			// if an identical sound has also been started this frame, offset the pos
+			// a bit to keep it from just making the first one louder
+			check = &channels[NUM_AMBIENTS];
+			for (ch_idx = NUM_AMBIENTS; ch_idx < NUM_AMBIENTS + MAX_DYNAMIC_CHANNELS; ch_idx++, check++)
+			{
+				if (check == target_chan)
+					continue;
+				if (check->sfx == sfx && !check->pos)
+				{
+					/*
+					skip = COM_Rand () % (int)(0.1 * shm->speed);
+					if (skip >= target_chan->end)
+						skip = target_chan->end - 1;
+					*/
+					/* LordHavoc: fixed skip calculations */
+					skip = 0.1 * shm->speed; /* 0.1 * sc->speed */
+					if (skip > sc->length)
+						skip = sc->length;
+					if (skip > 0)
+						skip = COM_Rand() % skip;
+					target_chan->pos += skip;
+					target_chan->end -= skip;
+					break;
+				}
+			}
+
+		unlock_mutex:
+			SDL_UnlockMutex(mutex);
+		}
+
+
+		void ClearBuffer(void)
+		{
+			int clear;
+
+			SDL_LockMutex(mutex);
+
+			if (!started || !shm)
+				goto unlock_mutex;
+
+			SNDDMA_LockBuffer();
+			if (!shm->buffer)
+				goto unlock_mutex;
+
+			s_rawend = 0;
+
+			if (shm->samplebits == 8 && !shm->signed8)
+				clear = 0x80;
+			else
+				clear = 0;
+
+			memset(shm->buffer, clear, shm->samples * shm->samplebits / 8);
+
+			SNDDMA_Submit();
+
+		unlock_mutex:
+			SDL_UnlockMutex(mutex);
+		}
+
+		void SNDDMA_LockBuffer(void)
+		{
+			SDL_LockAudio();
 		}
 	};
 	class MSG {
@@ -3737,6 +4247,7 @@ public:
 	static SV* sv;
 	static Key* key;
 	static Net* net;
+	static S* s;
 
 	Engine(int argc, char* argv[]) {
 		
@@ -3766,6 +4277,7 @@ public:
 		sv = new SV(*this);
 		key = new Key(*this);
 		net = new Net(*this);
+		s = new S(*this);
 	}
 };
 
