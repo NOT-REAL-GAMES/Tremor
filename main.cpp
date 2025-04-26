@@ -46,10 +46,10 @@
 #include <io.h>
 #include <direct.h>
 
-
-
 #include <iostream>
 #include <cstring>
+
+#define LERP_BANDAID
 
 #define SDL_MAIN_HANDLED
 #define NO_SDL_VULKAN_TYPEDEFS
@@ -57,9 +57,9 @@
 #define QS_STRINGIFY_(x) #x
 #define QS_STRINGIFY(x)	 QS_STRINGIFY_ (x)
 
-#define VKQUAKE_VERSION 0.0
-#define VKQUAKE_VER_PATCH 1
-#define VKQUAKE_VER_SUFFIX "-dev"
+#define TREMOR_VERSION 0.0
+#define TREMOR_VER_PATCH 1
+#define TREMOR_VER_SUFFIX "-dev"
 
 #define COMMA ,
 #define NO_COMMA
@@ -68,7 +68,25 @@
 #define MAX_DEMOS	  8
 #define MAX_DEMONAME  16
 
-#define TREMOR_VER_STRING	  QS_STRINGIFY (VKQUAKE_VERSION) "." QS_STRINGIFY (VKQUAKE_VER_PATCH) VKQUAKE_VER_SUFFIX
+#define MAX_NUM_ARGVS 50
+#define CMDLINE_LENGTH 256
+
+#define MAX_ARGS 80
+#define MAX_PARMS 8 
+
+#define MAX_AREA_DEPTH	   9
+#define AREA_NODES		   (2 << MAX_AREA_DEPTH)
+
+#define MIN_EDICTS 256
+#define MAX_EDICTS 32000
+
+#define MAX_LIGHTSTYLES	  64
+#define MAX_MODELS		  8192 // johnfitz -- was 256
+#define MAX_SOUNDS		  2048 // johnfitz -- was 256
+#define MAX_PARTICLETYPES 2048
+
+
+#define TREMOR_VER_STRING	  QS_STRINGIFY (TREMOR_VERSION) "." QS_STRINGIFY (TREMOR_VER_PATCH) TREMOR_VER_SUFFIX
 
 
 #define ANNOTATE_HAPPENS_BEFORE(x) \
@@ -84,6 +102,7 @@
 	{                                         \
 	} while (false)
 
+#define Q_ALIGN(a) __declspec (align (a))
 
 #define ENGINE_NAME_AND_VER \
 	"Tremor"               \
@@ -104,11 +123,60 @@
 
 #define THREAD_LOCAL  __declspec (thread)
 
+#define VID_CBITS  6
+#define VID_GRADES (1 << VID_CBITS)
+
 #define SIGNONS 4
 
+#define NUM_CSHIFTS		4
+
 #define MAXPRINTMSG 4096
+#define MAX_OSPATH 1024
+
+#define MAX_ALIAS_NAME 32
+
+#define MAX_MSGLEN	 64000
+#define MAX_DATAGRAM 64000
+
+#define DATAGRAM_MTU 1400
+
+#define MAXCMDLINE	256
+
+#define NET_MAXMESSAGE 64000 
+#define NET_LOOPBACKBUFFERS	   5
+#define NET_LOOPBACKHEADERSIZE 4
+
+#define NET_NAMELEN 64
+
+#define NUM_PING_TIMES		  16
+#define NUM_BASIC_SPAWN_PARMS 16
+#define NUM_TOTAL_SPAWN_PARMS 64
+
+#define MAX_SCOREBOARD	   16
+#define MAX_SCOREBOARDNAME 32
+
+#define DEF_SAVEGLOBAL (1 << 15)
+
+#define QCEXTFUNC(n, t) func_t n;
+
+#define VA_NUM_BUFFS 4
+#if (MAX_OSPATH >= 1024)
+#define VA_BUFFERLEN MAX_OSPATH
+#else
+#define VA_BUFFERLEN 1024
+#endif
+
+#define countof(x) (sizeof (x) / sizeof ((x)[0]))
 
 static char	   cvar_null_string[] = "";
+static char	 argvdummy[] = " ";
+
+THREAD_LOCAL char com_token[1024];
+typedef enum
+{
+	CPE_NOTRUNC,	// return parse error in case of overflow
+	CPE_ALLOWTRUNC, // truncate com_token in case of overflow
+} cpe_mode;
 
 static char logfilename[MAX_OSPATH]; // current logfile name
 static int	log_fd = -1;			 // log file descriptor
@@ -116,6 +184,18 @@ static int	log_fd = -1;			 // log file descriptor
 typedef uint64_t task_handle_t;
 typedef void (*task_func_t) (void*);
 typedef void (*task_indexed_func_t) (int, void*);
+
+typedef enum
+{
+	src_client,	 // came in over a net connection as a clc_stringcmd. host_client will be valid during this state.
+	src_command, // from the command buffer
+	src_server	 // from a svc_stufftext
+} cmd_source_t;
+
+inline cvarflags_t& operator |= (cvarflags_t& lhs, cvarflags_t rhs) {
+	lhs = static_cast<cvarflags_t>(static_cast<int>(lhs) | static_cast<int>(rhs));
+	return lhs;
+}
 
 static void* Clamp(void* number, void* min, void* max)
 {
@@ -136,6 +216,17 @@ static void* Max(void* a, void* b)
 {
 	return (*(int*)a > *(int*)b) ? a : b;
 }
+
+typedef unsigned int func_t;
+typedef int			 string_t;
+
+typedef struct
+{
+	unsigned short type; // if DEF_SAVEGLOBAL bit is set
+	// the variable needs to be saved in savegames
+	unsigned short ofs;
+	int			   s_name;
+} ddef_t;
 
 typedef struct sizebuf_s
 {
@@ -186,6 +277,206 @@ typedef struct
 	uint32_t		limit;
 } task_counter_t;
 
+typedef struct {} globalvars_t;
+
+typedef struct
+{
+	int version;
+	int crc; // check of header file
+
+	int ofs_statements;
+	int numstatements; // statement 0 is an error
+
+	int ofs_globaldefs;
+	int numglobaldefs;
+
+	int ofs_fielddefs;
+	int numfielddefs;
+
+	int ofs_functions;
+	int numfunctions; // function 0 is an empty
+
+	int ofs_strings;
+	int numstrings; // first string is a null string
+
+	int ofs_globals;
+	int numglobals;
+
+	int entityfields;
+} dprograms_t;
+typedef struct
+{
+	int first_statement; // negative numbers are builtins
+	int parm_start;
+	int locals; // total ints of parms + locals
+
+	int profile; // runtime
+
+	int s_name;
+	int s_file; // source file defined in
+
+	int	 numparms;
+	byte parm_size[MAX_PARMS];
+} dfunction_t;
+
+typedef void (*builtin_t) (void);
+
+typedef struct hash_map_s
+{
+	uint32_t num_entries;
+	uint32_t hash_size;
+	uint32_t key_value_storage_size;
+	uint32_t key_size;
+	uint32_t value_size;
+	uint32_t(*hasher) (const void* const);
+	bool (*comp) (const void* const, const void* const);
+	uint32_t* hash_to_index;
+	uint32_t* index_chain;
+	void* keys;
+	void* values;
+} hash_map_t;
+
+typedef struct statement_s
+{
+	unsigned short op;
+	short		   a, b, c;
+} dstatement_t;
+
+typedef struct hash_map_s hash_map_t;
+
+typedef struct
+{
+	int			 s;
+	dfunction_t* f;
+} prstack_t;
+
+typedef struct areanode_s
+{
+	int				   axis; // -1 = leaf node
+	float			   dist;
+	struct areanode_s* children[2];
+	link_t			   trigger_edicts;
+	link_t			   solid_edicts;
+} areanode_t;
+
+// the free-list of edicts, as a FIFO made of a circular buffer.
+typedef struct freelist_s
+{
+	size_t	 size;		 // current nb of edicts
+	size_t	 head_index; // index of the first valid element (head of FIFO)
+	edict_t* circular_buffer[MAX_EDICTS];
+} freelist_t;
+
+typedef enum
+{
+	key_game,
+	key_console,
+	key_message,
+	key_menu
+} keydest_t;
+
+struct qcvm_s
+{
+	dprograms_t* progs;
+	dfunction_t* functions;
+	hash_map_t* function_map;
+	dstatement_t* statements;
+	float* globals;	 /* same as pr_global_struct */
+	ddef_t* fielddefs; // yay reflection.
+	hash_map_t* fielddefs_map;
+
+	int edict_size; /* in bytes */
+
+	builtin_t builtins[1024];
+	int		  numbuiltins;
+
+	int argc;
+
+	bool	 trace;
+	dfunction_t* xfunction;
+	int			 xstatement;
+
+	unsigned short progscrc;  // crc16 of the entire file
+	unsigned int   progshash; // folded file md4
+	unsigned int   progssize; // file size (bytes)
+
+	struct pr_extglobals_s {} extglobals;
+	struct pr_extfuncs_s
+	{
+		/*all vms*/
+#define QCEXTFUNCS_COMMON                                                                                      \
+	QCEXTFUNC (GameCommand, "void(string cmdtext)") /*obsoleted by m_consolecommand, included for dp compat.*/ \
+/*csqc+ssqc*/
+#define QCEXTFUNCS_GAME            \
+	QCEXTFUNC (EndFrame, "void()") \
+/*ssqc*/
+#define QCEXTFUNCS_SV                                     \
+	QCEXTFUNC (SV_ParseClientCommand, "void(string cmd)") \
+	QCEXTFUNC (SV_RunClientCommand, "void()")             \
+/*csqc*/
+#define QCEXTFUNCS_CS                                                                                                                     \
+	QCEXTFUNC (CSQC_Init, "void(float apilevel, string enginename, float engineversion)")                                                 \
+	QCEXTFUNC (CSQC_Shutdown, "void()")                                                                                                   \
+	QCEXTFUNC (CSQC_DrawHud, "void(vector virtsize, float showscores)")	   /*simple: for the simple(+limited) hud-only csqc interface.*/  \
+	QCEXTFUNC (CSQC_DrawScores, "void(vector virtsize, float showscores)") /*simple: (optional) for the simple hud-only csqc interface.*/ \
+	QCEXTFUNC (CSQC_InputEvent, "float(float evtype, float scanx, float chary, float devid)")                                             \
+	QCEXTFUNC (CSQC_ConsoleCommand, "float(string cmdstr)")                                                                               \
+	QCEXTFUNC (CSQC_Parse_Event, "void()")                                                                                                \
+	QCEXTFUNC (CSQC_Parse_Damage, "float(float save, float take, vector dir)")                                                            \
+	QCEXTFUNC (CSQC_Parse_CenterPrint, "float(string msg)")                                                                               \
+	QCEXTFUNC (CSQC_Parse_Print, "void(string printmsg, float printlvl)")
+
+#define QCEXTFUNC(n, t) func_t n;
+		QCEXTFUNCS_COMMON
+			QCEXTFUNCS_GAME
+			QCEXTFUNCS_SV
+			QCEXTFUNCS_CS
+#undef QCEXTFUNC
+	} extfuncs;
+	struct pr_extfields_s {} extfields;
+
+	// was static inside pr_edict
+	char* strings;
+	int			 stringssize;
+	const char** knownstrings;
+	bool* knownstringsowned;
+	int			 maxknownstrings;
+	int			 numknownstrings;
+	int			 progsstrings; // allocated by PR_MergeEngineFieldDefs (), not tied to edicts
+	int			 freeknownstrings;
+	ddef_t* globaldefs;
+	hash_map_t* globaldefs_map;
+
+	unsigned char* knownzone;
+	size_t		   knownzonesize;
+
+	// originally defined in pr_exec, but moved into the switchable qcvm struct
+#define MAX_STACK_DEPTH 1024 /*was 64*/ /* was 32 */
+	prstack_t stack[MAX_STACK_DEPTH];
+	int		  depth;
+
+#define LOCALSTACK_SIZE 16384 /* was 2048*/
+	int localstack[LOCALSTACK_SIZE];
+	int localstack_used;
+
+	// originally part of the sv_state_t struct
+	// FIXME: put worldmodel in here too.
+	double			 time;
+	int				 num_edicts;
+	int				 reserved_edicts;
+	int				 max_edicts;
+	edict_t* edicts; // can NOT be array indexed, because edict_t is variable sized, but can be used to reference the world ent
+	freelist_t		 free_list;
+	struct qmodel_s* worldmodel;
+	struct qmodel_s* (*GetModel) (int modelindex); // returns the model for the given index, or null.
+
+	// originally from world.c
+	areanode_t areanodes[AREA_NODES];
+	int		   numareanodes;
+};
+
+typedef struct qcvm_s qcvm_t;
+
 static int					 num_workers = 0;
 static SDL_Thread** worker_threads;
 static task_t				 tasks[MAX_PENDING_TASKS];
@@ -200,6 +491,12 @@ static THREAD_LOCAL int		 tl_worker_index;
 typedef unsigned char byte;
 typedef int64_t qfileofs_t;
 
+typedef struct cmdalias_s
+{
+	struct cmdalias_s* next;
+	char			   name[MAX_ALIAS_NAME];
+	char* value;
+} cmdalias_t;
 
 typedef enum
 {
@@ -207,6 +504,25 @@ typedef enum
 	ca_disconnected, // full screen console with no connection
 	ca_connected	 // valid netcon, talking to a server
 } cactive_t;
+
+typedef enum
+{
+	ev_bad = -1,
+	ev_void = 0,
+	ev_string,
+	ev_float,
+	ev_vector,
+	ev_entity,
+	ev_field,
+	ev_function,
+	ev_pointer,
+
+	ev_ext_integer,
+	ev_ext_uint32,
+	ev_ext_sint64,
+	ev_ext_uint64,
+	ev_ext_double,
+} etype_t;
 
 typedef struct
 {
@@ -264,6 +580,12 @@ static double counter_freq;
 
 size_t max_thread_stack_alloc_size = 0;
 
+typedef enum
+{
+	ss_loading,
+	ss_active
+} server_state_t;
+
 typedef struct
 {
 	const char* basedir;
@@ -275,6 +597,212 @@ typedef struct
 	char** argv;
 	int			errstate;
 } parms_t;
+
+typedef struct
+{
+	char  name[MAX_SCOREBOARDNAME];
+	float entertime;
+	int	  frags;
+	int	  colors; // two 4 bit fields
+	int	  ping;
+	byte  translations[VID_GRADES * 256];
+
+	char userinfo[8192];
+} scoreboard_t;
+
+typedef struct
+{
+	float  servertime;
+	float  seconds; // servertime-previous->servertime
+	vec3_t viewangles;
+
+	// intended velocities
+	float forwardmove;
+	float sidemove;
+	float upmove;
+
+	// used by client for mouse-based movements that should accumulate over multiple client frames
+	float forwardmove_accumulator;
+	float sidemove_accumulator;
+	float upmove_accumulator;
+
+	unsigned int buttons;
+	unsigned int impulse;
+
+	unsigned int sequence;
+
+	int weapon;
+} usercmd_t;
+
+typedef struct link_s
+{
+	struct link_s* prev, * next;
+} link_t;
+
+typedef struct entity_state_s
+{
+	vec3_t		   origin;
+	vec3_t		   angles;
+	unsigned short modelindex; // johnfitz -- was int
+	unsigned short frame;	   // johnfitz -- was int
+	unsigned int   effects;
+	unsigned char  colormap;	   // johnfitz -- was int
+	unsigned char  skin;		   // johnfitz -- was int
+	unsigned char  scale;		   // spike -- *16
+	unsigned char  pmovetype;	   // spike
+	unsigned short traileffectnum; // spike -- for qc-defined particle trails. typically evilly used for things that are not trails.
+	unsigned short emiteffectnum;  // spike -- for qc-defined particle trails. typically evilly used for things that are not trails.
+	short		   velocity[3];	   // spike -- the player's velocity.
+	unsigned char  eflags;
+	unsigned char  tagindex;
+	unsigned short tagentity;
+	unsigned short pad;
+	unsigned char  colormod[3]; // spike -- entity tints, *32
+	unsigned char  alpha;		// johnfitz -- added
+	unsigned int   solidsize;	// for csqc prediction logic.
+#define ES_SOLID_NOT   0
+#define ES_SOLID_BSP   31
+#define ES_SOLID_HULL1 0x80201810
+#define ES_SOLID_HULL2 0x80401820
+#ifdef LERP_BANDAID
+	unsigned short lerp;
+#endif
+} entity_state_t;
+
+typedef struct {} entvars_t;
+
+typedef Q_ALIGN(4) int64_t qcsint64_t;
+typedef Q_ALIGN(4) uint64_t qcuint64_t;
+typedef Q_ALIGN(4) double qcdouble_t;
+
+typedef struct edict_s
+{
+	link_t area; /* linked to a division node or leaf */
+
+	unsigned int num_leafs;
+	int			 leafnums[128];
+
+	entity_state_t baseline;
+	unsigned char  alpha;		 /* johnfitz -- hack to support alpha since it's not part of entvars_t */
+	bool	   sendinterval; /* johnfitz -- send time until nextthink to client for better lerp timing */
+	float		   oldframe;
+	float		   oldthinktime;
+	vec3_t		   predthinkpos; /* expected edict origin once its nextthink arrives (sv_smoothplatformlerps) */
+	float		   lastthink;	 /* time when predthinkpos was updated, or 0 if not valid (sv_smoothplatformlerps) */
+
+	float	 freetime; /* sv.time when the object was freed */
+	bool free;
+
+	entvars_t v; /* C exported fields from progs */
+
+	/* other fields from progs come immediately after */
+} edict_t;
+
+typedef enum {
+	MAX_CL_STATS = 256,
+};
+
+typedef struct client_s
+{
+	bool active;   // false = client is free
+	bool spawned;  // false = don't send datagrams (set when client acked the first entities)
+	bool dropasap; // has been told to go to another level
+	enum
+	{
+		PRESPAWN_DONE,
+		PRESPAWN_FLUSH = 1,
+		//		PRESPAWN_SERVERINFO,
+		PRESPAWN_MODELS,
+		PRESPAWN_SOUNDS,
+		PRESPAWN_PARTICLES,
+		PRESPAWN_BASELINES,
+		PRESPAWN_STATICS,
+		PRESPAWN_AMBIENTS,
+		PRESPAWN_SIGNONMSG,
+	} sendsignon; // only valid before spawned
+	int			 signonidx;
+	unsigned int signon_sounds; //
+	unsigned int signon_models; //
+
+	double last_message; // reliable messages must be sent
+	// periodically
+
+	struct qsocket_s* netconnection; // communications handle
+
+	usercmd_t cmd;	   // movement
+	vec3_t	  wishdir; // intended motion calced from cmd
+
+	sizebuf_t message; // can be added to at any time,
+	// copied and clear once per frame
+	byte	  msgbuf[MAX_MSGLEN];
+	edict_t* edict;	// EDICT_NUM(clientnum+1)
+	char	  name[32]; // for printing to other people
+	int		  colors;
+
+	float ping_times[NUM_PING_TIMES];
+	int	  num_pings; // ping_times[num_pings%NUM_PING_TIMES]
+
+	// spawn parms are carried from level to level
+	float spawn_parms[NUM_TOTAL_SPAWN_PARMS];
+
+	// client known data for deltas
+	int old_frags;
+
+	sizebuf_t datagram;
+	byte	  datagram_buf[MAX_DATAGRAM];
+
+	unsigned int limit_entities;   // vanilla is 600
+	unsigned int limit_unreliable; // max allowed size for unreliables
+	unsigned int limit_reliable;   // max (total) size of a reliable message.
+	unsigned int limit_models;	   //
+	unsigned int limit_sounds;	   //
+	bool	 pextknown;
+	unsigned int protocol_pext1;
+	unsigned int protocol_pext2;
+	unsigned int resendstatsnum[MAX_CL_STATS / 32]; // the stats which need to be resent.
+	unsigned int resendstatsstr[MAX_CL_STATS / 32]; // the stats which need to be resent.
+	int			 oldstats_i[MAX_CL_STATS];			// previous values of stats. if these differ from the current values, reflag resendstats.
+	float		 oldstats_f[MAX_CL_STATS];			// previous values of stats. if these differ from the current values, reflag resendstats.
+	char* oldstats_s[MAX_CL_STATS];
+	struct entity_num_state_s
+	{
+		unsigned int   num; // ascending order, there can be gaps.
+		entity_state_t state;
+	}			 *previousentities;
+	size_t		  numpreviousentities;
+	size_t		  maxpreviousentities;
+	unsigned int  snapshotresume;
+	unsigned int* pendingentities_bits; // UF_ flags for each entity
+	size_t		  numpendingentities;	// realloc if too small
+#define SENDFLAG_PRESENT 0x80000000u	// tracks that we previously sent one of these ents (resulting in a remove if the ent gets remove()d).
+#define SENDFLAG_REMOVE	 0x40000000u	// for packetloss to signal that we need to resend a remove.
+#define SENDFLAG_USABLE	 0x00ffffffu	// SendFlags bits that the qc is actually able to use (don't get confused if the mod uses SendFlags=-1).
+	struct deltaframe_s
+	{ // quick overview of how this stuff actually works:
+		// when the server notices a gap in the ack sequence, we walk through the dropped frames and reflag everything that was dropped.
+		// if the server isn't tracking enough frames, then we just treat those as dropped;
+		// small note: when an entity is new, it re-flags itself as new for the next packet too, this reduces the immediate impact of packetloss on new
+		// entities. reflagged state includes stats updates, entity updates, and entity removes.
+		int			 sequence; // to see if its stale
+		float		 timestamp;
+		unsigned int resendstatsnum[MAX_CL_STATS / 32];
+		unsigned int resendstatsstr[MAX_CL_STATS / 32];
+		struct
+		{
+			unsigned int num;
+			unsigned int ebits;
+			unsigned int csqcbits;
+		}  *ents;
+		int numents; // doesn't contain an entry for every entity, just ones that were sent this frame. no 0 bits
+		int maxents;
+	}		*frames;
+	size_t	 numframes; // preallocated power-of-two
+	int		 lastacksequence;
+	int		 lastmovemessage;
+	double	 lastmovetime;
+	bool knowntoqc; // putclientinserver was called
+} client_t;
+
 
 typedef enum
 {
@@ -295,6 +823,272 @@ typedef enum
 
 typedef void (*cvarcallback_t) (struct cvar_s*);
 
+typedef struct
+{
+	int	  destcolor[3];
+	float percent; // 0-256
+} cshift_t;
+
+typedef struct lightcache_s
+{
+	int	   surfidx; // < 0: black surface; == 0: no cache; > 0: 1+index of surface
+	vec3_t pos;
+	short  ds;
+	short  dt;
+} lightcache_t;
+
+typedef union eval_s
+{
+	string_t   string;
+	float	   _float;
+	float	   vector[3];
+	func_t	   function;
+	int32_t	   _int;
+	uint32_t   _uint32;
+	qcsint64_t _sint64;
+	qcuint64_t _uint64;
+	qcdouble_t _double;
+	int		   edict;
+} eval_t;
+
+typedef struct entity_s
+{
+	bool forcelink; // model changed
+
+	int update_type;
+
+	entity_state_t baseline; // to fill in defaults in updates
+	entity_state_t netstate; // the latest network state
+
+	double			 msgtime;		 // time of last update
+	vec3_t			 msg_origins[2]; // last two updates (0 is newest)
+	vec3_t			 origin;
+	vec3_t			 msg_angles[2]; // last two updates (0 is newest)
+	vec3_t			 angles;
+	struct qmodel_s* model; // NULL = no model
+	struct efrag_s* efrag; // linked list of efrags
+	int				 frame;
+	float			 syncbase; // for client-side animations
+	byte* colormap;
+	int				 effects;  // light, particles, etc
+	int				 skinnum;  // for Alias models
+	int				 visframe; // last frame this entity was
+	//  found in an active leaf
+
+	int dlightframe; // dynamic lighting
+	int dlightbits;
+
+	// FIXME: could turn these into a union
+	struct mnode_s* topnode; // for bmodels, first world node
+	//  that splits bmodel, or NULL if
+	//  not split
+
+	byte   eflags;		 // spike -- mostly a mirror of netstate, but handles tag inheritance (eww!)
+	byte   alpha;		 // johnfitz -- alpha
+	byte   lerpflags;	 // johnfitz -- lerping
+	float  lerpstart;	 // johnfitz -- animation lerping
+	float  lerptime;	 // johnfitz -- animation lerping
+	float  lerpfinish;	 // johnfitz -- lerping -- server sent us a more accurate interval, use it instead of 0.1
+	short  previouspose; // johnfitz -- animation lerping
+	short  currentpose;	 // johnfitz -- animation lerping
+	//	short					futurepose;		//johnfitz -- animation lerping
+	float  movelerpstart;  // johnfitz -- transform lerping
+	vec3_t previousorigin; // johnfitz -- transform lerping
+	vec3_t currentorigin;  // johnfitz -- transform lerping
+	vec3_t previousangles; // johnfitz -- transform lerping
+	vec3_t currentangles;  // johnfitz -- transform lerping
+
+	float scale; // rbQuake -- scale factor for model
+
+#ifdef PSET_SCRIPT
+	struct trailstate_s* trailstate; // spike -- managed by the particle system, so we don't loose our position and spawn the wrong number of particles, and we
+	// can track beams etc
+	struct trailstate_s* emitstate;	 // spike -- for effects which are not so static.
+#endif
+	float  traildelay; // time left until next particle trail update
+	vec3_t trailorg;   // previous particle trail point
+
+	lightcache_t lightcache; // alias light trace cache
+
+	int	   contentscache;
+	vec3_t contentscache_origin;
+} entity_t;
+
+typedef SOCKET sys_socket_t;
+
+typedef struct qsocket_s
+{
+	struct qsocket_s* next;
+	double			  connecttime;
+	double			  lastMessageTime;
+	double			  lastSendTime;
+
+	bool isvirtual; // qsocket is emulated by the network layer (closing will not close any system sockets).
+	bool disconnected;
+	bool canSend;
+	bool sendNext;
+
+	int			 driver;
+	int			 landriver;
+	sys_socket_t socket;
+	void* driverdata;
+
+	unsigned int ackSequence;
+	unsigned int sendSequence;
+	unsigned int unreliableSendSequence;
+	int			 sendMessageLength;
+	byte		 sendMessage[NET_MAXMESSAGE];
+
+	unsigned int receiveSequence;
+	unsigned int unreliableReceiveSequence;
+	int			 receiveMessageLength;
+	byte		 receiveMessage[NET_MAXMESSAGE * NET_LOOPBACKBUFFERS + NET_LOOPBACKHEADERSIZE];
+
+	struct qsockaddr {
+		short qsa_family;
+		unsigned char qsa_data[62];
+	} addr;
+	char			 trueaddress[NET_NAMELEN];	 // lazy address string
+	char			 maskedaddress[NET_NAMELEN]; // addresses for this player that may be displayed publically
+
+	bool proquake_angle_hack;  // 1 if we're trying, 2 if the server acked.
+	int		 max_datagram;		   // 32000 for local, 1442 for 666, 1024 for 15. this is for reliable fragments.
+	int		 pending_max_datagram; // don't change the mtu if we're resending, as that would confuse the peer.
+} qsocket_t;
+
+
+typedef struct
+{
+	int		  movemessages;		 // since connecting to this server
+	// throw out the first couple, so the player
+	// doesn't accidentally do something the
+	// first frame
+	int		  ackedmovemessages; // echo of movemessages from the server.
+	usercmd_t movecmds[64];		 // ringbuffer of previous movement commands (journal for prediction)
+#define MOVECMDS_MASK (countof (cl.movecmds) - 1)
+	usercmd_t pendingcmd; // accumulated state from mice+joysticks.
+
+	// information for local display
+	int	  stats[MAX_CL_STATS]; // health, etc
+	float statsf[MAX_CL_STATS];
+	char* statss[MAX_CL_STATS];
+	int	  items;			// inventory bit flags
+	float item_gettime[32]; // cl.time of aquiring item, for blinking
+	float faceanimtime;		// use anim frame if cl.time < this
+
+	float v_dmg_time, v_dmg_roll, v_dmg_pitch;
+
+	cshift_t cshift_empty;				// can be modified by V_cshift_f ()
+	cshift_t cshifts[NUM_CSHIFTS];		// color shifts for damage, powerups
+	cshift_t prev_cshifts[NUM_CSHIFTS]; // and content types
+
+	// the client maintains its own idea of view angles, which are
+	// sent to the server each frame.  The server sets punchangle when
+	// the view is temporarliy offset, and an angle reset commands at the start
+	// of each level and after teleporting.
+	vec3_t mviewangles[2]; // during demo playback viewangles is lerped
+	// between these
+	vec3_t viewangles;
+
+	vec3_t mvelocity[2]; // update by server, used for lean+bob
+	// (0 is newest)
+	vec3_t velocity;	 // lerped between mvelocity[0] and [1]
+
+	vec3_t punchangle; // temporary offset
+
+	// pitch drifting vars
+	float	 idealpitch;
+	float	 pitchvel;
+	bool nodrift;
+	float	 driftmove;
+	double	 laststop;
+
+	float viewheight;
+	float crouch; // local amount for smoothing stepups
+
+	bool paused; // send over by server
+	bool onground;
+	bool inwater;
+	double	 fixangle_time; // timestamp of last svc_setangle message
+
+	int intermission;	// don't change view angle, full screen, etc
+	int completed_time; // latched at intermission start
+
+	double mtime[2]; // the timestamp of last two messages
+	double time;	 // clients view of time, should be between
+	// servertime and oldservertime to generate
+	// a lerp point for other data
+	double oldtime;	 // previous cl.time, time-oldtime is used
+	// to decay light values and smooth step ups
+
+	float last_received_message; // (realtime) for net trouble icon
+
+	//
+	// information that is static for the entire time connected to a server
+	//
+	struct qmodel_s* model_precache[MAX_MODELS];
+	struct sfx_s* sound_precache[MAX_SOUNDS];
+
+	char mapname[128];
+	char levelname[128]; // for display on solo scoreboard //johnfitz -- was 40.
+	int	 viewentity;	 // cl_entitites[cl.viewentity] = player
+	int	 maxclients;
+	int	 gametype;
+
+	// refresh related state
+	struct qmodel_s* worldmodel; // cl_entitites[0].model
+	struct octree_t* octree;
+	struct efrag_s* free_efrags;
+	int				 num_efrags;
+	struct efrag_s** efrag_allocs;
+	int				 num_efragallocs;
+	entity_t		 viewent; // the gun model
+
+	entity_t* entities; // spike -- moved into here
+	int		  max_edicts;
+	int		  num_entities;
+
+	entity_t** static_entities; // spike -- was static
+	int		   max_static_entities;
+	int		   num_statics;
+
+	int cdtrack, looptrack; // cd audio
+
+	// frag scoreboard
+	scoreboard_t* scores; // [cl.maxclients]
+
+	unsigned protocol; // johnfitz
+	unsigned protocolflags;
+	unsigned protocol_pext1; // spike -- flag of fte protocol extensions
+	unsigned protocol_pext2; // spike -- flag of fte protocol extensions
+
+#ifdef PSET_SCRIPT
+	qboolean protocol_particles;
+	struct
+	{
+		const char* name;
+		int			index;
+	} particle_precache[MAX_PARTICLETYPES];
+	struct
+	{
+		const char* name;
+		int			index;
+	} local_particle_precache[MAX_PARTICLETYPES];
+#endif
+	int			 ackframes[8]; // big enough to cover burst
+	unsigned int ackframes_count;
+	bool	 requestresend;
+	bool	 sendprespawn;
+
+	qcvm_t qcvm; // for csqc.
+
+	float zoom;
+	float zoomdir;
+
+	char serverinfo[8192]; // \key\value infostring data.
+} client_state_t;
+
+
 typedef struct cvar_s
 {
 	const char* name;
@@ -306,15 +1100,24 @@ typedef struct cvar_s
 	struct cvar_s* next;
 } cvar_t;
 
+bool in_update_screen;
+
+static parms_t t_parms;
+
+extern keydest_t key_dest;
+
+jmp_buf host_abortserver;
+jmp_buf screen_error;
 
 
 static const char errortxt1[] = "\nERROR-OUT BEGIN\n\n";
-static const char errortxt2[] = "\nQUAKE ERROR: ";
+static const char errortxt2[] = "\nTREMOR ERROR: ";
 
 void ErrorDialog(const char* errorMsg)
 {
-	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Quake Error", errorMsg, NULL);
+	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Tremor Error", errorMsg, NULL);
 }
+
 
 class Engine {
 public:
@@ -327,6 +1130,55 @@ public:
 		q(Engine e) {
 			engine = &e;
 		}
+		static char* get_va_buffer(void)
+		{
+			static THREAD_LOCAL char va_buffers[VA_NUM_BUFFS][VA_BUFFERLEN];
+			static THREAD_LOCAL int	 buffer_idx = 0;
+			buffer_idx = (buffer_idx + 1) & (VA_NUM_BUFFS - 1);
+			return va_buffers[buffer_idx];
+		}
+		char* va(const char* format, ...)
+		{
+			va_list argptr;
+			char* va_buf;
+
+			va_buf = get_va_buffer();
+			va_start(argptr, format);
+			vsnprintf(va_buf, VA_BUFFERLEN, format, argptr);
+			va_end(argptr);
+
+			return va_buf;
+		}
+
+		size_t strlcpy(char* dst, const char* src, size_t siz)
+		{
+			char* d = dst;
+			const char* s = src;
+			size_t		n = siz;
+
+			/* Copy as many bytes as will fit */
+			if (n != 0)
+			{
+				while (--n != 0)
+				{
+					if ((*d++ = *s++) == '\0')
+						break;
+				}
+			}
+
+			/* Not enough room in dst, add NUL and traverse rest of src */
+			if (n == 0)
+			{
+				if (siz != 0)
+					*d = '\0'; /* NUL-terminate dst */
+				while (*s++)
+					;
+			}
+
+			return (s - src - 1); /* count does not include NUL */
+		}
+
+		
 		static inline int toupper(int c)
 		{
 			return ((islower(c)) ? (c & ~('a' - 'A')) : c);
@@ -657,7 +1509,7 @@ public:
 	public:
 		Engine* engine;
 		bool fullscreen;
-		bool initiialized = false;
+		bool initialized = false;
 		SDL_Window* draw_context;
 		static HICON icon;
 
@@ -752,7 +1604,7 @@ public:
 		}
 
 		void Shutdown() {
-			if (initiialized){
+			if (initialized){
 				SDL_QuitSubSystem(SDL_INIT_VIDEO);
 				draw_context = NULL;
 				DestroyIcon(icon);
@@ -794,6 +1646,7 @@ public:
 			}
 			//TODO: more quake shit
 		}
+
 		class Display {
 		public:
 			int width, height;
@@ -808,6 +1661,13 @@ public:
 	class COM {
 	public:
 		Engine* engine;
+		int argc;
+		char** argv;
+		char cmdline[CMDLINE_LENGTH];
+		char* largv[MAX_NUM_ARGVS + 1];
+		int safemode;
+
+
 		COM(Engine e) {
 			engine = &e;
 			uint32_t uint_value = 0x12345678;
@@ -829,6 +1689,149 @@ public:
 			if (bytes[0] != 0x78 || bytes[1] != 0x56 || bytes[2] != 0x34 || bytes[3] != 0x12)
 				std::cout << ("Unsupported endianism. Only little endian is supported") << std::endl;
 		}
+
+		void InitArgv(int c, char** v)
+		{
+			int i, j, n;
+
+			// reconstitute the command line for the cmdline externally visible cvar
+			n = 0;
+
+			for (j = 0; (j < MAX_NUM_ARGVS) && (j < c); j++)
+			{
+				i = 0;
+
+				while ((n < (CMDLINE_LENGTH - 1)) && v[j][i])
+				{
+					cmdline[n++] = v[j][i++];
+				}
+
+				if (n < (CMDLINE_LENGTH - 1))
+					cmdline[n++] = ' ';
+				else
+					break;
+			}
+
+			if (n > 0 && cmdline[n - 1] == ' ')
+				cmdline[n - 1] = 0; // johnfitz -- kill the trailing space
+
+			con->Printf("Command line: %s\n", cmdline);
+
+			for (argc = 0; (argc < MAX_NUM_ARGVS) && (argc < c); argc++)
+			{
+				largv[argc] = v[argc];
+				if (!strcmp("-safe", v[argc]))
+					safemode = 1;
+			}
+
+			largv[argc] = argvdummy;
+			argv = largv;
+
+			/*if (COM_CheckParm("-rogue"))
+			{
+				rogue = true;
+				standard_quake = false;
+			}
+
+			if (COM_CheckParm("-hipnotic") || COM_CheckParm("-quoth")) // johnfitz -- "-quoth" support
+			{
+				hipnotic = true;
+				standard_quake = false;
+			}*/
+		}
+
+		const char* ParseEx(const char* data, cpe_mode mode)
+		{
+			int c;
+			int len;
+
+			len = 0;
+			com_token[0] = 0;
+
+			if (!data)
+				return NULL;
+
+			// skip whitespace
+		skipwhite:
+			while ((c = *data) <= ' ')
+			{
+				if (c == 0)
+					return NULL; // end of file
+				data++;
+			}
+
+			// skip // comments
+			if (c == '/' && data[1] == '/')
+			{
+				while (*data && *data != '\n')
+					data++;
+				goto skipwhite;
+			}
+
+			// skip /*..*/ comments
+			if (c == '/' && data[1] == '*')
+			{
+				data += 2;
+				while (*data && !(*data == '*' && data[1] == '/'))
+					data++;
+				if (*data)
+					data += 2;
+				goto skipwhite;
+			}
+
+			// handle quoted strings specially
+			if (c == '\"')
+			{
+				data++;
+				while (1)
+				{
+					if ((c = *data) != 0)
+						++data;
+					if (c == '\"' || !c)
+					{
+						com_token[len] = 0;
+						return data;
+					}
+					if (len < countof(com_token) - 1)
+						com_token[len++] = c;
+					else if (mode == CPE_NOTRUNC)
+						return NULL;
+				}
+			}
+
+			// parse single characters
+			if (c == '{' || c == '}' || c == '(' || c == ')' || c == '\'' || c == ':')
+			{
+				if (len < countof(com_token) - 1)
+					com_token[len++] = c;
+				else if (mode == CPE_NOTRUNC)
+					return NULL;
+				com_token[len] = 0;
+				return data + 1;
+			}
+
+			// parse a regular word
+			do
+			{
+				if (len < countof(com_token) - 1)
+					com_token[len++] = c;
+				else if (mode == CPE_NOTRUNC)
+					return NULL;
+				data++;
+				c = *data;
+				/* commented out the check for ':' so that ip:port works */
+				if (c == '{' || c == '}' || c == '(' || c == ')' || c == '\'' /* || c == ':' */)
+					break;
+			} while (c > 32);
+
+			com_token[len] = 0;
+			return data;
+		}
+		const char* Parse(const char* data)
+		{
+			return ParseEx(data, CPE_NOTRUNC);
+		}
+
 	};
 	class SCR{
 	public:
@@ -838,6 +1841,28 @@ public:
 			engine = &e;
 			disabled_for_loading = false;
 		}
+		void EndLoadingPlaque(void)
+		{
+			disabled_for_loading = false;
+			con->ClearNotify();
+		}
+	};
+	class Key {
+		bool	chat_team = false;
+		char chat_buffer[MAXCMDLINE];
+		int	chat_bufferlen = 0;
+
+	public:
+		Engine* engine;
+		Key(Engine e) {
+			engine = &e;
+		}
+		void EndChat(void)
+		{
+			key_dest = key_game;
+			chat_bufferlen = 0;
+			chat_buffer[0] = 0;
+		}
 	};
 	class CL{
 	public:
@@ -846,6 +1871,49 @@ public:
 			engine = &e;
 		}
 		client_static_t s;
+		client_state_t state;
+
+		void Disconnect(void)
+		{
+			if (key_dest == key_message)
+				key->EndChat(); // don't get stuck in chat mode
+
+			// stop sounds (especially looping!)
+			S_StopAllSounds(true, false);
+			BGM_Stop();
+			CDAudio_Stop();
+
+			// if running a local server, shut it down
+			if (cls.demoplayback)
+				CL_StopPlayback();
+			else if (cls.state == ca_connected)
+			{
+				if (cls.demorecording)
+					CL_Stop_f();
+
+				con->DPrintf("Sending clc_disconnect\n");
+				sz->Clear(&cls.message);
+				msg->WriteByte(&cls.message, 2);
+				NET_SendUnreliableMessage(cls.netcon, &cls.message);
+				sz->Clear(&cls.message);
+				NET_Close(cls.netcon);
+				cls.netcon = NULL;
+
+				cls.state = ca_disconnected;
+				if (sv->active)
+					host->ShutdownServer(false);
+			}
+
+			cls.demoplayback = cls.timedemo = false;
+			cls.demopaused = false;
+			cls.signon = 0;
+			cls.netcon = NULL;
+			cl->state.intermission = 0;
+			cl->state.worldmodel = NULL;
+			cl->state.sendprespawn = false;
+			SCR_CenterPrintClear();
+		}
+		
 	};
 	class Con {
 	public:
@@ -887,6 +1955,8 @@ public:
 		SDL_mutex* mutex;
 
 		int history_line;
+
+		float times[NUM_CON_TIMES]; // realtime time the line was generated
 		
 		Con(Engine e) {
 			engine = &e;
@@ -916,7 +1986,13 @@ public:
 			return bar;
 		}
 
-		
+		void ClearNotify(void)
+		{
+			int i;
+
+			for (i = 0; i < NUM_CON_TIMES; i++)
+				times[i] = 0;
+		}
 
 		void DebugLog(const char* msg)
 		{
@@ -943,7 +2019,7 @@ public:
 		}
 
 
-		void Con_Warning(const char* fmt, ...)
+		void Warning(const char* fmt, ...)
 		{
 			va_list argptr;
 			char	msg[MAXPRINTMSG];
@@ -954,6 +2030,24 @@ public:
 
 			SafePrintf("\x02Warning: ");
 			Printf("%s", msg);
+		}
+
+		void DWarning(const char* fmt, ...)
+		{
+			va_list argptr;
+			char	msg[MAXPRINTMSG];
+
+			if (host->developer.value >= 2)
+			{ // don't confuse non-developers with techie stuff...
+				// (this is limit exceeded warnings)
+
+				va_start(argptr, fmt);
+				qk->vsnprintf(msg, sizeof(msg), fmt, argptr);
+				va_end(argptr);
+
+				SafePrintf("\x02Warning: ");
+				Printf("%s", msg);
+			}
 		}
 
 
@@ -1087,20 +2181,8 @@ public:
 			}
 		}
 	
-		void Warning(const char* fmt, ...)
-		{
-			va_list argptr;
-			char	msg[MAXPRINTMSG];
 
-			va_start(argptr, fmt);
-			qk->vsnprintf(msg, sizeof(msg), fmt, argptr);
-			va_end(argptr);
-
-			SafePrintf("\x02Warning: ");
-			Printf("%s", msg);
-		}
-
-		void Con_DPrintf(const char* fmt, ...)
+		void DPrintf(const char* fmt, ...)
 		{
 			va_list argptr;
 			char	msg[MAXPRINTMSG];
@@ -1140,6 +2222,11 @@ public:
 		Engine* engine;
 		bool wait = false;
 		sizebuf_t text;
+		int argc;
+		char argv[MAX_ARGS][1024];
+		const char* args = NULL;
+		cmdalias_t* alias;
+
 		typedef enum
 		{
 			src_client,	 // came in over a net connection as a clc_stringcmd. host_client will be valid during this state.
@@ -1159,16 +2246,19 @@ public:
 
 		cmd_function_t* functions;
 
+		cvar_t warncmd = { "cl_warncmd", "1", CVAR_NONE };
+
 		void Wait_f() {
 			wait = true;
 		}
 		Cmd(Engine e) {
 			engine = &e;
+
 		}
 
 		cmd_function_t* AddCommand(const char* cmd_name, xcommand_t function, cmd_source_t srctype)
 		{
-			cmd_function_t* cmd;
+			cmd_function_t* command;
 			cmd_function_t* cursor, * prev; // johnfitz -- sorted list insert
 
 			// fail if the command is a variable name
@@ -1179,11 +2269,11 @@ public:
 			}
 
 			// fail if the command already exists
-			for (cmd = functions; cmd; cmd = cmd->next)
+			for (command = functions; command; command = command->next)
 			{
-				if (!strcmp(cmd_name, cmd->name) && cmd->srctype == srctype)
+				if (!strcmp(cmd_name, command->name) && command->srctype == srctype)
 				{
-					if (cmd->function != function && function)
+					if (command->function != function && function)
 						con->Printf("Cmd_AddCommand: %s already defined\n", cmd_name);
 					return NULL;
 				}
@@ -1191,51 +2281,171 @@ public:
 
 			if (host->initialized)
 			{
-				cmd = (cmd_function_t*)mem->Alloc(sizeof(*cmd) + strlen(cmd_name) + 1);
-				cmd->name = (const char*)strcpy_s((char*)(cmd + 1), sizeof((char*)(cmd + 1)), cmd_name);
-				cmd->dynamic = true;
+				command = (cmd_function_t*)mem->Alloc(sizeof(*cmd) + strlen(cmd_name) + 1);
+				command->name = (const char*)strcpy_s((char*)(cmd + 1), sizeof((char*)(cmd + 1)), cmd_name);
+				command->dynamic = true;
 			}
 			else
 			{
-				cmd = (cmd_function_t*)mem->Alloc(sizeof(*cmd));
-				cmd->name = cmd_name;
-				cmd->dynamic = false;
+				command = (cmd_function_t*)mem->Alloc(sizeof(*cmd));
+				command->name = cmd_name;
+				command->dynamic = false;
 			}
-			cmd->function = function;
-			cmd->srctype = srctype;
+			command->function = function;
+			command->srctype = srctype;
 
 			// johnfitz -- insert each entry in alphabetical order
-			if (functions == NULL || strcmp(cmd->name, functions->name) < 0) // insert at front
+			if (functions == NULL || strcmp(command->name, functions->name) < 0) // insert at front
 			{
-				cmd->next = functions;
-				functions = cmd;
+				command->next = functions;
+				functions = command;
 			}
 			else // insert later
 			{
 				prev = functions;
 				cursor = functions->next;
-				while ((cursor != NULL) && (strcmp(cmd->name, cursor->name) > 0))
+				while ((cursor != NULL) && (strcmp(command->name, cursor->name) > 0))
 				{
 					prev = cursor;
 					cursor = cursor->next;
 				}
-				cmd->next = prev->next;
-				prev->next = cmd;
+				command->next = prev->next;
+				prev->next = command;
 			}
 			// johnfitz
 
-			if (cmd->dynamic)
-				return cmd;
+			if (command->dynamic)
+				return command;
 			return NULL;
+		}
+		int Argc() {
+			return argc;
+		}
+		const char* Argv(int arg) {
+			if (arg < 0 || arg >= argc)
+				return "";
+			return argv[arg];
+		}
+
+		const char* Args(void)
+		{
+			if (!args)
+				return "";
+			return args;
+		}
+
+		void TokenizeString(const char* text)
+		{
+			int i;
+
+			// clear the args from the last string
+			for (i = 0; i < argc; i++)
+				argv[i][0] = 0;
+
+			argc = 0;
+			args = NULL;
+
+			while (1)
+			{
+				// skip whitespace up to a /n
+				while (*text && *text <= ' ' && *text != '\n')
+				{
+					text++;
+				}
+
+				if (*text == '\n')
+				{ // a newline seperates commands in the buffer
+					text++;
+					break;
+				}
+
+				if (!*text)
+					return;
+
+				if (argc == 1)
+					args = text;
+
+				text = com->Parse(text);
+				if (!text)
+					return;
+
+				if (argc < MAX_ARGS)
+				{
+					strcpy(argv[argc], com_token);
+					argc++;
+				}
+			}
+		}
+
+		bool ExecuteString(const char* text, cmd_source_t src)
+		{
+			cmd_function_t* command;
+			cmdalias_t* a;
+
+			cmd_source = src;
+			TokenizeString(text);
+
+			// execute the command line
+			if (!Argc())
+				return true; // no tokens
+
+			// check functions
+			for (command = functions; command; command = command->next)
+			{
+				if (!qk->strcasecmp(argv[0], command->name))
+				{
+					if (src == src_client && command->srctype != src_client)
+						con->DPrintf("%s tried to %s\n", host->client->name, text); // src_client only allows client commands
+					else if (src == src_command && command->srctype == src_server)
+						continue; // src_command can execute anything but server commands (which it ignores, allowing for alternative behaviour)
+					else if (src == src_server && command->srctype != src_server)
+						continue; // src_server may only execute server commands (such commands must be safe to parse within the context of a network message, so no
+					// disconnect/connect/playdemo/etc)
+					command->function();
+					return true;
+				}
+			}
+
+			if (src == src_client)
+			{ // spike -- please don't execute similarly named aliases, nor custom cvars...
+				con->DPrintf("%s tried to %s\n", host->client->name, text);
+				return false;
+			}
+			if (src != src_command)
+				return false;
+
+			// check alias
+			for (a = alias; a; a = a->next)
+			{
+				if (!qk->strcasecmp(argv[0], a->name))
+				{
+					cbuf->InsertText(a->value);
+					return true;
+				}
+			}
+
+			// check cvars
+			if (!cvar->Command())
+				if (warncmd.value || host->developer.value)
+					con->Printf("Unknown command \"%s\"\n", Argv(0));
+
+			return true;
 		}
 	};
 	class Cbuf {
 	public:
 		Engine* engine;
+		bool wait = false;
+		cmd_source_t source;
+
 		Cbuf(Engine e) {
-			engine = &e;			
+			engine = &e;
 			sz->Alloc(&cmd->text, 1 << 18);
 
+		}
+
+		void Wait_f() {
+			wait = true;
 		}
 
 		void AddText(const char* text)
@@ -1251,6 +2461,103 @@ public:
 			}
 
 			sz->Write(&cmd->text, text, l);
+		}
+
+		void AddTextLen(const char* text, int length)
+		{
+			if (&cmd->text.cursize + length >= &cmd->text.maxsize)
+			{
+				con->Printf("Cbuf_AddText: overflow\n");
+				return;
+			}
+			sz->Write(&cmd->text, text, length);
+		}
+
+		void InsertText(const char* text)
+		{
+			char* temp;
+			int	  templen;
+
+			// copy off any commands still remaining in the exec buffer
+			templen = cmd->text.cursize;
+			if (templen)
+			{
+				temp = (char*)mem->Alloc(templen);
+				memcpy(temp, cmd->text.data, templen);
+				sz->Clear(&cmd->text);
+			}
+			else
+				temp = NULL; // shut up compiler
+
+			// add the entire text of the file
+			AddText(text);
+			sz->Write(&cmd->text, "\n", 1);
+			// add the copied off data
+			if (templen)
+			{
+				sz->Write(&cmd->text, temp, templen);
+				mem->Free(temp);
+			}
+		}
+		void Waited(void)
+		{
+			wait = false;
+		}
+
+		void Execute(void)
+		{
+			int	  i;
+			char* text;
+			char  line[1024];
+			int	  quotes, comment;
+
+			while (cmd->text.cursize && !cmd->wait)
+			{
+				// find a \n or ; line break
+				text = (char*)cmd->text.data;
+
+				quotes = 0;
+				comment = 0;
+				for (i = 0; i < cmd->text.cursize; i++)
+				{
+					if (text[i] == '"')
+						quotes++;
+					if (text[i] == '/' && text[i + 1] == '/')
+						comment = true;
+					if (!(quotes & 1) && !comment && text[i] == ';')
+						break; // don't break if inside a quoted string
+					if (text[i] == '\n')
+						break;
+				}
+
+				if (i > (int)sizeof(line) - 1)
+				{
+					memcpy(line, text, sizeof(line) - 1);
+					line[sizeof(line) - 1] = 0;
+				}
+				else
+				{
+					memcpy(line, text, i);
+					line[i] = 0;
+				}
+
+				// delete the text from the command buffer and move remaining commands down
+				// this is necessary because commands (exec, alias) can insert data at the
+				// beginning of the text buffer
+
+				if (i == cmd->text.cursize)
+					cmd->text.cursize = 0;
+				else
+				{
+					i++;
+					cmd->text.cursize -= i;
+					memmove(text, text + i, cmd->text.cursize);
+				}
+
+				// execute the command line
+				cmd->ExecuteString(line, Cmd::src_command);
+                
+			}
 		}
 
 	};
@@ -1295,6 +2602,112 @@ public:
 				return cvar_null_string;
 			return var->string;
 		}
+		bool Command(void)
+		{
+			cvar_t* v;
+
+			// check variables
+			v = FindVar(cmd->Argv(0));
+			if (!v)
+				return false;
+
+			// perform a variable print or set
+			if (cmd->Argc() == 1)
+			{
+				con->Printf("\"%s\" is \"%s\"\n", v->name, v->string);
+				return true;
+			}
+
+			Set(v->name, cmd->Argv(1));
+			return true;
+		}
+
+		void Set(const char* var_name, const char* value)
+		{
+			cvar_t* var;
+
+			var = FindVar(var_name);
+			if (!var)
+			{ // there is an error in C code if this happens
+				con->Printf("Cvar_Set: variable %s not found\n", var_name);
+				return;
+			}
+
+			SetQuick(var, value);
+		}
+
+		void SetQuick(cvar_t* var, const char* value)
+		{
+			if (var->flags & (CVAR_ROM | CVAR_LOCKED))
+				return;
+			if (!(var->flags & CVAR_REGISTERED))
+				return;
+
+			if (!var->string)
+				var->string = qk->strdup(value);
+			else
+			{
+				int len;
+
+				if (!strcmp(var->string, value))
+					return; // no change
+
+				var->flags |= CVAR_CHANGED;
+				len = strlen(value);
+				if (len != strlen(var->string))
+				{
+					mem->Free((void*)var->string);
+					var->string = (char*)mem->Alloc(len + 1);
+				}
+				memcpy((char*)var->string, value, len + 1);
+			}
+
+			var->value = atof(var->string);
+
+			// johnfitz -- save initial value for "reset" command
+			if (!var->default_string)
+				var->default_string = qk->strdup(var->string);
+			// johnfitz -- during initialization, update default too
+			else if (!host->initialized)
+			{
+				//	Sys_Printf("changing default of %s: %s -> %s\n",
+				//		   var->name, var->default_string, var->string);
+				mem->Free((void*)var->default_string);
+				var->default_string = qk->strdup(var->string);
+			}
+			// johnfitz
+
+			if (var->callback)
+				var->callback(var);
+			if (var->flags & CVAR_AUTOCVAR)
+				PR_AutoCvarChanged(var);
+		}
+	};
+	class Net {
+	public:
+		Engine* engine;
+		double time;
+		Net(Engine e) {
+			engine = &e;
+		}
+		double SetNetTime(void)
+		{
+			time = sys->DoubleTime();
+			return time;
+		}
+		bool CanSendMessage(qsocket_t* sock)
+		{
+			if (!sock)
+				return false;
+
+			if (sock->disconnected)
+				return false;
+
+			SetNetTime();
+
+			return sfunc.CanSendMessage(sock);
+		}
+
 	};
 	class Mem {
 	public:
@@ -1308,6 +2721,16 @@ public:
 		void* Alloc(const size_t size) {
 			return SDL_calloc(1, size);
 		}
+
+		void* Realloc(void* ptr, const size_t size) {
+			if (ptr) {
+				return SDL_realloc(ptr, size);
+			}
+			else {
+				return Alloc(size);
+			}
+		}
+
 		void Free(const void* ptr) {
 			if (ptr) {
 				free((void*)ptr);
@@ -1329,18 +2752,147 @@ public:
 
 		int minimum_memory;
 
+		client_t* client;
+
 		void Shutdown() {
 
 		}
 
-		Host(Engine e) {
+		void ShutdownServer(bool crash)
+		{
+			int		  i;
+			int		  count;
+			sizebuf_t buf;
+			byte	  message[4];
+			double	  start;
+
+			if (!sv->active)
+				return;
+
+			sv->active = false;
+
+			// stop all client sounds immediately
+			if (cl->s.state == ca_connected)
+				cl->Disconnect();
+
+			// flush any pending messages - like the score!!!
+			start = sys->DoubleTime();
+			do
+			{
+				count = 0;
+				for (i = 0, client = svs.clients; i < svs.maxclients; i++, client++)
+				{
+					if (client->active && client->message.cursize && client->netconnection)
+					{
+						if (net->CanSendMessage(client->netconnection))
+						{
+							NET_SendMessage(client->netconnection, &client->message);
+							sz->Clear(&client->message);
+						}
+						else
+						{
+							NET_GetMessage(client->netconnection);
+							count++;
+						}
+					}
+				}
+				if ((sys->DoubleTime() - start) > 3.0)
+					break;
+			} while (count);
+
+			// make sure all the clients know we're disconnecting
+			buf.data = message;
+			buf.maxsize = 4;
+			buf.cursize = 0;
+			MSG_WriteByte(&buf, svc_disconnect);
+			count = NET_SendToAll(&buf, 5.0);
+			if (count)
+				con->Printf("Host_ShutdownServer: NET_SendToAll failed for %u clients\n", count);
+
+			pr->SwitchQCVM(&sv->qcvm);
+			for (i = 0, client = svs.clients; i < svs.maxclients; i++, client++)
+				if (client->active)
+					SV_DropClient(crash);
+
+			pr->qcvm->worldmodel = NULL;
+			pr->SwitchQCVM(NULL);
+
+			//
+			// clear structures
+			//
+			//	memset (&sv, 0, sizeof(sv)); // ServerSpawn already do this by Host_ClearMemory
+			memset(svs.clients, 0, svs.maxclientslimit * sizeof(client_t));
+		}
+
+
+		void Error(const char* error, ...)
+		{
+			va_list			argptr;
+			char			string[1024];
+			static bool inerror = false;
+
+			if (inerror)
+				sys->Error("Host_Error: recursively entered");
+			inerror = true;
+
+			pr->SwitchQCVM(NULL);
+
+			scr->EndLoadingPlaque(); // reenable screen updates
+
+			va_start(argptr, error);
+			qk->vsnprintf(string, sizeof(string), error, argptr);
+			va_end(argptr);
+			con->Printf("Host_Error: %s\n", string);
+
+			if (cl->state.qcvm.extfuncs.CSQC_DrawHud && in_update_screen)
+			{
+				inerror = false;
+				longjmp(screen_error, 1);
+			}
+
+			if (sv->active)
+				ShutdownServer(false);
+
+			if (cl->s.state == ca_dedicated)
+				sys->Error("Host_Error: %s\n", string); // dedicated servers exit
+
+			cl->Disconnect();
+			cl->s.demonum = -1;
+			cl->state.intermission = 0; // johnfitz -- for errors during intermissions (changelevel with no map found, etc.)
+
+			inerror = false;
+
+			longjmp(host_abortserver, 1);
+		}
+
+
+		Host(Engine e, int argc, char* argv[]) {
+
+			engine = &e;
+
+			double time, oldtime, newtime;
+
+			parms = new parms_t;
+
+			parms->basedir = ".";
+			parms->argc = argc;
+			parms->argv = argv;
+
+			parms->errstate = 0;
+
+
+			con = new Con(*engine);
+			com = new COM(*engine);
+
+			com->InitArgv(argc, argv);
+
 			engine = &e;
 
 			engine->mem = new Mem(*engine);
 			engine->t = new Tasks(*engine);
+			engine->cmd = new Cmd(*engine);
 			engine->cbuf = new Cbuf(*engine);
 
-			engine->com = new COM(*engine);
 
 
 		}
@@ -1614,6 +3166,80 @@ public:
 
 
 	};
+	class PR {
+	public:
+		Engine* engine;
+		PR(Engine e) {
+			engine = &e;
+		}
+		qcvm_t* qcvm;
+		globalvars_t* pr_global_struct;
+		void		  SwitchQCVM(qcvm_t* nvm)
+		{
+			if (qcvm && nvm)
+				sys->Error("PR_SwitchQCVM: A qcvm was already active");
+			qcvm = nvm;
+			if (qcvm)
+				pr_global_struct = (globalvars_t*)qcvm->globals;
+			else
+				pr_global_struct = NULL;
+		}
+
+		const char* GetString(int num)
+		{
+			if (num >= 0 && num < qcvm->stringssize)
+				return qcvm->strings + num;
+			else if (num < 0 && num >= -qcvm->numknownstrings)
+			{
+				if (!qcvm->knownstrings[-1 - num])
+				{
+					host->Error("PR_GetString: attempt to get a non-existant string %d\n", num);
+					return "";
+				}
+				return qcvm->knownstrings[-1 - num];
+			}
+			else
+			{
+				return qcvm->strings;
+				host->Error("PR_GetString: invalid string offset %d\n", num);
+				return "";
+			}
+		}
+
+
+		void AutoCvarChanged(cvar_t* var)
+		{
+			char* n;
+			ddef_t* glob;
+			qcvm_t* oldqcvm = qcvm;
+			SwitchQCVM(NULL);
+			if (sv.active)
+			{
+				SwitchQCVM(&sv.qcvm);
+				n = qk->va("autocvar_%s", var->name);
+				glob = ED_FindGlobal(n);
+				if (glob)
+				{
+					if (!ed->ParseEpair((void*)qcvm->globals, glob, var->string, true))
+						con->Warning("EXT: Unable to configure %s\n", n);
+				}
+				SwitchQCVM(NULL);
+			}
+			if (cl->state.qcvm.globals)
+			{
+				SwitchQCVM(&cl->state.qcvm);
+				n = qk->va("autocvar_%s", var->name);
+				glob = ED_FindGlobal(n);
+				if (glob)
+				{
+					if (!ed->ParseEpair((void*)qcvm->globals, glob, var->string, true))
+						con->Warning("EXT: Unable to configure %s\n", n);
+				}
+				SwitchQCVM(NULL);
+			}
+			SwitchQCVM(oldqcvm);
+		}
+	};
 	class SZ {
 	public:
 		Engine* engine;
@@ -1681,11 +3307,65 @@ public:
 			}
 		}
 	};
+	class S {
+	public:
+		Engine* engine;
+		bool initialized;
+		SDL_mutex* mutex;
+
+		S(Engine e) {
+			engine = &e;
+		}
+		void StopAllSounds(bool clear, bool keep_statics)
+		{
+			int i;
+
+			if (!initialized)
+				return;
+
+			SDL_LockMutex(mutex);
+			if (!sound_started)
+				goto unlock_mutex;
+
+			if (!keep_statics)
+				total_channels = MAX_DYNAMIC_CHANNELS + NUM_AMBIENTS; // no statics
+
+			for (i = 0; i < MAX_CHANNELS; i++)
+			{
+				if (!keep_statics || snd_channels[i].entnum || !snd_channels[i].sfx || !S_LoadSound(snd_channels[i].sfx) ||
+					S_LoadSound(snd_channels[i].sfx)->loopstart == -1)
+					memset(&snd_channels[i], 0, sizeof(channel_t));
+				else
+				{
+					snd_channels[i].pos = 0;
+					snd_channels[i].end = paintedtime + S_LoadSound(snd_channels[i].sfx)->length;
+				}
+			}
+
+			if (clear)
+				S_ClearBuffer();
+
+		unlock_mutex:
+			SDL_UnlockMutex(snd_mutex);
+		}
+	};
 	class MSG {
 	public:
 		Engine* engine;
 		MSG(Engine e) {
 			engine = &e;
+		}
+		void WriteByte(sizebuf_t* sb, int c)
+		{
+			byte* buf;
+
+#ifdef PARANOID
+			if (c < 0 || c > 255)
+				Sys_Error("MSG_WriteByte: range error");
+#endif
+
+			buf = (byte*)sz->GetSpace(sb, 1);
+			buf[0] = c;
 		}
 	};
 	class Sys {
@@ -1752,7 +3432,7 @@ public:
 			qk->vsnprintf(text, sizeof(text), error, argptr);
 			va_end(argptr);
 
-			//PR_SwitchQCVM(NULL);
+			pr->SwitchQCVM(NULL);
 
 			if (this->engine->isDedicated)
 				WriteFile(houtput, errortxt1, strlen(errortxt1), &dummy, NULL);
@@ -1813,8 +3493,230 @@ public:
 		static void AtExit() {
 			SDL_Quit();
 		}
-	};
 
+		double DoubleTime(void)
+		{
+			return (double)SDL_GetPerformanceCounter() / counter_freq;
+		}
+	};
+	class ED {
+	public:
+		Engine* engine;
+		ED(Engine e) {
+			engine = &e;
+		}
+		void ED_RezoneString(string_t* ref, const char* str)
+		{
+			char* buf;
+			size_t len = strlen(str) + 1;
+			size_t id;
+
+			if (*ref)
+			{ // if the reference is already a zoned string then free it first.
+				id = -1 - *ref;
+				if (id < pr->qcvm->knownzonesize && (pr->qcvm->knownzone[id >> 3] & (1u << (id & 7))))
+				{ // okay, it was zoned.
+					pr->qcvm->knownzone[id >> 3] &= ~(1u << (id & 7));
+					buf = (char*)pr->GetString(*ref);
+					PR_ClearEngineString(*ref);
+					mem->Free(buf);
+				}
+				//		else
+				//			Con_Warning("ED_RezoneString: string wasn't strzoned\n");	//warnings would trigger from the default cvar value that autocvars are
+				// initialised with
+			}
+
+			buf = (char*)mem->Alloc(len);
+			memcpy(buf, str, len);
+			id = -1 - (*ref = PR_SetEngineString(buf));
+			// make sure its flagged as zoned so we can clean up properly after.
+			if (id >= pr->qcvm->knownzonesize)
+			{
+				int old_size = (pr->qcvm->knownzonesize + 7) >> 3;
+				pr->qcvm->knownzonesize = (id + 32) & ~7;
+				int new_size = (pr->qcvm->knownzonesize + 7) >> 3;
+				pr->qcvm->knownzone = mem->Realloc(pr->qcvm->knownzone, new_size);
+				memset(pr->qcvm->knownzone + old_size, 0, new_size - old_size);
+			}
+			pr->qcvm->knownzone[id >> 3] |= 1u << (id & 7);
+		}
+
+		bool ParseEpair(void* base, ddef_t* key, const char* s, bool zoned)
+		{
+			int			 i;
+			char		 string[128];
+			ddef_t* def;
+			char* v, * w;
+			char* end;
+			void* d;
+			dfunction_t* func;
+
+			d = (void*)((int*)base + key->ofs);
+
+			switch (key->type & ~DEF_SAVEGLOBAL)
+			{
+			case ev_string:
+				if (zoned) // zoned version allows us to change the strings more freely
+					ED_RezoneString((string_t*)d, s);
+				else
+					*(string_t*)d = ED_NewString(s);
+				break;
+
+			case ev_float:
+				*(float*)d = atof(s);
+				break;
+			case ev_ext_double:
+				*(qcdouble_t*)d = atof(s);
+				break;
+			case ev_ext_integer:
+				*(int32_t*)d = atoi(s);
+				break;
+			case ev_ext_uint32:
+				*(uint32_t*)d = atoi(s);
+				break;
+			case ev_ext_sint64:
+				*(qcsint64_t*)d = strtoll(s, NULL, 0); // if longlong is 128bit then no real harm done for 64bit quantities...
+				break;
+			case ev_ext_uint64:
+				*(qcuint64_t*)d = strtoull(s, NULL, 0);
+				break;
+
+			case ev_vector:
+				qk->strlcpy(string, s, sizeof(string));
+				end = (char*)string + strlen(string);
+				v = string;
+				w = string;
+
+				for (i = 0; i < 3 && (w <= end); i++) // ericw -- added (w <= end) check
+				{
+					// set v to the next space (or 0 byte), and change that char to a 0 byte
+					while (*v && *v != ' ')
+						v++;
+					*v = 0;
+					((float*)d)[i] = atof(w);
+					w = v = v + 1;
+				}
+				// ericw -- fill remaining elements to 0 in case we hit the end of string
+				// before reading 3 floats.
+				if (i < 3)
+				{
+					con->DWarning("Avoided reading garbage for \"%s\" \"%s\"\n", PR_GetString(key->s_name), s);
+					for (; i < 3; i++)
+						((float*)d)[i] = 0.0f;
+				}
+				break;
+
+			case ev_entity:
+				if (!strncmp(s, "entity ", 7)) // Spike: putentityfieldstring/etc should be able to cope with etos's weirdness.
+					s += 7;
+				*(int*)d = EDICT_TO_PROG(EDICT_NUM(atoi(s)));
+				break;
+
+			case ev_field:
+				def = ED_FindField(s);
+				if (!def)
+				{
+					// johnfitz -- HACK -- suppress error becuase fog/sky fields might not be mentioned in defs.qc
+					if (strncmp(s, "sky", 3) && strcmp(s, "fog"))
+						Con_DPrintf("Can't find field %s\n", s);
+					return false;
+				}
+				*(int*)d = G_INT(def->ofs);
+				break;
+
+			case ev_function:
+				func = ED_FindFunction(s);
+				if (!func)
+				{
+					con->Printf("Can't find function %s\n", s);
+					return false;
+				}
+				*(func_t*)d = func - pr->qcvm->functions;
+				break;
+
+			default:
+				break;
+			}
+			return true;
+		}
+
+	};
+	class SV {
+	public:
+		Engine* engine;
+
+		
+		bool active; // false if only a net client
+
+		bool paused;
+		bool loadgame;	 // handle connections specially
+		bool nomonsters; // server started with 'nomonsters' cvar active
+
+		char lastsave[128];
+
+		int	   lastcheck; // used by PF_checkclient
+		double lastchecktime;
+
+		qcvm_t qcvm; // Spike: entire qcvm state
+
+		char			 name[64];					 // map name
+		char			 modelname[64];				 // maps/<name>.bsp, for model_precache[0]
+		const char* model_precache[MAX_MODELS]; // NULL terminated
+		struct qmodel_s* models[MAX_MODELS];
+		const char* sound_precache[MAX_SOUNDS]; // NULL terminated
+		const char* lightstyles[MAX_LIGHTSTYLES];
+		server_state_t	 state; // some actions are only valid during load
+
+		sizebuf_t datagram;
+		byte	  datagram_buf[MAX_DATAGRAM];
+
+		sizebuf_t reliable_datagram; // copied to all clients at end of frame
+		byte	  reliable_datagram_buf[MAX_DATAGRAM];
+
+		sizebuf_t signon;
+		byte	  signon_buf[MAX_MSGLEN - 2]; // johnfitz -- was 8192, now uses MAX_MSGLEN
+
+		unsigned protocol; // johnfitz
+		unsigned protocolflags;
+
+		sizebuf_t multicast; // selectively copied to clients by the multicast builtin
+		byte	  multicast_buf[MAX_DATAGRAM];
+
+		const char* particle_precache[MAX_PARTICLETYPES]; // NULL terminated
+
+		entity_state_t* static_entities;
+		int				num_statics;
+		int				max_statics;
+
+		struct ambientsound_s
+		{
+			vec3_t		 origin;
+			unsigned int soundindex;
+			float		 volume;
+			float		 attenuation;
+		}  *ambientsounds;
+		int num_ambients;
+		int max_ambients;
+
+		struct svcustomstat_s
+		{
+			int		idx;
+			int		type;
+			int		fld;
+			eval_t* ptr;
+		} customstats[MAX_CL_STATS * 2]; // strings or numeric...
+		size_t numcustomstats;
+
+		int effectsmask; // only enable colored quad/penta dlights in 2021 release
+		
+
+
+		bool active;
+		SV(Engine e) {
+			engine = &e;
+		}
+	};
+	
 	static VID* vid;
 	static COM* com;
 	static SCR* scr;
@@ -1830,10 +3732,16 @@ public:
 	static q* qk;
 	static Tasks* t;
 	static Cbuf* cbuf;
+	static PR* pr;
+	static ED* ed;
+	static SV* sv;
+	static Key* key;
+	static Net* net;
 
-	Engine() {		
+	Engine(int argc, char* argv[]) {
 		
 		sys = new Sys(*this);
+		sz = new SZ(*this);
 
 		
 		sys->InitSDL();
@@ -1842,7 +3750,7 @@ public:
 		sys->Printf("Detected %d CPUs.\n", SDL_GetCPUCount());
 		sys->Printf("Initializing %s.\n", ENGINE_NAME_AND_VER);
 
-		host = new Host(*this);
+		host = new Host(*this,argc,argv);
 
 
 		scr = new SCR(*this);
@@ -1850,10 +3758,14 @@ public:
 		con = new Con(*this);
 		cmd = new Cmd(*this);
 		cvar = new Cvar(*this);
-		sz = new SZ(*this);
 		vid = new VID(*this);
 		msg = new MSG(*this);
 		qk = new q(*this);
+		pr = new PR(*this);
+		ed = new ED(*this);
+		sv = new SV(*this);
+		key = new Key(*this);
+		net = new Net(*this);
 	}
 };
 
@@ -1873,11 +3785,14 @@ Engine::Sys* Engine::sys = nullptr;
 Engine::q* Engine::qk = nullptr;
 Engine::Tasks* Engine::t = nullptr;
 Engine::Cbuf* Engine::cbuf = nullptr;
+Engine::PR* Engine::pr = nullptr;
+Engine::ED* Engine::ed = nullptr;
+Engine::SV* Engine::sv = nullptr;
 
 int main(int argc, char *argv[]) {
 
 	
-	auto bla = new Engine();
+	auto bla = new Engine(argc,argv);
 
 
 
