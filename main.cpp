@@ -49,12 +49,43 @@
 	type name;                    \
 	memset (&name, 0, sizeof (type));
 
+#define REQUIRED_COLOR_BUFFER_FEATURES                                                                                             \
+	(VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | \
+	 VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
+
 
 #define GET_INSTANCE_PROC_ADDR(entrypoint)                                                              \
 	{                                                                                                   \
-		fp##entrypoint = (PFN_vk##entrypoint)fpGetInstanceProcAddr (vulkan_instance, "vk" #entrypoint); \
-		if (fp##entrypoint == NULL)                                                                     \
+		engine->gl->fp##entrypoint = (PFN_vk##entrypoint)engine->gl->fpGetInstanceProcAddr (engine->gl->vulkan_instance, "vk" #entrypoint); \
+		if (engine->gl->fp##entrypoint == NULL)                                                                     \
 			SDL_LogError (SDL_LOG_PRIORITY_ERROR,"vkGetInstanceProcAddr failed to find vk" #entrypoint);                          \
+	}
+
+#define CHAIN_PNEXT(next_ptr, chained) \
+	{                                  \
+		*next_ptr = &chained;          \
+		next_ptr = &chained.pNext;     \
+	}
+
+#define GET_GLOBAL_INSTANCE_PROC_ADDR(_var, entrypoint)                                               \
+	{                                                                                                 \
+		vulkan_globals._var = (PFN_##entrypoint)engine->gl->fpGetInstanceProcAddr (engine->gl->vulkan_instance, #entrypoint); \
+		if (vulkan_globals._var == NULL)                                                              \
+			SDL_LogError (SDL_LOG_PRIORITY_ERROR,"vkGetInstanceProcAddr failed to find " #entrypoint);                          \
+	}
+
+#define GET_DEVICE_PROC_ADDR(entrypoint)                                                                    \
+	{                                                                                                       \
+		engine->gl->fp##entrypoint = (PFN_vk##entrypoint)engine->gl->fpGetDeviceProcAddr (vulkan_globals.device, "vk" #entrypoint); \
+		if (engine->gl->fp##entrypoint == NULL)                                                                         \
+			SDL_LogError (SDL_LOG_PRIORITY_ERROR,"vkGetDeviceProcAddr failed to find vk" #entrypoint);                                \
+	}
+
+#define GET_GLOBAL_DEVICE_PROC_ADDR(_var, entrypoint)                                                     \
+	{                                                                                                     \
+		vulkan_globals._var = (PFN_##entrypoint)engine->gl->fpGetDeviceProcAddr (vulkan_globals.device, #entrypoint); \
+		if (vulkan_globals._var == NULL)                                                                  \
+			SDL_LogError (SDL_LOG_PRIORITY_ERROR,"vkGetDeviceProcAddr failed to find " #entrypoint);                                \
 	}
 
 typedef struct vulkan_pipeline_layout_s
@@ -292,7 +323,100 @@ typedef struct
 #endif
 } vulkanglobals_t;
 
+enum
+{
+	DRIVER_ID_AMD_PROPRIETARY = 1,
+	DRIVER_ID_AMD_OPEN_SOURCE = 2,
+	DRIVER_ID_MESA_RADV = 3,
+	DRIVER_ID_NVIDIA_PROPRIETARY = 4,
+	DRIVER_ID_INTEL_PROPRIETARY_WINDOWS = 5,
+	DRIVER_ID_INTEL_OPEN_SOURCE_MESA = 6,
+	DRIVER_ID_IMAGINATION_PROPRIETARY = 7,
+	DRIVER_ID_QUALCOMM_PROPRIETARY = 8,
+	DRIVER_ID_ARM_PROPRIETARY = 9,
+	DRIVER_ID_GOOGLE_SWIFTSHADER = 10,
+	DRIVER_ID_GGP_PROPRIETARY = 11,
+	DRIVER_ID_BROADCOM_PROPRIETARY = 12,
+	DRIVER_ID_MESA_LLVMPIPE = 13,
+	DRIVER_ID_MOLTENVK = 14,
+	DRIVER_ID_COREAVI_PROPRIETARY = 15,
+	DRIVER_ID_JUICE_PROPRIETARY = 16,
+	DRIVER_ID_VERISILICON_PROPRIETARY = 17,
+	DRIVER_ID_MESA_TURNIP = 18,
+	DRIVER_ID_MESA_V3DV = 19,
+	DRIVER_ID_MESA_PANVK = 20,
+	DRIVER_ID_SAMSUNG_PROPRIETARY = 21,
+	DRIVER_ID_MESA_VENUS = 22,
+};
+
 vulkanglobals_t vulkan_globals;
+
+/*
+===============
+GetDeviceVendorFromDriverProperties
+===============
+*/
+static const char* GetDeviceVendorFromDriverProperties(VkPhysicalDeviceDriverProperties* driver_properties)
+{
+	switch ((int)driver_properties->driverID)
+	{
+	case DRIVER_ID_AMD_PROPRIETARY:
+	case DRIVER_ID_AMD_OPEN_SOURCE:
+	case DRIVER_ID_MESA_RADV:
+		return "AMD";
+	case DRIVER_ID_NVIDIA_PROPRIETARY:
+		return "NVIDIA";
+	case DRIVER_ID_INTEL_PROPRIETARY_WINDOWS:
+	case DRIVER_ID_INTEL_OPEN_SOURCE_MESA:
+		return "Intel";
+	case DRIVER_ID_IMAGINATION_PROPRIETARY:
+		return "ImgTec";
+	case DRIVER_ID_QUALCOMM_PROPRIETARY:
+	case DRIVER_ID_MESA_TURNIP:
+		return "Qualcomm";
+	case DRIVER_ID_ARM_PROPRIETARY:
+	case DRIVER_ID_MESA_PANVK:
+		return "ARM";
+	case DRIVER_ID_GOOGLE_SWIFTSHADER:
+	case DRIVER_ID_GGP_PROPRIETARY:
+		return "Google";
+	case DRIVER_ID_BROADCOM_PROPRIETARY:
+		return "Broadcom";
+	case DRIVER_ID_MESA_V3DV:
+		return "Raspberry Pi";
+	case DRIVER_ID_MESA_LLVMPIPE:
+	case DRIVER_ID_MESA_VENUS:
+		return "MESA";
+	case DRIVER_ID_MOLTENVK:
+		return "MoltenVK";
+	case DRIVER_ID_SAMSUNG_PROPRIETARY:
+		return "Samsung";
+	default:
+		return NULL;
+	}
+}
+
+static const char* GetDeviceVendorFromDeviceProperties(void)
+{
+	switch (vulkan_globals.device_properties.vendorID)
+	{
+	case 0x8086:
+		return "Intel";
+	case 0x10DE:
+		return "NVIDIA";
+	case 0x1002:
+		return "AMD";
+	case 0x1010:
+		return "ImgTec";
+	case 0x13B5:
+		return "ARM";
+	case 0x5143:
+		return "Qualcomm";
+	}
+
+	return NULL;
+}
+
 
 void* Mem_Alloc(const size_t size)
 {
@@ -312,6 +436,15 @@ void* Mem_Realloc(void* ptr, const size_t size)
 void Mem_Free(const void* ptr)
 {
 	SDL_free((void*)ptr);
+}
+
+float CLAMP(float* value, float min, float max)
+{
+	if (*value < min)
+		*value = min;
+	else if (*value > max)
+		*value = max;
+	return *value;
 }
 
 #ifdef _DEBUG
@@ -391,12 +524,16 @@ public:
 		VkDebugUtilsMessengerEXT debug_utils_messenger;
 
 #endif
+		class Instance {
+		public:
+			Engine* engine;
 
-		GL(Engine e) {
-			engine = &e;
-			engine->gl = this;
 
-			// Initialize Vulkan instance
+			Instance(Engine e) {
+				engine = &e;
+				engine->gl->instance = this;
+
+				// Initialize Vulkan instance
 
 				VkResult	 err;
 				uint32_t	 i;
@@ -438,12 +575,12 @@ public:
 				}
 
 				vulkan_globals.vulkan_1_1_available = false;
-				fpGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr();
+				engine->gl->fpGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr();
 				GET_INSTANCE_PROC_ADDR(EnumerateInstanceVersion);
-				if (fpEnumerateInstanceVersion)
+				if (engine->gl->fpEnumerateInstanceVersion)
 				{
 					uint32_t api_version = 0;
-					fpEnumerateInstanceVersion(&api_version);
+					engine->gl->fpEnumerateInstanceVersion(&api_version);
 					if (api_version >= VK_MAKE_VERSION(1, 1, 0))
 					{
 						SDL_Log("Using Vulkan 1.1\n");
@@ -484,12 +621,12 @@ public:
 
 				instance_create_info.enabledExtensionCount = sdl_extension_count + additionalExtensionCount;
 
-				err = vkCreateInstance(&instance_create_info, NULL, &vulkan_instance);
+				err = vkCreateInstance(&instance_create_info, NULL, &engine->gl->vulkan_instance);
 				if (err != VK_SUCCESS)
 					SDL_LogError(SDL_LOG_PRIORITY_ERROR, "Couldn't create Vulkan instance");
 
-				if (!SDL_Vulkan_CreateSurface(engine->vid->draw_context, vulkan_instance, &vulkan_surface))
-					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Couldn't create Vulkan surface");
+				if (!SDL_Vulkan_CreateSurface(engine->vid->draw_context, engine->gl->vulkan_instance, &engine->gl->vulkan_surface))
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR, "Couldn't create Vulkan surface");
 
 				GET_INSTANCE_PROC_ADDR(GetDeviceProcAddr);
 				GET_INSTANCE_PROC_ADDR(GetPhysicalDeviceSurfaceSupportKHR);
@@ -517,7 +654,7 @@ public:
 				{
 					SDL_Log("Creating debug report callback\n");
 					GET_INSTANCE_PROC_ADDR(CreateDebugUtilsMessengerEXT);
-					if (fpCreateDebugUtilsMessengerEXT)
+					if (engine->gl->fpCreateDebugUtilsMessengerEXT)
 					{
 						ZEROED_STRUCT(VkDebugUtilsMessengerCreateInfoEXT, debug_utils_messenger_create_info);
 						debug_utils_messenger_create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
@@ -525,15 +662,404 @@ public:
 						debug_utils_messenger_create_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT;
 						debug_utils_messenger_create_info.pfnUserCallback = DebugMessageCallback;
 
-						err = fpCreateDebugUtilsMessengerEXT(vulkan_instance, &debug_utils_messenger_create_info, NULL, &debug_utils_messenger);
+						err = engine->gl->fpCreateDebugUtilsMessengerEXT(engine->gl->vulkan_instance, &debug_utils_messenger_create_info, NULL, &engine->gl->debug_utils_messenger);
 						if (err != VK_SUCCESS)
-							SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Could not create debug report callback");
+							SDL_LogError(SDL_LOG_PRIORITY_ERROR, "Could not create debug report callback");
 					}
 				}
 #endif
 
 				Mem_Free((void*)instance_extensions);
 			}
+
+		};
+		class Device {
+		public:
+			Engine* engine;
+			Device(Engine e) {
+				engine = &e;
+				engine->gl->device = this;
+
+				VkResult err;
+				uint32_t i;
+				int		 arg_index;
+				int		 device_index = 0;
+
+				bool subgroup_size_control = false;
+
+				uint32_t physical_device_count;
+				err = vkEnumeratePhysicalDevices(engine->gl->vulkan_instance, &physical_device_count, NULL);
+				if (err != VK_SUCCESS || physical_device_count == 0)
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Couldn't find any Vulkan devices");
+
+				arg_index = engine->com->CheckParm("-device");
+				if (arg_index && (arg_index < (engine->com->argc - 1)))
+				{
+					const char* device_num = engine->com->argv[arg_index + 1];
+					device_index = CLAMP(0, atoi(device_num) - 1, (int)physical_device_count - 1);
+				}
+
+				VkPhysicalDevice* physical_devices = (VkPhysicalDevice*)Mem_Alloc(sizeof(VkPhysicalDevice) * physical_device_count);
+				vkEnumeratePhysicalDevices(engine->gl->vulkan_instance, &physical_device_count, physical_devices);
+				if (!arg_index)
+				{
+					// If no device was specified by command line pick first discrete GPU
+					for (i = 0; i < physical_device_count; ++i)
+					{
+						VkPhysicalDeviceProperties device_properties;
+						vkGetPhysicalDeviceProperties(physical_devices[i], &device_properties);
+						if (device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
+						{
+							device_index = (int)i;
+							break;
+						}
+					}
+				}
+				engine->gl->vulkan_physical_device = physical_devices[device_index];
+				Mem_Free(physical_devices);
+
+				bool found_swapchain_extension = false;
+				vulkan_globals.dedicated_allocation = false;
+				vulkan_globals.full_screen_exclusive = false;
+				vulkan_globals.swap_chain_full_screen_acquired = false;
+				vulkan_globals.screen_effects_sops = false;
+				vulkan_globals.ray_query = false;
+
+				vkGetPhysicalDeviceMemoryProperties(engine->gl->vulkan_physical_device, &vulkan_globals.memory_properties);
+				vkGetPhysicalDeviceProperties(engine->gl->vulkan_physical_device, &vulkan_globals.device_properties);
+
+				bool driver_properties_available = false;
+				uint32_t device_extension_count;
+				err = vkEnumerateDeviceExtensionProperties(engine->gl->vulkan_physical_device, NULL, &device_extension_count, NULL);
+
+				if (err == VK_SUCCESS || device_extension_count > 0)
+				{
+					VkExtensionProperties* device_extensions = (VkExtensionProperties*)Mem_Alloc(sizeof(VkExtensionProperties) * device_extension_count);
+					err = vkEnumerateDeviceExtensionProperties(engine->gl->vulkan_physical_device, NULL, &device_extension_count, device_extensions);
+
+					for (i = 0; i < device_extension_count; ++i)
+					{
+						if (strcmp(VK_KHR_SWAPCHAIN_EXTENSION_NAME, device_extensions[i].extensionName) == 0)
+							found_swapchain_extension = true;
+						if (strcmp(VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME, device_extensions[i].extensionName) == 0)
+							vulkan_globals.dedicated_allocation = true;
+						if (vulkan_globals.get_physical_device_properties_2 && strcmp(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME, device_extensions[i].extensionName) == 0)
+							driver_properties_available = true;
+						if (strcmp(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME, device_extensions[i].extensionName) == 0)
+							subgroup_size_control = true;
+#if defined(VK_EXT_full_screen_exclusive)
+						if (strcmp(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME, device_extensions[i].extensionName) == 0)
+							vulkan_globals.full_screen_exclusive = true;
+#endif
+						if (strcmp(VK_KHR_RAY_QUERY_EXTENSION_NAME, device_extensions[i].extensionName) == 0)
+							vulkan_globals.ray_query = true;
+					}
+
+					Mem_Free(device_extensions);
+				}
+
+				const char* vendor = NULL;
+				ZEROED_STRUCT(VkPhysicalDeviceDriverProperties, driver_properties);
+				if (driver_properties_available)
+				{
+					driver_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+
+					ZEROED_STRUCT(VkPhysicalDeviceProperties2, physical_device_properties_2);
+					physical_device_properties_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+					physical_device_properties_2.pNext = &driver_properties;
+					engine->gl->fpGetPhysicalDeviceProperties2(engine->gl->vulkan_physical_device, &physical_device_properties_2);
+
+					vendor = GetDeviceVendorFromDriverProperties(&driver_properties);
+				}
+
+				if (!vendor)
+					vendor = GetDeviceVendorFromDeviceProperties();
+
+				if (vendor)
+					SDL_Log("Vendor: %s\n", vendor);
+				else
+					SDL_Log("Vendor: Unknown (0x%x)\n", vulkan_globals.device_properties.vendorID);
+
+				SDL_Log("Device: %s\n", vulkan_globals.device_properties.deviceName);
+
+				if (driver_properties_available)
+					SDL_Log("Driver: %s %s\n", driver_properties.driverName, driver_properties.driverInfo);
+
+				if (!found_swapchain_extension)
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Couldn't find %s extension", VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+				bool found_graphics_queue = false;
+
+				uint32_t vulkan_queue_count;
+				vkGetPhysicalDeviceQueueFamilyProperties(engine->gl->vulkan_physical_device, &vulkan_queue_count, NULL);
+				if (vulkan_queue_count == 0)
+				{
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Couldn't find any Vulkan queues");
+				}
+
+				VkQueueFamilyProperties* queue_family_properties = (VkQueueFamilyProperties*)Mem_Alloc(vulkan_queue_count * sizeof(VkQueueFamilyProperties));
+				vkGetPhysicalDeviceQueueFamilyProperties(engine->gl->vulkan_physical_device, &vulkan_queue_count, queue_family_properties);
+
+				// Iterate over each queue to learn whether it supports presenting:
+				VkBool32* queue_supports_present = (VkBool32*)Mem_Alloc(vulkan_queue_count * sizeof(VkBool32));
+				for (i = 0; i < vulkan_queue_count; ++i)
+					engine->gl->fpGetPhysicalDeviceSurfaceSupportKHR(engine->gl->vulkan_physical_device, i, engine->gl->vulkan_surface, &queue_supports_present[i]);
+
+				for (i = 0; i < vulkan_queue_count; ++i)
+				{
+					if (((queue_family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) && queue_supports_present[i])
+					{
+						found_graphics_queue = true;
+						vulkan_globals.gfx_queue_family_index = i;
+						break;
+					}
+				}
+
+				Mem_Free(queue_supports_present);
+				Mem_Free(queue_family_properties);
+
+				if (!found_graphics_queue)
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Couldn't find graphics queue");
+
+				float queue_priorities[] = { 0.0 };
+				ZEROED_STRUCT(VkDeviceQueueCreateInfo, queue_create_info);
+				queue_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+				queue_create_info.queueFamilyIndex = vulkan_globals.gfx_queue_family_index;
+				queue_create_info.queueCount = 1;
+				queue_create_info.pQueuePriorities = queue_priorities;
+
+				ZEROED_STRUCT(VkPhysicalDeviceSubgroupProperties, physical_device_subgroup_properties);
+				ZEROED_STRUCT(VkPhysicalDeviceSubgroupSizeControlPropertiesEXT, physical_device_subgroup_size_control_properties);
+				ZEROED_STRUCT(VkPhysicalDeviceSubgroupSizeControlFeaturesEXT, subgroup_size_control_features);
+				ZEROED_STRUCT(VkPhysicalDeviceBufferDeviceAddressFeaturesKHR, buffer_device_address_features);
+				ZEROED_STRUCT(VkPhysicalDeviceAccelerationStructureFeaturesKHR, acceleration_structure_features);
+				ZEROED_STRUCT(VkPhysicalDeviceRayQueryFeaturesKHR, ray_query_features);
+				memset(&vulkan_globals.physical_device_acceleration_structure_properties, 0, sizeof(vulkan_globals.physical_device_acceleration_structure_properties));
+				if (vulkan_globals.vulkan_1_1_available)
+				{
+					ZEROED_STRUCT(VkPhysicalDeviceProperties2KHR, physical_device_properties_2);
+					physical_device_properties_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+					void** device_properties_next = &physical_device_properties_2.pNext;
+
+					if (subgroup_size_control)
+					{
+						physical_device_subgroup_size_control_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT;
+						CHAIN_PNEXT(device_properties_next, physical_device_subgroup_size_control_properties);
+						physical_device_subgroup_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+						CHAIN_PNEXT(device_properties_next, physical_device_subgroup_properties);
+					}
+					if (vulkan_globals.ray_query)
+					{
+						vulkan_globals.physical_device_acceleration_structure_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+						CHAIN_PNEXT(device_properties_next, vulkan_globals.physical_device_acceleration_structure_properties);
+					}
+
+					engine->gl->fpGetPhysicalDeviceProperties2(engine->gl->vulkan_physical_device, &physical_device_properties_2);
+
+					ZEROED_STRUCT(VkPhysicalDeviceFeatures2, physical_device_features_2);
+					physical_device_features_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+					void** device_features_next = &physical_device_features_2.pNext;
+
+					if (subgroup_size_control)
+					{
+						subgroup_size_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
+						CHAIN_PNEXT(device_features_next, subgroup_size_control_features);
+					}
+					if (vulkan_globals.ray_query)
+					{
+						buffer_device_address_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR;
+						CHAIN_PNEXT(device_features_next, buffer_device_address_features);
+						acceleration_structure_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+						CHAIN_PNEXT(device_features_next, acceleration_structure_features);
+						ray_query_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+						CHAIN_PNEXT(device_features_next, ray_query_features);
+					}
+
+					engine->gl->fpGetPhysicalDeviceFeatures2(engine->gl->vulkan_physical_device, &physical_device_features_2);
+					vulkan_globals.device_features = physical_device_features_2.features;
+				}
+				else
+					vkGetPhysicalDeviceFeatures(engine->gl->vulkan_physical_device, &vulkan_globals.device_features);
+
+#ifdef __APPLE__ // MoltenVK lies about this
+				vulkan_globals.device_features.sampleRateShading = false;
+#endif
+
+				vulkan_globals.screen_effects_sops =
+					vulkan_globals.vulkan_1_1_available && subgroup_size_control && subgroup_size_control_features.subgroupSizeControl &&
+					subgroup_size_control_features.computeFullSubgroups && ((physical_device_subgroup_properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0) &&
+					((physical_device_subgroup_properties.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0)
+					// Shader only supports subgroup sizes from 4 to 64. 128 can't be supported because Vulkan spec states that workgroup size
+					// in x dimension must be a multiple of the subgroup size for VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT.
+					&& (physical_device_subgroup_size_control_properties.minSubgroupSize >= 4) && (physical_device_subgroup_size_control_properties.maxSubgroupSize <= 64);
+				if (vulkan_globals.screen_effects_sops)
+					SDL_Log("Using subgroup operations\n");
+
+				vulkan_globals.ray_query = vulkan_globals.ray_query && acceleration_structure_features.accelerationStructure && ray_query_features.rayQuery &&
+					buffer_device_address_features.bufferDeviceAddress;
+				if (vulkan_globals.ray_query)
+					SDL_Log("Using ray queries\n");
+
+				const char* device_extensions[32] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+				uint32_t	numEnabledExtensions = 1;
+				if (vulkan_globals.dedicated_allocation)
+				{
+					device_extensions[numEnabledExtensions++] = VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME;
+					device_extensions[numEnabledExtensions++] = VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME;
+				}
+				if (vulkan_globals.screen_effects_sops)
+					device_extensions[numEnabledExtensions++] = VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
+#if defined(VK_EXT_full_screen_exclusive)
+				if (vulkan_globals.full_screen_exclusive)
+					device_extensions[numEnabledExtensions++] = VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME;
+#endif
+				if (vulkan_globals.ray_query)
+				{
+					device_extensions[numEnabledExtensions++] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
+					device_extensions[numEnabledExtensions++] = VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME;
+					device_extensions[numEnabledExtensions++] = VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME;
+					device_extensions[numEnabledExtensions++] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
+					device_extensions[numEnabledExtensions++] = VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME;
+					device_extensions[numEnabledExtensions++] = VK_KHR_SPIRV_1_4_EXTENSION_NAME;
+					device_extensions[numEnabledExtensions++] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
+					device_extensions[numEnabledExtensions++] = VK_KHR_RAY_QUERY_EXTENSION_NAME;
+				}
+
+				const VkBool32 extended_format_support = vulkan_globals.device_features.shaderStorageImageExtendedFormats;
+				const VkBool32 sampler_anisotropic = vulkan_globals.device_features.samplerAnisotropy;
+
+				ZEROED_STRUCT(VkPhysicalDeviceFeatures, device_features);
+				device_features.shaderStorageImageExtendedFormats = extended_format_support;
+				device_features.samplerAnisotropy = sampler_anisotropic;
+				device_features.sampleRateShading = vulkan_globals.device_features.sampleRateShading;
+				device_features.fillModeNonSolid = vulkan_globals.device_features.fillModeNonSolid;
+				device_features.multiDrawIndirect = vulkan_globals.device_features.multiDrawIndirect;
+
+				vulkan_globals.non_solid_fill = (device_features.fillModeNonSolid == VK_TRUE) ? true : false;
+				vulkan_globals.multi_draw_indirect = (device_features.multiDrawIndirect == VK_TRUE) ? true : false;
+
+				ZEROED_STRUCT(VkDeviceCreateInfo, device_create_info);
+				device_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+				void** device_create_info_next = (void**)&device_create_info.pNext;
+				if (vulkan_globals.screen_effects_sops)
+					CHAIN_PNEXT(device_create_info_next, subgroup_size_control_features);
+				if (vulkan_globals.ray_query)
+				{
+					CHAIN_PNEXT(device_create_info_next, buffer_device_address_features);
+					CHAIN_PNEXT(device_create_info_next, acceleration_structure_features);
+					CHAIN_PNEXT(device_create_info_next, ray_query_features);
+				}
+				device_create_info.queueCreateInfoCount = 1;
+				device_create_info.pQueueCreateInfos = &queue_create_info;
+				device_create_info.enabledExtensionCount = numEnabledExtensions;
+				device_create_info.ppEnabledExtensionNames = device_extensions;
+				device_create_info.pEnabledFeatures = &device_features;
+
+				err = vkCreateDevice(engine->gl->vulkan_physical_device, &device_create_info, NULL, &vulkan_globals.device);
+				if (err != VK_SUCCESS)
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Couldn't create Vulkan device");
+
+				GET_DEVICE_PROC_ADDR(CreateSwapchainKHR);
+				GET_DEVICE_PROC_ADDR(DestroySwapchainKHR);
+				GET_DEVICE_PROC_ADDR(GetSwapchainImagesKHR);
+				GET_DEVICE_PROC_ADDR(AcquireNextImageKHR);
+				GET_DEVICE_PROC_ADDR(QueuePresentKHR);
+
+				SDL_Log("Device extensions:\n");
+				for (i = 0; i < numEnabledExtensions; ++i)
+					SDL_Log(" %s\n", device_extensions[i]);
+
+#if defined(VK_EXT_full_screen_exclusive)
+				if (vulkan_globals.full_screen_exclusive)
+				{
+					GET_DEVICE_PROC_ADDR(AcquireFullScreenExclusiveModeEXT);
+					GET_DEVICE_PROC_ADDR(ReleaseFullScreenExclusiveModeEXT);
+				}
+#endif
+				if (vulkan_globals.ray_query)
+				{
+					GET_GLOBAL_DEVICE_PROC_ADDR(vk_get_buffer_device_address, vkGetBufferDeviceAddressKHR);
+					GET_GLOBAL_DEVICE_PROC_ADDR(vk_get_acceleration_structure_build_sizes, vkGetAccelerationStructureBuildSizesKHR);
+					GET_GLOBAL_DEVICE_PROC_ADDR(vk_create_acceleration_structure, vkCreateAccelerationStructureKHR);
+					GET_GLOBAL_DEVICE_PROC_ADDR(vk_destroy_acceleration_structure, vkDestroyAccelerationStructureKHR);
+					GET_GLOBAL_DEVICE_PROC_ADDR(vk_cmd_build_acceleration_structures, vkCmdBuildAccelerationStructuresKHR);
+				}
+#ifdef _DEBUG
+				if (vulkan_globals.debug_utils)
+				{
+					GET_INSTANCE_PROC_ADDR(SetDebugUtilsObjectNameEXT);
+					GET_GLOBAL_INSTANCE_PROC_ADDR(vk_cmd_begin_debug_utils_label, vkCmdBeginDebugUtilsLabelEXT);
+					GET_GLOBAL_INSTANCE_PROC_ADDR(vk_cmd_end_debug_utils_label, vkCmdEndDebugUtilsLabelEXT);
+				}
+#endif
+
+				vkGetDeviceQueue(vulkan_globals.device, vulkan_globals.gfx_queue_family_index, 0, &vulkan_globals.queue);
+
+				VkFormatProperties format_properties;
+
+				// Find color buffer format
+				vulkan_globals.color_format = VK_FORMAT_R8G8B8A8_UNORM;
+
+				if (extended_format_support == VK_TRUE)
+				{
+					vkGetPhysicalDeviceFormatProperties(engine->gl->vulkan_physical_device, VK_FORMAT_A2B10G10R10_UNORM_PACK32, &format_properties);
+					bool a2_b10_g10_r10_support = (format_properties.optimalTilingFeatures & REQUIRED_COLOR_BUFFER_FEATURES) == REQUIRED_COLOR_BUFFER_FEATURES;
+
+					if (a2_b10_g10_r10_support)
+					{
+						SDL_Log("Using A2B10G10R10 color buffer format\n");
+						vulkan_globals.color_format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+					}
+				}
+
+				// Find depth format
+				vkGetPhysicalDeviceFormatProperties(engine->gl->vulkan_physical_device, VK_FORMAT_D24_UNORM_S8_UINT, &format_properties);
+				bool x8_d24_support = (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+				vkGetPhysicalDeviceFormatProperties(engine->gl->vulkan_physical_device, VK_FORMAT_D32_SFLOAT_S8_UINT, &format_properties);
+				bool d32_support = (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+
+				vulkan_globals.depth_format = VK_FORMAT_UNDEFINED;
+				if (d32_support)
+				{
+					SDL_Log("Using D32_S8 depth buffer format\n");
+					vulkan_globals.depth_format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+				}
+				else if (x8_d24_support)
+				{
+					SDL_Log("Using D24_S8 depth buffer format\n");
+					vulkan_globals.depth_format = VK_FORMAT_D24_UNORM_S8_UINT;
+				}
+				else
+				{
+					// This cannot happen with a compliant Vulkan driver. The spec requires support for one of the formats.
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Cannot find VK_FORMAT_D24_UNORM_S8_UINT or VK_FORMAT_D32_SFLOAT_S8_UINT depth buffer format");
+				}
+
+				SDL_Log("\n");
+
+				GET_GLOBAL_DEVICE_PROC_ADDR(vk_cmd_bind_pipeline, vkCmdBindPipeline);
+				GET_GLOBAL_DEVICE_PROC_ADDR(vk_cmd_push_constants, vkCmdPushConstants);
+				GET_GLOBAL_DEVICE_PROC_ADDR(vk_cmd_bind_descriptor_sets, vkCmdBindDescriptorSets);
+				GET_GLOBAL_DEVICE_PROC_ADDR(vk_cmd_bind_index_buffer, vkCmdBindIndexBuffer);
+				GET_GLOBAL_DEVICE_PROC_ADDR(vk_cmd_bind_vertex_buffers, vkCmdBindVertexBuffers);
+				GET_GLOBAL_DEVICE_PROC_ADDR(vk_cmd_draw, vkCmdDraw);
+				GET_GLOBAL_DEVICE_PROC_ADDR(vk_cmd_draw_indexed, vkCmdDrawIndexed);
+				GET_GLOBAL_DEVICE_PROC_ADDR(vk_cmd_draw_indexed_indirect, vkCmdDrawIndexedIndirect);
+				GET_GLOBAL_DEVICE_PROC_ADDR(vk_cmd_pipeline_barrier, vkCmdPipelineBarrier);
+				GET_GLOBAL_DEVICE_PROC_ADDR(vk_cmd_copy_buffer_to_image, vkCmdCopyBufferToImage);
+
+			}
+		};
+
+		Instance* instance;
+		Device* device;
+
+		GL(Engine e) {
+			engine = &e;
+			engine->gl = this;
+			instance = new Instance(*engine);
+			device = new Device(*engine);
+		}
 
 	};
 	class VID {
@@ -571,10 +1097,40 @@ public:
 		}
 	};
 
+	class COM {
+	public:
+		int argc; char** argv;
+		COM(int c, char* v[]) {
+			argc = c;
+			argv = v;
+		}
+
+		int CheckParmNext(int last, const char* parm)
+		{
+			int i;
+
+			for (i = last + 1; i < argc; i++)
+			{
+				if (!argv[i])
+					continue; // NEXTSTEP sometimes clears appkit vars.
+				if (!strcmp(parm, argv[i]))
+					return i;
+			}
+
+			return 0;
+		}
+		int CheckParm(const char* parm)
+		{
+			return CheckParmNext(0, parm);
+		}
+	};
+
 	VID* vid = nullptr;
 	GL* gl = nullptr;
+	COM* com = nullptr;
 
 	Engine(int ct, char* var[]) {
+		com = new COM(ct, var);
 		vid = new VID(*this);
 	}
 };
