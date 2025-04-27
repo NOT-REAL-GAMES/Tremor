@@ -40,7 +40,7 @@
 #include <SDL2/SDL_vulkan.h>
 
 #include "atomics.h"
-
+#include <vector>
 #include <sys/types.h>
 #include <errno.h>
 #include <io.h>
@@ -48,6 +48,9 @@
 
 #include <iostream>
 #include <cstring>
+
+#undef SendMessage
+#undef GetMessage
 
 #define LERP_BANDAID
 
@@ -85,6 +88,111 @@
 #define MAX_SOUNDS		  2048 // johnfitz -- was 256
 #define MAX_PARTICLETYPES 2048
 
+#define clc_bad			0
+#define clc_nop			1
+#define clc_disconnect	2
+#define clc_move		3  // [usercmd_t]
+#define clc_stringcmd	4  // [string] message
+#define clcdp_ackframe	50 // [long] frame sequence. reused by fte replacement deltas
+
+#define svc_bad		   0
+#define svc_nop		   1
+#define svc_disconnect 2
+#define svc_updatestat 3 // [byte] [long]
+#define svc_version	   4 // [long] server version
+#define svc_setview	   5 // [short] entity number
+#define svc_sound	   6 // <see code>
+#define svc_time	   7 // [float] server time
+#define svc_print	   8 // [string] null terminated string
+#define svc_stufftext \
+	9					// [string] stuffed into client's console buffer
+						// the string should be \n terminated
+#define svc_setangle 10 // [angle3] set the view angle to this absolute value
+#define svc_serverinfo \
+	11							// [long] version
+								// [string] signon string
+								// [string]..[0]model cache
+								// [string]...[0]sounds cache
+#define svc_lightstyle		 12 // [byte] [string]
+#define svc_updatename		 13 // [byte] [string]
+#define svc_updatefrags		 14 // [byte] [short]
+#define svc_clientdata		 15 // <shortbits + data>
+#define svc_stopsound		 16 // <see code>
+#define svc_updatecolors	 17 // [byte] [byte]
+#define svc_particle		 18 // [vec3] <variable>
+#define svc_damage			 19
+#define svc_spawnstatic		 20
+// #define svc_spawnbinary		21
+#define svcfte_spawnstatic2	 21
+#define svc_spawnbaseline	 22
+#define svc_temp_entity		 23
+#define svc_setpause		 24 // [byte] on / off
+#define svc_signonnum		 25 // [byte]  used for the signon sequence
+#define svc_centerprint		 26 // [string] to put in center of the screen
+#define svc_killedmonster	 27
+#define svc_foundsecret		 28
+#define svc_spawnstaticsound 29 // [coord3] [byte] samp [byte] vol [byte] aten
+#define svc_intermission	 30 // [string] music
+#define svc_finale			 31 // [string] music [string] text
+#define svc_cdtrack			 32 // [byte] track [byte] looptrack
+#define svc_sellscreen		 33
+#define svc_cutscene		 34
+
+// johnfitz -- PROTOCOL_FITZQUAKE -- new server messages
+#define svc_skybox			  37 // [string] name
+#define svc_bf				  40
+#define svc_fog				  41 // [byte] density [byte] red [byte] green [byte] blue [float] time
+#define svc_spawnbaseline2	  42 // support for large modelindex, large framenum, alpha, using flags
+#define svc_spawnstatic2	  43 // support for large modelindex, large framenum, alpha, using flags
+#define svc_spawnstaticsound2 44 // [coord3] [short] samp [byte] vol [byte] aten
+// johnfitz
+
+// 2021 re-release server messages - see:
+// https://steamcommunity.com/sharedfiles/filedetails/?id=2679459726
+#define svc_botchat		   38
+#define svc_setviews	   45
+#define svc_updateping	   46
+#define svc_updatesocial   47
+#define svc_updateplinfo   48
+#define svc_rawprint	   49
+#define svc_servervars	   50
+#define svc_seq			   51
+// Note: svc_achievement has same value as svcdp_effect!
+#define svc_achievement	   52 // [string] id
+#define svc_chat		   53
+#define svc_levelcompleted 54
+#define svc_backtolobby	   55
+#define svc_localsound	   56
+
+// spike -- some extensions for particles.
+// some extra stuff for fte's pext2_replacementdeltas, including stats
+// fte reuses the dp svcs for nq (instead of qw-specific ones), at least where the protocol is identical. this should make dpp7 support a little easier if you
+// ever want to implement that. dp has a tendancy to use the svcs even when told to use protocol 15, so supporting them helps there too.
+#define svcdp_downloaddata	 50
+#define svcdp_updatestatbyte 51
+#define svcdp_effect		 52 // [vector] org [byte] modelindex [byte] startframe [byte] framecount [byte] framerate
+#define svcdp_effect2		 53 // [vector] org [short] modelindex [short] startframe [byte] framecount [byte] framerate
+#define svcdp_precache \
+	54 // [short] precacheindex [string] filename. index&0x8000 = sound, 0x4000 = particle, 0xc000 = reserved (probably to reclaim these bits eventually),
+	   // otherwise model.
+#define svcdp_spawnbaseline2	55
+// Note: svcdp_spawnstatic2 has the same value of svc_localsound from 2021 re-release!
+#define svcdp_spawnstatic2		56
+#define svcdp_entities			57
+#define svcdp_csqcentities		58
+#define svcdp_spawnstaticsound2 59 // [coord3] [short] samp [byte] vol [byte] aten
+#define svcdp_trailparticles	60 // [short] entnum [short] effectnum [vector] start [vector] end
+#define svcdp_pointparticles	61 // [short] effectnum [vector] start [vector] velocity [short] count
+#define svcdp_pointparticles1	62 // [short] effectnum [vector] start, same as svc_pointparticles except velocity is zero and count is 1
+#define svcfte_spawnbaseline2	66
+#define svcfte_updatestatstring 78
+#define svcfte_updatestatfloat	79
+#define svcfte_cgamepacket		83
+#define svcfte_voicechat		84
+#define svcfte_setangledelta	85
+#define svcfte_updateentities	86
+
+#define IS_LOOP_DRIVER(p) ((p) == 0)
 
 #define TREMOR_VER_STRING	  QS_STRINGIFY (TREMOR_VERSION) "." QS_STRINGIFY (TREMOR_VER_PATCH) TREMOR_VER_SUFFIX
 
@@ -220,6 +328,69 @@
 		(b)[3] = (a)[3];  \
 	} while (0)
 
+short ShortSwap(short l)
+{
+	byte b1, b2;
+
+	b1 = l & 255;
+	b2 = (l >> 8) & 255;
+
+	return ((unsigned short)b1 << 8) + b2;
+}
+
+short ShortNoSwap(short l)
+{
+	return l;
+}
+
+int LongSwap(int l)
+{
+	byte b1, b2, b3, b4;
+
+	b1 = l & 255;
+	b2 = (l >> 8) & 255;
+	b3 = (l >> 16) & 255;
+	b4 = (l >> 24) & 255;
+
+	return ((unsigned int)b1 << 24) + ((unsigned int)b2 << 16) + ((unsigned int)b3 << 8) + b4;
+}
+
+int LongNoSwap(int l)
+{
+	return l;
+}
+
+float FloatSwap(float f)
+{
+	union
+	{
+		float f;
+		byte  b[4];
+	} dat1, dat2;
+
+	dat1.f = f;
+	dat2.b[0] = dat1.b[3];
+	dat2.b[1] = dat1.b[2];
+	dat2.b[2] = dat1.b[1];
+	dat2.b[3] = dat1.b[0];
+	return dat2.f;
+}
+
+float FloatNoSwap(float f)
+{
+	return f;
+}
+
+short (*BigShort) (short l) = ShortSwap;
+short (*LittleShort) (short l) = ShortNoSwap;
+
+int (*BigLong) (int l) = LongSwap;
+int (*LittleLong) (int l) = LongNoSwap;
+
+float (*BigFloat) (float l) = FloatSwap;
+float (*LittleFloat) (float l) = FloatNoSwap;
+
+
 #define sound_nominal_clip_dist 1000.0
 
 #define sfunc net_drivers[sock->driver]
@@ -234,6 +405,25 @@ typedef enum
 	CPE_NOTRUNC,	// return parse error in case of overflow
 	CPE_ALLOWTRUNC, // truncate com_token in case of overflow
 } cpe_mode;
+#define HOSTCACHESIZE 128 // fixme: make dynamic.
+
+struct qsockaddr {
+	short qsa_family;
+	unsigned char qsa_data[62];
+};
+
+typedef struct
+{
+	char			 name[64];
+	char			 map[16];
+	char			 gamedir[16];
+	char			 cname[NET_NAMELEN];
+	int				 users;
+	int				 maxusers;
+	int				 driver;
+	int				 ldriver;
+	struct qsockaddr addr;
+} hostcache_t;
 
 typedef struct
 {
@@ -286,6 +476,8 @@ static void* Max(void* a, void* b)
 
 typedef unsigned int func_t;
 typedef int			 string_t;
+
+typedef char qhostaddr_t[NET_NAMELEN];
 
 typedef struct
 {
@@ -388,6 +580,32 @@ typedef struct
 
 typedef void (*builtin_t) (void);
 
+typedef struct
+{
+	char name[MAX_QPATH];
+	int	 filepos, filelen;
+} packfile_t;
+
+typedef struct pack_s
+{
+	char		filename[MAX_OSPATH];
+	int			handle;
+	int			numfiles;
+	packfile_t* files;
+} pack_t;
+
+typedef struct searchpath_s
+{
+	unsigned int		 path_id; // identifier assigned to the game directory
+	// Note that <install_dir>/game1 and
+	// <userdir>/game1 have the same id.
+	char				 filename[MAX_OSPATH];
+	pack_t* pack;			 // only one of filename / pack will be used
+	char				 dir[MAX_QPATH]; // directory name: "id1", "rogue", etc.
+	struct searchpath_s* next;
+} searchpath_t;
+
+
 typedef struct hash_map_s
 {
 	uint32_t num_entries;
@@ -402,6 +620,26 @@ typedef struct hash_map_s
 	void* keys;
 	void* values;
 } hash_map_t;
+
+typedef struct
+{
+	const char* name;
+	bool	initialized;
+	int (*Init) (void);
+	void (*Listen) (bool state);
+	int (*QueryAddresses) (qhostaddr_t* addresses, int maxaddresses);
+	bool(*SearchForHosts) (bool xmit);
+	qsocket_t* (*Connect) (const char* host);
+	qsocket_t* (*CheckNewConnections) (void);
+	qsocket_t* (*QGetAnyMessage) (void);
+	int (*QGetMessage) (qsocket_t* sock);
+	int (*QSendMessage) (qsocket_t* sock, sizebuf_t* data);
+	int (*SendUnreliableMessage) (qsocket_t* sock, sizebuf_t* data);
+	bool(*CanSendMessage) (qsocket_t* sock);
+	bool(*CanSendUnreliableMessage) (qsocket_t* sock);
+	void (*Close) (qsocket_t* sock);
+	void (*Shutdown) (void);
+} net_driver_t;
 
 typedef struct statement_s
 {
@@ -1069,10 +1307,7 @@ typedef struct qsocket_s
 	int			 receiveMessageLength;
 	byte		 receiveMessage[NET_MAXMESSAGE * NET_LOOPBACKBUFFERS + NET_LOOPBACKHEADERSIZE];
 
-	struct qsockaddr {
-		short qsa_family;
-		unsigned char qsa_data[62];
-	} addr;
+	qsockaddr addr;
 	char			 trueaddress[NET_NAMELEN];	 // lazy address string
 	char			 maskedaddress[NET_NAMELEN]; // addresses for this player that may be displayed publically
 
@@ -1224,6 +1459,70 @@ typedef struct cvar_s
 	cvarcallback_t callback;
 	struct cvar_s* next;
 } cvar_t;
+
+typedef struct snd_info_s
+{
+	int rate;
+	int bits, width;
+	int channels;
+	int samples;
+	int blocksize;
+	int size;
+	int dataofs;
+} snd_info_t;
+
+typedef struct _fshandle_t
+{
+	FILE* file;
+	bool	 pak;	 /* is the file read from a pak */
+	long	 start;	 /* file or data start position */
+	long	 length; /* file or data size */
+	long	 pos;	 /* current position relative to start */
+} fshandle_t;
+
+typedef enum
+{
+	STREAM_NONE = -1,
+	STREAM_INIT,
+	STREAM_PAUSE,
+	STREAM_PLAY
+} stream_status_t;
+
+typedef bool(*CODEC_INIT) (void);
+typedef void (*CODEC_SHUTDOWN) (void);
+typedef bool(*CODEC_OPEN) (snd_stream_t* stream);
+typedef int (*CODEC_READ) (snd_stream_t* stream, int bytes, void* buffer);
+typedef int (*CODEC_REWIND) (snd_stream_t* stream);
+typedef int (*CODEC_JUMP) (snd_stream_t* stream, int order);
+typedef void (*CODEC_CLOSE) (snd_stream_t* stream);
+
+
+typedef struct snd_codec_s
+{
+	unsigned int   type;		/* handled data type. (1U << n) */
+	bool	   initialized; /* init succeedded */
+	const char* ext;			/* expected extension */
+	CODEC_INIT	   initialize;
+	CODEC_SHUTDOWN shutdown;
+	CODEC_OPEN	   codec_open;
+	CODEC_READ	   codec_read;
+	CODEC_REWIND   codec_rewind;
+	CODEC_JUMP	   codec_jump;
+	CODEC_CLOSE	   codec_close;
+	snd_codec_t* next;
+} snd_codec_t;
+
+typedef struct snd_stream_s
+{
+	fshandle_t		fh;
+	bool		pak;
+	char			name[MAX_QPATH]; /* name of the source file */
+	snd_info_t		info;
+	stream_status_t status;
+	snd_codec_t* codec; /* codec handling this stream */
+	bool		loop;
+	void* priv; /* data private to the codec. */
+} snd_stream_t;
 
 bool in_update_screen;
 
@@ -2156,6 +2455,82 @@ public:
 		client_static_t s;
 		client_state_t state;
 
+		static void FinishTimeDemo(void)
+		{
+			int	  frames;
+			float time;
+
+			cl->s.timedemo = false;
+
+			// the first frame didn't count
+			frames = (host->framecount - cl->s.td_startframe) - 1;
+			time = host->realtime - cl->s.td_starttime;
+			if (!time)
+				time = 1;
+			con->Printf("%i frames %5.1f seconds %5.1f fps\n", frames, time, frames / time);
+		}
+
+		void StopPlayback(void)
+		{
+			if (!cl->s.demoplayback)
+				return;
+
+			fclose(cl->s.demofile);
+			cl->s.demoplayback = false;
+			cl->s.demoseeking = false;
+			cl->s.demopaused = false;
+			cl->s.demofile = NULL;
+			cl->s.state = ca_disconnected;
+			cl->s.demo_prespawn_end = 0;
+
+			if (cl->s.timedemo)
+				FinishTimeDemo();
+		}
+
+		static void WriteDemoMessage(void)
+		{
+			int	  len;
+			int	  i;
+			float f;
+
+			len = LittleLong(net->message.cursize);
+			fwrite(&len, 4, 1, cl->s.demofile);
+			for (i = 0; i < 3; i++)
+			{
+				f = LittleFloat(cl->state.viewangles[i]);
+				fwrite(&f, 4, 1, cl->s.demofile);
+			}
+			fwrite(net->message.data, net->message.cursize, 1, cl->s.demofile);
+			fflush(cl->s.demofile);
+		}
+
+
+		void Stop_f(void)
+		{
+			if (cmd->source != src_command)
+				return;
+
+			if (!cl->s.demorecording)
+			{
+				con->Printf("Not recording a demo.\n");
+				return;
+			}
+
+			// write a disconnect message to the demo file
+			sz->Clear(&net->message);
+			msg->WriteByte(&net->message, svc_disconnect);
+			WriteDemoMessage();
+
+			// finish up
+			fclose(cl->s.demofile);
+			cl->s.demofile = NULL;
+			cl->s.demorecording = false;
+			con->Printf("Completed demo\n");
+
+			// ericw -- update demo tab-completion list
+			DemoList_Rebuild();
+		}
+
 		void Disconnect(void)
 		{
 			if (key_dest == key_message)
@@ -2163,34 +2538,34 @@ public:
 
 			// stop sounds (especially looping!)
 			engine->s->StopAllSounds(true, false);
-			BGM_Stop();
-			CDAudio_Stop();
+			bgm->Stop();
+			//CDAudio_Stop(); //dumb legacy code
 
 			// if running a local server, shut it down
-			if (cls.demoplayback)
-				CL_StopPlayback();
-			else if (cls.state == ca_connected)
+			if (cl->s.demoplayback)
+				StopPlayback();
+			else if (cl->s.state == ca_connected)
 			{
-				if (cls.demorecording)
-					CL_Stop_f();
+				if (cl->s.demorecording)
+					Stop_f();
 
 				con->DPrintf("Sending clc_disconnect\n");
-				sz->Clear(&cls.message);
-				msg->WriteByte(&cls.message, 2);
-				NET_SendUnreliableMessage(cls.netcon, &cls.message);
-				sz->Clear(&cls.message);
-				NET_Close(cls.netcon);
-				cls.netcon = NULL;
+				sz->Clear(&cl->s.message);
+				msg->WriteByte(&cl->s.message, 2);
+				NET_SendUnreliableMessage(cl->s.netcon, &cl->s.message);
+				sz->Clear(&cl->s.message);
+				net->Close(cl->s.netcon);
+				cl->s.netcon = NULL;
 
-				cls.state = ca_disconnected;
+				cl->s.state = ca_disconnected;
 				if (sv->active)
 					host->ShutdownServer(false);
 			}
 
-			cls.demoplayback = cls.timedemo = false;
-			cls.demopaused = false;
-			cls.signon = 0;
-			cls.netcon = NULL;
+			cl->s.demoplayback = cl->s.timedemo = false;
+			cl->s.demopaused = false;
+			cl->s.signon = 0;
+			cl->s.netcon = NULL;
 			cl->state.intermission = 0;
 			cl->state.worldmodel = NULL;
 			cl->state.sendprespawn = false;
@@ -2500,6 +2875,25 @@ public:
 
 
 	};
+	class BGM {
+	public:
+		Engine* engine;
+		snd_stream_t* stream = NULL;
+		int rawend = 0;
+
+		BGM(Engine e) {
+			engine = &e;
+		}
+		void Stop() {
+			if (stream)
+			{
+				stream->status = STREAM_NONE;
+				s->CodecCloseStream(stream);
+				stream = NULL;
+				rawend = 0;
+			}
+		}
+	};
 	class Cmd {
 	public:
 		Engine* engine;
@@ -2510,13 +2904,8 @@ public:
 		const char* args = NULL;
 		cmdalias_t* alias;
 
-		typedef enum
-		{
-			src_client,	 // came in over a net connection as a clc_stringcmd. host_client will be valid during this state.
-			src_command, // from the command buffer
-			src_server	 // from a svc_stufftext
-		} cmd_source_t;
-		cmd_source_t cmd_source = src_command;
+		cmd_source_t source;
+
 		typedef void (*xcommand_t) (void);
 		typedef struct cmd_function_s
 		{
@@ -2665,7 +3054,7 @@ public:
 			cmd_function_t* command;
 			cmdalias_t* a;
 
-			cmd_source = src;
+			cmd->source = src;
 			TokenizeString(text);
 
 			// execute the command line
@@ -2838,7 +3227,7 @@ public:
 				}
 
 				// execute the command line
-				cmd->ExecuteString(line, Cmd::src_command);
+				cmd->ExecuteString(line, src_command);
                 
 			}
 		}
@@ -2970,6 +3359,37 @@ public:
 	public:
 		Engine* engine;
 		double time;
+		sizebuf_t message;
+
+		qsocket_t* activeSockets = NULL;
+		qsocket_t* freeSockets = NULL;
+		int		   numsockets = 0;
+
+		size_t		hostCacheCount = 0;
+		hostcache_t hostcache[HOSTCACHESIZE];
+
+		int		  activeconnections = 0;
+
+		int messagesSent = 0;
+		int messagesReceived = 0;
+		int unreliableMessagesSent = 0;
+		int unreliableMessagesReceived = 0;
+
+		
+
+		int driverlevel;
+
+		std::vector<net_driver_t> net_drivers = {
+	net_driver_t("Loopback", false, Engine::Loop::Init, Engine::Loop::Listen, Engine::Loop::QueryAddresses, Engine::Loop::SearchForHosts, Engine::Loop::Connect, Engine::Loop::CheckNewConnections, Engine::Loop::GetAnyMessage,
+	 Engine::Loop::GetMessage, Engine::Loop::SendMessage, Engine::Loop::SendUnreliableMessage, Engine::Loop::CanSendMessage, Engine::Loop::CanSendUnreliableMessage, Engine::Loop::Close, Engine::Loop::Shutdown)
+
+	 //{"Datagram", false, Datagram_Init, Datagram_Listen, Datagram_QueryAddresses, Datagram_SearchForHosts, Datagram_Connect, Datagram_CheckNewConnections,
+	  //Datagram_GetAnyMessage, Datagram_GetMessage, Datagram_SendMessage, Datagram_SendUnreliableMessage, Datagram_CanSendMessage,
+	  //Datagram_CanSendUnreliableMessage, Datagram_Close, Datagram_Shutdown} 
+		};
+
+		cvar_t hostname = { "hostname", "UNNAMED", CVAR_SERVERINFO };
+
 		Net(Engine e) {
 			engine = &e;
 		}
@@ -2989,6 +3409,113 @@ public:
 			SetNetTime();
 
 			return sfunc.CanSendMessage(sock);
+		}
+
+		void Close(qsocket_t* sock)
+		{
+			if (!sock)
+				return;
+
+			if (sock->disconnected)
+				return;
+
+			SetNetTime();
+
+			// call the driver_Close function
+			sfunc.Close(sock);
+
+			FreeQSocket(sock);
+		}
+
+		void FreeQSocket(qsocket_t* sock)
+		{
+			qsocket_t* s;
+
+			// remove it from active list
+			if (sock == activeSockets)
+				activeSockets = activeSockets->next;
+			else
+			{
+				for (s = activeSockets; s; s = s->next)
+				{
+					if (s->next == sock)
+					{
+						s->next = sock->next;
+						break;
+					}
+				}
+
+				if (!s)
+					sys->Error("NET_FreeQSocket: not active");
+			}
+
+			// add it to free list
+			sock->next = freeSockets;
+			freeSockets = sock;
+			sock->disconnected = true;
+		}
+
+		qsocket_t* NewQSocket(void)
+		{
+			qsocket_t* sock;
+
+			if (freeSockets == NULL)
+				return NULL;
+
+			if (activeconnections >= sv->s.maxclients)
+				return NULL;
+
+			// get one from free list
+			sock = freeSockets;
+			freeSockets = sock->next;
+
+			// add it to active list
+			sock->next = activeSockets;
+			activeSockets = sock;
+
+			sock->isvirtual = false;
+			sock->disconnected = false;
+			sock->connecttime = time;
+			strcpy(sock->trueaddress, "UNSET ADDRESS");
+			strcpy(sock->maskedaddress, "UNSET ADDRESS");
+			sock->driver = driverlevel;
+			sock->socket = 0;
+			sock->driverdata = NULL;
+			sock->canSend = true;
+			sock->sendNext = false;
+			sock->lastMessageTime = time;
+			sock->ackSequence = 0;
+			sock->sendSequence = 0;
+			sock->unreliableSendSequence = 0;
+			sock->sendMessageLength = 0;
+			sock->receiveSequence = 0;
+			sock->unreliableReceiveSequence = 0;
+			sock->receiveMessageLength = 0;
+			sock->pending_max_datagram = 1024;
+			sock->proquake_angle_hack = false;
+
+			return sock;
+		}
+
+		int SendMessage(qsocket_t* sock, sizebuf_t* data)
+		{
+			int r;
+
+			if (!sock)
+				return -1;
+
+			if (sock->disconnected)
+			{
+				con->Printf("NET_SendMessage: disconnected socket\n");
+				return -1;
+			}
+
+			SetNetTime();
+			r = sfunc.QSendMessage(sock, data);
+			if (r == 1 && !IS_LOOP_DRIVER(sock->driver))
+				messagesSent++;
+
+			return r;
 		}
 
 	};
@@ -3063,13 +3590,13 @@ public:
 			do
 			{
 				count = 0;
-				for (i = 0, client = svs.clients; i < svs.maxclients; i++, client++)
+				for (i = 0, client = sv->s.clients; i < sv->s.maxclients; i++, client++)
 				{
 					if (client->active && client->message.cursize && client->netconnection)
 					{
 						if (net->CanSendMessage(client->netconnection))
 						{
-							NET_SendMessage(client->netconnection, &client->message);
+							net->SendMessage(client->netconnection, &client->message);
 							sz->Clear(&client->message);
 						}
 						else
@@ -3087,13 +3614,13 @@ public:
 			buf.data = message;
 			buf.maxsize = 4;
 			buf.cursize = 0;
-			MSG_WriteByte(&buf, svc_disconnect);
+			msg->WriteByte(&buf, svc_disconnect);
 			count = NET_SendToAll(&buf, 5.0);
 			if (count)
 				con->Printf("Host_ShutdownServer: NET_SendToAll failed for %u clients\n", count);
 
 			pr->SwitchQCVM(&sv->qcvm);
-			for (i = 0, client = svs.clients; i < svs.maxclients; i++, client++)
+			for (i = 0, client = sv->s.clients; i < sv->s.maxclients; i++, client++)
 				if (client->active)
 					SV_DropClient(crash);
 
@@ -3104,7 +3631,7 @@ public:
 			// clear structures
 			//
 			//	memset (&sv, 0, sizeof(sv)); // ServerSpawn already do this by Host_ClearMemory
-			memset(svs.clients, 0, svs.maxclientslimit * sizeof(client_t));
+			memset(sv->s.clients, 0, sv->s.maxclientslimit * sizeof(client_t));
 		}
 
 
@@ -3449,6 +3976,257 @@ public:
 
 
 	};
+	
+	class Loop {
+	public:
+		static Engine* engine;
+
+		qsocket_t* client = NULL;
+		qsocket_t* server = NULL;
+
+		bool	  localconnectpending = false;
+
+		Loop(Engine e) {
+			engine = &e;
+		}
+		static int Init(void)
+		{
+			if (cl->s.state == ca_dedicated)
+				return -1;
+			return 0;
+		}
+
+		static void Shutdown(void) {}
+
+		static void Listen(bool state) {}
+
+		static bool SearchForHosts(bool xmit)
+		{
+			if (!sv->active)
+				return false;
+
+			net->hostCacheCount = 1;
+			if (strcmp(net->hostname.string, "UNNAMED") == 0)
+				strcpy(net->hostcache[0].name, "local");
+			else
+				strcpy(net->hostcache[0].name, net->hostname.string);
+			strcpy(net->hostcache[0].map, sv->name);
+			net->hostcache[0].users = net->activeconnections;
+			net->hostcache[0].maxusers = sv->s.maxclients;
+			net->hostcache[0].driver = net->driverlevel;
+			strcpy(net->hostcache[0].cname, "local");
+			return false;
+		}
+
+		static qsocket_t* Connect(const char* host)
+		{
+			if (strcmp(host, "local") != 0)
+				return NULL;
+
+			engine->loop->localconnectpending = true;
+
+			if (!engine->loop->client)
+			{
+				if ((engine->loop->client = net->NewQSocket()) == NULL)
+				{
+					con->Printf("Loop_Connect: no qsocket available\n");
+					return NULL;
+				}
+				strcpy(engine->loop->client->trueaddress, "localhost");
+				strcpy(engine->loop->client->maskedaddress, "localhost");
+			}
+			engine->loop->client->receiveMessageLength = 0;
+			engine->loop->client->sendMessageLength = 0;
+			engine->loop->client->canSend = true;
+
+			if (!engine->loop->server)
+			{
+				if ((engine->loop->server = net->NewQSocket()) == NULL)
+				{
+					con->Printf("Loop_Connect: no qsocket available\n");
+					return NULL;
+				}
+				strcpy(engine->loop->server->trueaddress, "LOCAL");
+				strcpy(engine->loop->server->maskedaddress, "LOCAL");
+			}
+			engine->loop->server->receiveMessageLength = 0;
+			engine->loop->server->sendMessageLength = 0;
+			engine->loop->server->canSend = true;
+
+			engine->loop->client->driverdata = (void*)engine->loop->server;
+			engine->loop->server->driverdata = (void*)engine->loop->client;
+
+			engine->loop->client->proquake_angle_hack = engine->loop->server->proquake_angle_hack = true;
+
+			return engine->loop->client;
+		}
+
+		static qsocket_t* CheckNewConnections(void)
+		{
+			if (!engine->loop->localconnectpending)
+				return NULL;
+
+			engine->loop->localconnectpending = false;
+			engine->loop->server->sendMessageLength = 0;
+			engine->loop->server->receiveMessageLength = 0;
+			engine->loop->server->canSend = true;
+			engine->loop->client->sendMessageLength = 0;
+			engine->loop->client->receiveMessageLength = 0;
+			engine->loop->client->canSend = true;
+			return engine->loop->server;
+		}
+
+		static int IntAlign(int value)
+		{
+			return (value + (sizeof(int) - 1)) & (~(sizeof(int) - 1));
+		}
+
+		static int GetMessage(qsocket_t* sock)
+		{
+			int ret;
+			int length;
+
+			if (sock->receiveMessageLength == 0)
+				return 0;
+
+			ret = sock->receiveMessage[0];
+			length = sock->receiveMessage[1] + (sock->receiveMessage[2] << 8);
+			// alignment byte skipped here
+			sz->Clear(&net->message);
+			if (ret == 2)
+			{ // unreliables have sequences that we (now) care about so that clients can ack them.
+				sock->unreliableReceiveSequence =
+					sock->receiveMessage[4] | (sock->receiveMessage[5] << 8) | (sock->receiveMessage[6] << 16) | (sock->receiveMessage[7] << 24);
+				sock->unreliableReceiveSequence++;
+				sz->Write(&net->message, &sock->receiveMessage[8], length);
+				length = IntAlign(length + 8);
+			}
+			else
+			{ // reliable
+				sz->Write(&net->message, &sock->receiveMessage[4], length);
+				length = IntAlign(length + 4);
+			}
+
+			sock->receiveMessageLength -= length;
+
+			if (sock->receiveMessageLength)
+				memmove(sock->receiveMessage, &sock->receiveMessage[length], sock->receiveMessageLength);
+
+			if (sock->driverdata && ret == 1)
+				((qsocket_t*)sock->driverdata)->canSend = true;
+
+			return ret;
+		}
+
+		static qsocket_t* GetAnyMessage(void)
+		{
+			if (engine->loop->server)
+			{
+				if (GetMessage(engine->loop->server) > 0)
+					return engine->loop->server;
+			}
+			return NULL;
+		}
+
+		static int QueryAddresses (qhostaddr_t* addresses, int maxaddresses) {}
+
+		static int SendMessage(qsocket_t* sock, sizebuf_t* data)
+		{
+			byte* buffer;
+			int* bufferLength;
+
+			if (!sock->driverdata)
+				return -1;
+
+			bufferLength = &((qsocket_t*)sock->driverdata)->receiveMessageLength;
+
+			if ((*bufferLength + data->cursize + NET_LOOPBACKHEADERSIZE) > NET_MAXMESSAGE * NET_LOOPBACKBUFFERS + NET_LOOPBACKHEADERSIZE)
+				sys->Error("Loop_SendMessage: overflow");
+
+			buffer = ((qsocket_t*)sock->driverdata)->receiveMessage + *bufferLength;
+
+			// message type
+			*buffer++ = 1;
+
+			// length
+			*buffer++ = data->cursize & 0xff;
+			*buffer++ = data->cursize >> 8;
+
+			// align
+			buffer++;
+
+			// message
+			memcpy(buffer, data->data, data->cursize);
+			*bufferLength = IntAlign(*bufferLength + data->cursize + 4);
+
+			sock->canSend = false;
+			return 1;
+		}
+
+		static int SendUnreliableMessage(qsocket_t* sock, sizebuf_t* data)
+		{
+			byte* buffer;
+			int* bufferLength;
+			int	  sequence = sock->unreliableSendSequence++;
+
+			if (!sock->driverdata)
+				return -1;
+
+			bufferLength = &((qsocket_t*)sock->driverdata)->receiveMessageLength;
+
+			// always leave one buffer for reliable messages
+			if ((*bufferLength + data->cursize + NET_LOOPBACKHEADERSIZE) > NET_MAXMESSAGE * (NET_LOOPBACKBUFFERS - 1))
+				return 0;
+
+			buffer = ((qsocket_t*)sock->driverdata)->receiveMessage + *bufferLength;
+
+			// message type
+			*buffer++ = 2;
+
+			// length
+			*buffer++ = data->cursize & 0xff;
+			*buffer++ = data->cursize >> 8;
+
+			// align
+			buffer++;
+
+			*buffer++ = (sequence >> 0) & 0xff;
+			*buffer++ = (sequence >> 8) & 0xff;
+			*buffer++ = (sequence >> 16) & 0xff;
+			*buffer++ = (sequence >> 24) & 0xff;
+
+			// message
+			memcpy(buffer, data->data, data->cursize);
+			*bufferLength = IntAlign(*bufferLength + data->cursize + 8);
+			return 1;
+		}
+
+		static bool CanSendMessage(qsocket_t* sock)
+		{
+			if (!sock->driverdata)
+				return false;
+			return sock->canSend;
+		}
+
+		static bool CanSendUnreliableMessage(qsocket_t* sock)
+		{
+			return true;
+		}
+
+		static void Close(qsocket_t* sock)
+		{
+			if (sock->driverdata)
+				((qsocket_t*)sock->driverdata)->driverdata = NULL;
+			sock->receiveMessageLength = 0;
+			sock->sendMessageLength = 0;
+			sock->canSend = true;
+			if (sock == engine->loop->client)
+				engine->loop->client = NULL;
+			else
+				engine->loop->server = NULL;
+		}
+
+	};
 	class PR {
 	public:
 		Engine* engine;
@@ -3681,6 +4459,11 @@ public:
 			return sc;
 		}
 
+		void CodecCloseStream(snd_stream_t* str)
+		{
+			str->status = STREAM_NONE;
+			str->codec->codec_close(str);
+		}
 
 		void StopAllSounds(bool clear, bool keep_statics)
 		{
@@ -3698,13 +4481,13 @@ public:
 
 			for (i = 0; i < MAX_CHANNELS; i++)
 			{
-				if (!keep_statics || channels[i].entnum || !channels[i].sfx || !S_LoadSound(snd_channels[i].sfx) ||
-					S_LoadSound(snd_channels[i].sfx)->loopstart == -1)
-					memset(&snd_channels[i], 0, sizeof(channel_t));
+				if (!keep_statics || channels[i].entnum || !channels[i].sfx || !s->LoadSound(channels[i].sfx) ||
+					s->LoadSound(channels[i].sfx)->loopstart == -1)
+					memset(&channels[i], 0, sizeof(channel_t));
 				else
 				{
-					snd_channels[i].pos = 0;
-					snd_channels[i].end = paintedtime + S_LoadSound(snd_channels[i].sfx)->length;
+					channels[i].pos = 0;
+					channels[i].end = paintedtime + s->LoadSound(channels[i].sfx)->length;
 				}
 			}
 
@@ -4219,7 +5002,16 @@ public:
 
 		int effectsmask; // only enable colored quad/penta dlights in 2021 release
 		
+		typedef struct
+		{
+			int				 maxclients;
+			int				 maxclientslimit;
+			struct client_s* clients;			 // [maxclients]
+			int				 serverflags;		 // episode completion information
+			bool		 changelevel_issued; // cleared when at SV_SpawnServer
+		} server_static_t;
 
+		server_static_t s;
 
 		bool active;
 		SV(Engine e) {
@@ -4248,6 +5040,8 @@ public:
 	static Key* key;
 	static Net* net;
 	static S* s;
+	static BGM* bgm;
+	static Loop* loop;
 
 	Engine(int argc, char* argv[]) {
 		
@@ -4278,6 +5072,8 @@ public:
 		key = new Key(*this);
 		net = new Net(*this);
 		s = new S(*this);
+		bgm = new BGM(*this);
+		loop = new Loop(*this);
 	}
 };
 
@@ -4300,6 +5096,11 @@ Engine::Cbuf* Engine::cbuf = nullptr;
 Engine::PR* Engine::pr = nullptr;
 Engine::ED* Engine::ed = nullptr;
 Engine::SV* Engine::sv = nullptr;
+Engine::Key* Engine::key = nullptr;
+Engine::Net* Engine::net = nullptr;
+Engine::S* Engine::s = nullptr;
+Engine::BGM* Engine::bgm = nullptr;
+Engine::Loop* Engine::loop = nullptr;
 
 int main(int argc, char *argv[]) {
 
