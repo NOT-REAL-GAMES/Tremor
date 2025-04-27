@@ -29,9 +29,12 @@
 // The Tremor project is not affiliated with or endorsed by id Software.
 // idTech 2's dependencies on Quake will be removed from the Tremor project. 
 
+#include "atomic"
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
 #include <vulkan/vulkan.hpp>
+using namespace std;
 
 #define NUM_COLOR_BUFFERS 2
 
@@ -44,6 +47,83 @@
 
 #define MAX_SWAP_CHAIN_IMAGES 8
 #define DOUBLE_BUFFERED 2
+
+#define NUM_STAGING_BUFFERS 2
+
+#define THREAD_LOCAL  __declspec (thread)
+
+#define VA_NUM_BUFFS 4
+#if (MAX_OSPATH >= 1024)
+#define VA_BUFFERLEN MAX_OSPATH
+#else
+#define VA_BUFFERLEN 1024
+#endif
+
+#define COMMA ,
+#define NO_COMMA
+
+#define GENERIC_INT_TYPES(x, separator) \
+	x(int, i) separator \
+	x(unsigned int, u) separator \
+	x(long, l) separator \
+	x(unsigned long, ul) separator \
+	x(long long, ll) separator \
+	x(unsigned long long, ull)
+
+#define IMPL_GENERIC_INT_FUNCS(type, suffix) \
+static inline type q_align_##suffix (type size, type alignment) \
+{ \
+	return ((size & (alignment - 1)) == 0) ? size : (size + alignment - (size & (alignment - 1))); \
+}
+
+GENERIC_INT_TYPES(IMPL_GENERIC_INT_FUNCS, NO_COMMA)
+
+#define SELECT_ALIGN(type, suffix) type: q_align_##suffix
+#define q_align(size, alignment) _Generic((size) + (alignment), \
+	GENERIC_INT_TYPES (SELECT_ALIGN, COMMA))(size, alignment)
+
+
+typedef enum
+{
+	PCBX_BUILD_ACCELERATION_STRUCTURES,
+	PCBX_UPDATE_LIGHTMAPS,
+	PCBX_UPDATE_WARP,
+	PCBX_RENDER_PASSES,
+	PCBX_NUM,
+} primary_cb_contexts_t;
+
+typedef enum
+{
+	// Main render pass:
+	SCBX_WORLD,
+	SCBX_ENTITIES,
+	SCBX_SKY,
+	SCBX_ALPHA_ENTITIES_ACROSS_WATER,
+	SCBX_WATER,
+	SCBX_ALPHA_ENTITIES,
+	SCBX_PARTICLES,
+	SCBX_VIEW_MODEL,
+	// UI render Pass:
+	SCBX_GUI,
+	SCBX_POST_PROCESS,
+	SCBX_NUM,
+} secondary_cb_contexts_t;
+
+
+static const int SECONDARY_CB_MULTIPLICITY[SCBX_NUM] = {
+	NUM_WORLD_CBX,	  // SCBX_WORLD,
+	NUM_ENTITIES_CBX, // SCBX_ENTITIES,
+	1,				  // SCBX_SKY,
+	1,				  // SCBX_ALPHA_ENTITIES_ACROSS_WATER,
+	1,				  // SCBX_WATER,
+	1,				  // SCBX_ALPHA_ENTITIES,
+	1,				  // SCBX_PARTICLES,
+	1,				  // SCBX_VIEW_MODEL,
+	1,				  // SCBX_GUI,
+	1,				  // SCBX_POST_PROCESS,
+};
+
+#define INITIAL_STAGING_BUFFER_SIZE_KB 16384
 
 #define ZEROED_STRUCT(type, name) \
 	type name;                    \
@@ -120,31 +200,6 @@ typedef enum
 	VULKAN_MEMORY_TYPE_NONE,
 } vulkan_memory_type_t;
 
-typedef enum
-{
-	PCBX_BUILD_ACCELERATION_STRUCTURES,
-	PCBX_UPDATE_LIGHTMAPS,
-	PCBX_UPDATE_WARP,
-	PCBX_RENDER_PASSES,
-	PCBX_NUM,
-} primary_cb_contexts_t;
-
-typedef enum
-{
-	// Main render pass:
-	SCBX_WORLD,
-	SCBX_ENTITIES,
-	SCBX_SKY,
-	SCBX_ALPHA_ENTITIES_ACROSS_WATER,
-	SCBX_WATER,
-	SCBX_ALPHA_ENTITIES,
-	SCBX_PARTICLES,
-	SCBX_VIEW_MODEL,
-	// UI render Pass:
-	SCBX_GUI,
-	SCBX_POST_PROCESS,
-	SCBX_NUM,
-} secondary_cb_contexts_t;
 
 typedef struct vulkan_memory_s
 {
@@ -447,6 +502,27 @@ float CLAMP(float* value, float min, float max)
 	return *value;
 }
 
+static char* get_va_buffer(void)
+{
+	static THREAD_LOCAL char va_buffers[VA_NUM_BUFFS][VA_BUFFERLEN];
+	static THREAD_LOCAL int	 buffer_idx = 0;
+	buffer_idx = (buffer_idx + 1) & (VA_NUM_BUFFS - 1);
+	return va_buffers[buffer_idx];
+}
+
+char* va(const char* format, ...)
+{
+	va_list argptr;
+	char* va_buf;
+
+	va_buf = get_va_buffer();
+	va_start(argptr, format);
+	_vsnprintf_s(va_buf, VA_BUFFERLEN, sizeof(va_buf), format, argptr);
+	va_end(argptr);
+
+	return va_buf;
+}
+
 #ifdef _DEBUG
 
 unsigned int VKAPI_PTR DebugMessageCallback(
@@ -460,11 +536,47 @@ unsigned int VKAPI_PTR DebugMessageCallback(
 #endif
 
 
+
+
+
 class Engine {
 public:
+	void R_AllocateVulkanMemory(vulkan_memory_t* memory, VkMemoryAllocateInfo* memory_allocate_info, vulkan_memory_type_t type, atomic_uint32_t* num_allocations)
+	{
+		memory->type = type;
+		if (memory->type != VULKAN_MEMORY_TYPE_NONE)
+		{
+			VkResult err = vkAllocateMemory(vulkan_globals.device, memory_allocate_info, NULL, &memory->handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkAllocateMemory failed");
+			if (num_allocations)
+				(num_allocations++);
+		}
+		memory->size = memory_allocate_info->allocationSize;
+		if (memory->type == VULKAN_MEMORY_TYPE_DEVICE)
+			gl->total_device_vulkan_allocation_size += memory->size;
+		else if (memory->type == VULKAN_MEMORY_TYPE_HOST)
+			gl->total_host_vulkan_allocation_size += memory->size;
+	}
+
 	class GL {
 	public:
 		Engine* engine;
+
+		void SetObjectName(uint64_t object, VkObjectType object_type, const char* name)
+		{
+#ifdef _DEBUG
+			if (fpSetDebugUtilsObjectNameEXT && name)
+			{
+				ZEROED_STRUCT(VkDebugUtilsObjectNameInfoEXT, nameInfo);
+				nameInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+				nameInfo.objectType = object_type;
+				nameInfo.objectHandle = object;
+				nameInfo.pObjectName = name;
+				fpSetDebugUtilsObjectNameEXT(vulkan_globals.device, &nameInfo);
+			};
+#endif
+		}
 
 		VkInstance				vulkan_instance;
 		VkPhysicalDevice			vulkan_physical_device;
@@ -517,6 +629,38 @@ public:
 		PFN_vkGetPhysicalDeviceFeatures2				  fpGetPhysicalDeviceFeatures2;
 		PFN_vkGetPhysicalDeviceProperties2			  fpGetPhysicalDeviceProperties2;
 
+		VkCommandPool   staging_command_pool;
+		vulkan_memory_t staging_memory;
+		int			   current_staging_buffer = 0;
+		int			   num_stagings_in_flight = 0;
+		SDL_mutex* staging_mutex;
+		SDL_cond* staging_cond;
+
+		atomic_uint32_t num_vulkan_tex_allocations;
+		atomic_uint32_t num_vulkan_bmodel_allocations;
+		atomic_uint32_t num_vulkan_mesh_allocations;
+		atomic_uint32_t num_vulkan_misc_allocations;
+		atomic_uint32_t num_vulkan_dynbuf_allocations;
+		atomic_uint32_t num_vulkan_combined_image_samplers;
+		atomic_uint32_t num_vulkan_ubos_dynamic;
+		atomic_uint32_t num_vulkan_ubos;
+		atomic_uint32_t num_vulkan_storage_buffers;
+		atomic_uint32_t num_vulkan_input_attachments;
+		atomic_uint32_t num_vulkan_storage_images;
+		atomic_uint32_t num_vulkan_sampled_images;
+		atomic_uint32_t num_acceleration_structures;
+		atomic_uint64_t total_device_vulkan_allocation_size;
+		atomic_uint64_t total_host_vulkan_allocation_size;
+
+		bool use_simd;
+
+		static SDL_mutex* vertex_allocate_mutex;
+		static SDL_mutex* index_allocate_mutex;
+		static SDL_mutex* uniform_allocate_mutex;
+		static SDL_mutex* storage_allocate_mutex;
+		static SDL_mutex* garbage_mutex;
+
+
 #ifdef _DEBUG
 		PFN_vkCreateDebugUtilsMessengerEXT fpCreateDebugUtilsMessengerEXT;
 		PFN_vkSetDebugUtilsObjectNameEXT		  fpSetDebugUtilsObjectNameEXT;
@@ -524,6 +668,38 @@ public:
 		VkDebugUtilsMessengerEXT debug_utils_messenger;
 
 #endif
+
+		int MemoryTypeFromProperties(uint32_t type_bits, VkFlags requirements_mask, VkFlags preferred_mask)
+		{
+			uint32_t current_type_bits = type_bits;
+			uint32_t i;
+
+			for (i = 0; i < VK_MAX_MEMORY_TYPES; i++)
+			{
+				if ((current_type_bits & 1) == 1)
+				{
+					if ((vulkan_globals.memory_properties.memoryTypes[i].propertyFlags & (requirements_mask | preferred_mask)) == (requirements_mask | preferred_mask))
+						return i;
+				}
+				current_type_bits >>= 1;
+			}
+
+			current_type_bits = type_bits;
+			for (i = 0; i < VK_MAX_MEMORY_TYPES; i++)
+			{
+				if ((current_type_bits & 1) == 1)
+				{
+					if ((vulkan_globals.memory_properties.memoryTypes[i].propertyFlags & requirements_mask) == requirements_mask)
+						return i;
+				}
+				current_type_bits >>= 1;
+			}
+
+			SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Could not find memory type");
+			return 0;
+		}
+
+
 		class Instance {
 		public:
 			Engine* engine;
@@ -672,6 +848,100 @@ public:
 				Mem_Free((void*)instance_extensions);
 			}
 
+		};
+		class CommandBuffers {
+		public:
+			Engine* engine;
+			CommandBuffers(Engine e) {
+				engine = &e;
+				engine->gl->cbuf = this;
+
+				SDL_Log("Creating command buffers\n");
+
+				VkResult err;
+
+				{
+					ZEROED_STRUCT(VkCommandPoolCreateInfo, command_pool_create_info);
+					command_pool_create_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+					command_pool_create_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+					command_pool_create_info.queueFamilyIndex = vulkan_globals.gfx_queue_family_index;
+					err = vkCreateCommandPool(vulkan_globals.device, &command_pool_create_info, NULL, &engine->gl->transient_command_pool);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreateCommandPool failed");
+				}
+
+				ZEROED_STRUCT(VkCommandPoolCreateInfo, command_pool_create_info);
+				command_pool_create_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+				command_pool_create_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+				command_pool_create_info.queueFamilyIndex = vulkan_globals.gfx_queue_family_index;
+
+				for (int pcbx_index = 0; pcbx_index < PCBX_NUM; ++pcbx_index)
+				{
+					err = vkCreateCommandPool(vulkan_globals.device, &command_pool_create_info, NULL, &engine->gl->primary_command_pools[pcbx_index]);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateCommandPool failed");
+
+					ZEROED_STRUCT(VkCommandBufferAllocateInfo, command_buffer_allocate_info);
+					command_buffer_allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+					command_buffer_allocate_info.commandPool = engine->gl->primary_command_pools[pcbx_index];
+					command_buffer_allocate_info.commandBufferCount = DOUBLE_BUFFERED;
+
+					err = vkAllocateCommandBuffers(vulkan_globals.device, &command_buffer_allocate_info, engine->gl->primary_command_buffers[pcbx_index]);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkAllocateCommandBuffers failed");
+					for (int i = 0; i < DOUBLE_BUFFERED; ++i)
+						engine->gl->SetObjectName(
+							(uint64_t)(uintptr_t)engine->gl->primary_command_buffers[pcbx_index][i], VK_OBJECT_TYPE_COMMAND_BUFFER, va("PCBX index: %d cb_index: %d", pcbx_index, i));
+				}
+
+				for (int scbx_index = 0; scbx_index < SCBX_NUM; ++scbx_index)
+				{
+					const int multiplicity = SECONDARY_CB_MULTIPLICITY[scbx_index];
+					vulkan_globals.secondary_cb_contexts[scbx_index] = (cb_context_t*) Mem_Alloc(multiplicity * sizeof(cb_context_t));
+					engine->gl->secondary_command_pools[scbx_index] = (VkCommandPool*)Mem_Alloc(multiplicity * sizeof(VkCommandPool));
+					for (int i = 0; i < DOUBLE_BUFFERED; ++i)
+						engine->gl->secondary_command_buffers[scbx_index][i] = (VkCommandBuffer*)Mem_Alloc(multiplicity * sizeof(VkCommandBuffer));
+					for (int i = 0; i < multiplicity; ++i)
+					{
+						err = vkCreateCommandPool(vulkan_globals.device, &command_pool_create_info, NULL, &engine->gl->secondary_command_pools[scbx_index][i]);
+						if (err != VK_SUCCESS)
+							SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateCommandPool failed");
+
+						ZEROED_STRUCT(VkCommandBufferAllocateInfo, command_buffer_allocate_info);
+						command_buffer_allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+						command_buffer_allocate_info.commandPool = engine->gl->secondary_command_pools[scbx_index][i];
+						command_buffer_allocate_info.commandBufferCount = DOUBLE_BUFFERED;
+						command_buffer_allocate_info.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+
+						VkCommandBuffer command_buffers[DOUBLE_BUFFERED];
+						err = vkAllocateCommandBuffers(vulkan_globals.device, &command_buffer_allocate_info, command_buffers);
+						if (err != VK_SUCCESS)
+							SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkAllocateCommandBuffers failed");
+						for (int j = 0; j < DOUBLE_BUFFERED; ++j)
+						{
+							engine->gl->secondary_command_buffers[scbx_index][j][i] = command_buffers[j];
+							engine->gl->SetObjectName(
+								(uint64_t)(uintptr_t)command_buffers[j], VK_OBJECT_TYPE_COMMAND_BUFFER, va("SCBX index: %d sub_index: %d cb_index: %d", scbx_index, i, j));
+						}
+					}
+				}
+
+				ZEROED_STRUCT(VkFenceCreateInfo, fence_create_info);
+				fence_create_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
+				for (int i = 0; i < DOUBLE_BUFFERED; ++i)
+				{
+					err = vkCreateFence(vulkan_globals.device, &fence_create_info, NULL, &engine->gl->command_buffer_fences[i]);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateFence failed");
+
+					ZEROED_STRUCT(VkSemaphoreCreateInfo, semaphore_create_info);
+					semaphore_create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+					err = vkCreateSemaphore(vulkan_globals.device, &semaphore_create_info, NULL, &engine->gl->draw_complete_semaphores[i]);
+				}
+
+				
+			}
 		};
 		class Device {
 		public:
@@ -1050,15 +1320,148 @@ public:
 
 			}
 		};
+		class StagingBuffers {
+		public:
+			Engine* engine;
 
-		Instance* instance;
-		Device* device;
+			typedef struct
+			{
+				VkBuffer		buffer;
+				VkCommandBuffer command_buffer;
+				VkFence			fence;
+				int				current_offset;
+				bool			submitted;
+				unsigned char* data;
+			} stagingbuffer_t;
+
+			stagingbuffer_t staging_buffers[NUM_STAGING_BUFFERS];
+
+			void R_CreateStagingBuffers()
+			{
+				int		 i;
+				VkResult err;
+
+				ZEROED_STRUCT(VkBufferCreateInfo, buffer_create_info);
+				buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+				buffer_create_info.size = vulkan_globals.staging_buffer_size;
+				buffer_create_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+				for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
+				{
+					staging_buffers[i].current_offset = 0;
+					staging_buffers[i].submitted = false;
+
+					err = vkCreateBuffer(vulkan_globals.device, &buffer_create_info, NULL, &staging_buffers[i].buffer);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreateBuffer failed");
+
+					engine->gl->SetObjectName((uint64_t)staging_buffers[i].buffer, VK_OBJECT_TYPE_BUFFER, "Staging Buffer");
+				}
+
+				VkMemoryRequirements memory_requirements;
+				vkGetBufferMemoryRequirements(vulkan_globals.device, staging_buffers[0].buffer, &memory_requirements);
+				const size_t aligned_size = (memory_requirements.size + memory_requirements.alignment);
+
+				ZEROED_STRUCT(VkMemoryAllocateInfo, memory_allocate_info);
+				memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+				memory_allocate_info.allocationSize = NUM_STAGING_BUFFERS * aligned_size;
+				memory_allocate_info.memoryTypeIndex =
+					engine->gl->MemoryTypeFromProperties(memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+
+				engine->R_AllocateVulkanMemory(&engine->gl->staging_memory, &memory_allocate_info, VULKAN_MEMORY_TYPE_HOST, &engine->gl->num_vulkan_misc_allocations);
+				engine->gl->SetObjectName((uint64_t)engine->gl->staging_memory.handle, VK_OBJECT_TYPE_DEVICE_MEMORY, "Staging Buffers");
+
+				for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
+				{
+					err = vkBindBufferMemory(vulkan_globals.device, staging_buffers[i].buffer, engine->gl->staging_memory.handle, i * aligned_size);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkBindBufferMemory failed");
+				}
+
+				void* data;
+				err = vkMapMemory(vulkan_globals.device, engine->gl->staging_memory.handle, 0, NUM_STAGING_BUFFERS * aligned_size, 0, &data);
+				if (err != VK_SUCCESS)
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkMapMemory failed");
+
+				for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
+					staging_buffers[i].data = (unsigned char*)data + (i * aligned_size);
+			}
+
+
+			StagingBuffers(Engine e) {
+				engine = &e;
+				engine->gl->sbuf = this;
+
+				int		 i;
+				VkResult err;
+
+				SDL_Log("Initializing staging\n");
+
+				R_CreateStagingBuffers();
+
+				ZEROED_STRUCT(VkCommandPoolCreateInfo, command_pool_create_info);
+				command_pool_create_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+				command_pool_create_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+				command_pool_create_info.queueFamilyIndex = vulkan_globals.gfx_queue_family_index;
+
+				err = vkCreateCommandPool(vulkan_globals.device, &command_pool_create_info, NULL, &engine->gl->staging_command_pool);
+				if (err != VK_SUCCESS)
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateCommandPool failed");
+
+				ZEROED_STRUCT(VkCommandBufferAllocateInfo, command_buffer_allocate_info);
+				command_buffer_allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+				command_buffer_allocate_info.commandPool = engine->gl->staging_command_pool;
+				command_buffer_allocate_info.commandBufferCount = NUM_STAGING_BUFFERS;
+
+				VkCommandBuffer command_buffers[NUM_STAGING_BUFFERS];
+				err = vkAllocateCommandBuffers(vulkan_globals.device, &command_buffer_allocate_info, command_buffers);
+				if (err != VK_SUCCESS)
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkAllocateCommandBuffers failed");
+
+				ZEROED_STRUCT(VkFenceCreateInfo, fence_create_info);
+				fence_create_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
+				ZEROED_STRUCT(VkCommandBufferBeginInfo, command_buffer_begin_info);
+				command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+				command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+				for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
+				{
+					err = vkCreateFence(vulkan_globals.device, &fence_create_info, NULL, &staging_buffers[i].fence);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateFence failed");
+
+					staging_buffers[i].command_buffer = command_buffers[i];
+
+					err = vkBeginCommandBuffer(staging_buffers[i].command_buffer, &command_buffer_begin_info);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkBeginCommandBuffer failed");
+				}
+
+				vertex_allocate_mutex = SDL_CreateMutex();
+				index_allocate_mutex = SDL_CreateMutex();
+				uniform_allocate_mutex = SDL_CreateMutex();
+				storage_allocate_mutex = SDL_CreateMutex();
+				garbage_mutex = SDL_CreateMutex();
+				engine->gl->staging_mutex = SDL_CreateMutex();
+				engine->gl->staging_cond = SDL_CreateCond();
+
+			}
+		};
+
+		Instance* instance = nullptr;
+		Device* device = nullptr;
+		CommandBuffers* cbuf = nullptr;
+		StagingBuffers* sbuf = nullptr;
 
 		GL(Engine e) {
 			engine = &e;
 			engine->gl = this;
 			instance = new Instance(*engine);
 			device = new Device(*engine);
+			cbuf = new CommandBuffers(*engine);
+			vulkan_globals.staging_buffer_size = INITIAL_STAGING_BUFFER_SIZE_KB * 1024;
+
 		}
 
 	};
