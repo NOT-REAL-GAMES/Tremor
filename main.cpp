@@ -49,7 +49,7 @@ public:
 int main(int argc, char* argv[]) {
 
 
-	auto bla = new Engine(argc, argv);
+	auto tremor = new Engine(argc, argv);
 
 
 
