@@ -52,6 +52,8 @@ using namespace std;
 
 #define THREAD_LOCAL  __declspec (thread)
 
+#define MAXLIGHTMAPS 4
+
 #define VA_NUM_BUFFS 4
 #if (MAX_OSPATH >= 1024)
 #define VA_BUFFERLEN MAX_OSPATH
@@ -125,9 +127,15 @@ static const int SECONDARY_CB_MULTIPLICITY[SCBX_NUM] = {
 
 #define INITIAL_STAGING_BUFFER_SIZE_KB 16384
 
+#define countof(x) (sizeof (x) / sizeof ((x)[0]))
+
 #define ZEROED_STRUCT(type, name) \
 	type name;                    \
 	memset (&name, 0, sizeof (type));
+#define ZEROED_STRUCT_ARRAY(type, name, count) \
+	type name[count];                          \
+	memset (name, 0, sizeof (type) * count);
+
 
 #define REQUIRED_COLOR_BUFFER_FEATURES                                                                                             \
 	(VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | \
@@ -654,11 +662,11 @@ public:
 
 		bool use_simd;
 
-		static SDL_mutex* vertex_allocate_mutex;
-		static SDL_mutex* index_allocate_mutex;
-		static SDL_mutex* uniform_allocate_mutex;
-		static SDL_mutex* storage_allocate_mutex;
-		static SDL_mutex* garbage_mutex;
+		SDL_mutex* vertex_allocate_mutex;
+		SDL_mutex* index_allocate_mutex;
+		SDL_mutex* uniform_allocate_mutex;
+		SDL_mutex* storage_allocate_mutex;
+		SDL_mutex* garbage_mutex;
 
 
 #ifdef _DEBUG
@@ -1438,13 +1446,288 @@ public:
 						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkBeginCommandBuffer failed");
 				}
 
-				vertex_allocate_mutex = SDL_CreateMutex();
-				index_allocate_mutex = SDL_CreateMutex();
-				uniform_allocate_mutex = SDL_CreateMutex();
-				storage_allocate_mutex = SDL_CreateMutex();
-				garbage_mutex = SDL_CreateMutex();
+				engine->gl->vertex_allocate_mutex = SDL_CreateMutex();
+				engine->gl->index_allocate_mutex = SDL_CreateMutex();
+				engine->gl->uniform_allocate_mutex = SDL_CreateMutex();
+				engine->gl->storage_allocate_mutex = SDL_CreateMutex();
+				engine->gl->garbage_mutex = SDL_CreateMutex();
 				engine->gl->staging_mutex = SDL_CreateMutex();
 				engine->gl->staging_cond = SDL_CreateCond();
+
+			}
+		};
+		class DSLayouts {
+		public:
+			Engine* engine;
+			DSLayouts(Engine e) {
+				engine = &e;
+
+				SDL_Log("Creating descriptor set layouts\n");
+
+				VkResult err;
+				ZEROED_STRUCT(VkDescriptorSetLayoutCreateInfo, descriptor_set_layout_create_info);
+				descriptor_set_layout_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+
+				{
+					ZEROED_STRUCT(VkDescriptorSetLayoutBinding, single_texture_layout_binding);
+					single_texture_layout_binding.binding = 0;
+					single_texture_layout_binding.descriptorCount = 1;
+					single_texture_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+					single_texture_layout_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+
+					descriptor_set_layout_create_info.bindingCount = 1;
+					descriptor_set_layout_create_info.pBindings = &single_texture_layout_binding;
+
+					memset(&vulkan_globals.single_texture_set_layout, 0, sizeof(vulkan_globals.single_texture_set_layout));
+					vulkan_globals.single_texture_set_layout.num_combined_image_samplers = 1;
+
+					err = vkCreateDescriptorSetLayout(vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.single_texture_set_layout.handle);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreateDescriptorSetLayout failed");
+					engine->gl->SetObjectName((uint64_t)vulkan_globals.single_texture_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "single texture");
+				}
+
+				{
+					ZEROED_STRUCT(VkDescriptorSetLayoutBinding, ubo_layout_bindings);
+					ubo_layout_bindings.binding = 0;
+					ubo_layout_bindings.descriptorCount = 1;
+					ubo_layout_bindings.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+					ubo_layout_bindings.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+
+					descriptor_set_layout_create_info.bindingCount = 1;
+					descriptor_set_layout_create_info.pBindings = &ubo_layout_bindings;
+
+					memset(&vulkan_globals.ubo_set_layout, 0, sizeof(vulkan_globals.ubo_set_layout));
+					vulkan_globals.ubo_set_layout.num_ubos_dynamic = 1;
+
+					err = vkCreateDescriptorSetLayout(vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.ubo_set_layout.handle);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateDescriptorSetLayout failed");
+					engine->gl->SetObjectName((uint64_t)vulkan_globals.ubo_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "single dynamic UBO");
+				}
+
+				{
+					ZEROED_STRUCT(VkDescriptorSetLayoutBinding, joints_buffer_layout_bindings);
+					joints_buffer_layout_bindings.binding = 0;
+					joints_buffer_layout_bindings.descriptorCount = 1;
+					joints_buffer_layout_bindings.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					joints_buffer_layout_bindings.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+
+					descriptor_set_layout_create_info.bindingCount = 1;
+					descriptor_set_layout_create_info.pBindings = &joints_buffer_layout_bindings;
+
+					memset(&vulkan_globals.joints_buffer_set_layout, 0, sizeof(vulkan_globals.joints_buffer_set_layout));
+					vulkan_globals.joints_buffer_set_layout.num_storage_buffers = 1;
+
+					err = vkCreateDescriptorSetLayout(vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.joints_buffer_set_layout.handle);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateDescriptorSetLayout failed");
+					engine->gl->SetObjectName((uint64_t)vulkan_globals.joints_buffer_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "joints buffer");
+				}
+
+				{
+					ZEROED_STRUCT(VkDescriptorSetLayoutBinding, input_attachment_layout_bindings);
+					input_attachment_layout_bindings.binding = 0;
+					input_attachment_layout_bindings.descriptorCount = 1;
+					input_attachment_layout_bindings.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+					input_attachment_layout_bindings.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+					descriptor_set_layout_create_info.bindingCount = 1;
+					descriptor_set_layout_create_info.pBindings = &input_attachment_layout_bindings;
+
+					memset(&vulkan_globals.input_attachment_set_layout, 0, sizeof(vulkan_globals.input_attachment_set_layout));
+					vulkan_globals.input_attachment_set_layout.num_input_attachments = 1;
+
+					err = vkCreateDescriptorSetLayout(vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.input_attachment_set_layout.handle);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateDescriptorSetLayout failed");
+					engine->gl->SetObjectName((uint64_t)vulkan_globals.input_attachment_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "input attachment");
+				}
+
+				{
+					ZEROED_STRUCT_ARRAY(VkDescriptorSetLayoutBinding, screen_effects_layout_bindings, 5);
+					screen_effects_layout_bindings[0].binding = 0;
+					screen_effects_layout_bindings[0].descriptorCount = 1;
+					screen_effects_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+					screen_effects_layout_bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					screen_effects_layout_bindings[1].binding = 1;
+					screen_effects_layout_bindings[1].descriptorCount = 1;
+					screen_effects_layout_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+					screen_effects_layout_bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					screen_effects_layout_bindings[2].binding = 2;
+					screen_effects_layout_bindings[2].descriptorCount = 1;
+					screen_effects_layout_bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+					screen_effects_layout_bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					screen_effects_layout_bindings[3].binding = 3;
+					screen_effects_layout_bindings[3].descriptorCount = 1;
+					screen_effects_layout_bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+					screen_effects_layout_bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					screen_effects_layout_bindings[4].binding = 4;
+					screen_effects_layout_bindings[4].descriptorCount = 1;
+					screen_effects_layout_bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+					screen_effects_layout_bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+					descriptor_set_layout_create_info.bindingCount = countof(screen_effects_layout_bindings);
+					descriptor_set_layout_create_info.pBindings = screen_effects_layout_bindings;
+
+					memset(&vulkan_globals.screen_effects_set_layout, 0, sizeof(vulkan_globals.screen_effects_set_layout));
+					vulkan_globals.screen_effects_set_layout.num_combined_image_samplers = 2;
+					vulkan_globals.screen_effects_set_layout.num_storage_images = 1;
+
+					err = vkCreateDescriptorSetLayout(vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.screen_effects_set_layout.handle);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateDescriptorSetLayout failed");
+					engine->gl->SetObjectName((uint64_t)vulkan_globals.screen_effects_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "screen effects");
+				}
+
+				{
+					ZEROED_STRUCT(VkDescriptorSetLayoutBinding, single_texture_cs_write_layout_binding);
+					single_texture_cs_write_layout_binding.binding = 0;
+					single_texture_cs_write_layout_binding.descriptorCount = 1;
+					single_texture_cs_write_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+					single_texture_cs_write_layout_binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+					descriptor_set_layout_create_info.bindingCount = 1;
+					descriptor_set_layout_create_info.pBindings = &single_texture_cs_write_layout_binding;
+
+					memset(&vulkan_globals.single_texture_cs_write_set_layout, 0, sizeof(vulkan_globals.single_texture_cs_write_set_layout));
+					vulkan_globals.single_texture_cs_write_set_layout.num_storage_images = 1;
+
+					err = vkCreateDescriptorSetLayout(
+						vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.single_texture_cs_write_set_layout.handle);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateDescriptorSetLayout failed");
+					engine->gl->SetObjectName((uint64_t)vulkan_globals.single_texture_cs_write_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "single storage image");
+				}
+
+				{
+					int num_descriptors = 0;
+					ZEROED_STRUCT_ARRAY(VkDescriptorSetLayoutBinding, lightmap_compute_layout_bindings, 9);
+					lightmap_compute_layout_bindings[0].binding = num_descriptors++;
+					lightmap_compute_layout_bindings[0].descriptorCount = 1;
+					lightmap_compute_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+					lightmap_compute_layout_bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					lightmap_compute_layout_bindings[1].binding = num_descriptors++;
+					lightmap_compute_layout_bindings[1].descriptorCount = 1;
+					lightmap_compute_layout_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+					lightmap_compute_layout_bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					lightmap_compute_layout_bindings[2].binding = num_descriptors++;
+					lightmap_compute_layout_bindings[2].descriptorCount = MAXLIGHTMAPS * 3 / 4;
+					lightmap_compute_layout_bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+					lightmap_compute_layout_bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					lightmap_compute_layout_bindings[3].binding = num_descriptors++;
+					lightmap_compute_layout_bindings[3].descriptorCount = 1;
+					lightmap_compute_layout_bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					lightmap_compute_layout_bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					lightmap_compute_layout_bindings[4].binding = num_descriptors++;
+					lightmap_compute_layout_bindings[4].descriptorCount = 1;
+					lightmap_compute_layout_bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					lightmap_compute_layout_bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					lightmap_compute_layout_bindings[5].binding = num_descriptors++;
+					lightmap_compute_layout_bindings[5].descriptorCount = 1;
+					lightmap_compute_layout_bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+					lightmap_compute_layout_bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					lightmap_compute_layout_bindings[6].binding = num_descriptors++;
+					lightmap_compute_layout_bindings[6].descriptorCount = 1;
+					lightmap_compute_layout_bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+					lightmap_compute_layout_bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					lightmap_compute_layout_bindings[7].binding = num_descriptors++;
+					lightmap_compute_layout_bindings[7].descriptorCount = 1;
+					lightmap_compute_layout_bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					lightmap_compute_layout_bindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+					descriptor_set_layout_create_info.bindingCount = num_descriptors;
+					descriptor_set_layout_create_info.pBindings = lightmap_compute_layout_bindings;
+
+					memset(&vulkan_globals.lightmap_compute_set_layout, 0, sizeof(vulkan_globals.lightmap_compute_set_layout));
+					vulkan_globals.lightmap_compute_set_layout.num_storage_images = 1;
+					vulkan_globals.lightmap_compute_set_layout.num_sampled_images = 1 + MAXLIGHTMAPS * 3 / 4;
+					vulkan_globals.lightmap_compute_set_layout.num_storage_buffers = 3;
+					vulkan_globals.lightmap_compute_set_layout.num_ubos_dynamic = 2;
+
+					err = vkCreateDescriptorSetLayout(vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.lightmap_compute_set_layout.handle);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateDescriptorSetLayout failed");
+					engine->gl->SetObjectName((uint64_t)vulkan_globals.lightmap_compute_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "lightmap compute");
+
+					if (vulkan_globals.ray_query)
+					{
+						lightmap_compute_layout_bindings[8].binding = num_descriptors++;
+						lightmap_compute_layout_bindings[8].descriptorCount = 1;
+						lightmap_compute_layout_bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+						lightmap_compute_layout_bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+						descriptor_set_layout_create_info.bindingCount = num_descriptors;
+
+						vulkan_globals.lightmap_compute_rt_set_layout.num_storage_images = 1;
+						vulkan_globals.lightmap_compute_rt_set_layout.num_sampled_images = 1 + MAXLIGHTMAPS * 3 / 4;
+						vulkan_globals.lightmap_compute_rt_set_layout.num_storage_buffers = 3;
+						vulkan_globals.lightmap_compute_rt_set_layout.num_ubos_dynamic = 2;
+						vulkan_globals.lightmap_compute_rt_set_layout.num_acceleration_structures = 1;
+
+						err = vkCreateDescriptorSetLayout(
+							vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.lightmap_compute_rt_set_layout.handle);
+						if (err != VK_SUCCESS)
+							SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateDescriptorSetLayout failed");
+						engine->gl->SetObjectName((uint64_t)vulkan_globals.lightmap_compute_rt_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "lightmap compute rt");
+					}
+				}
+
+				{
+					ZEROED_STRUCT_ARRAY(VkDescriptorSetLayoutBinding, indirect_compute_layout_bindings, 4);
+					indirect_compute_layout_bindings[0].binding = 0;
+					indirect_compute_layout_bindings[0].descriptorCount = 1;
+					indirect_compute_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					indirect_compute_layout_bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					indirect_compute_layout_bindings[1].binding = 1;
+					indirect_compute_layout_bindings[1].descriptorCount = 1;
+					indirect_compute_layout_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					indirect_compute_layout_bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					indirect_compute_layout_bindings[2].binding = 2;
+					indirect_compute_layout_bindings[2].descriptorCount = 1;
+					indirect_compute_layout_bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					indirect_compute_layout_bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					indirect_compute_layout_bindings[3].binding = 3;
+					indirect_compute_layout_bindings[3].descriptorCount = 1;
+					indirect_compute_layout_bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+					indirect_compute_layout_bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+					descriptor_set_layout_create_info.bindingCount = countof(indirect_compute_layout_bindings);
+					descriptor_set_layout_create_info.pBindings = indirect_compute_layout_bindings;
+
+					memset(&vulkan_globals.indirect_compute_set_layout, 0, sizeof(vulkan_globals.indirect_compute_set_layout));
+					vulkan_globals.indirect_compute_set_layout.num_storage_buffers = 4;
+
+					err = vkCreateDescriptorSetLayout(vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.indirect_compute_set_layout.handle);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateDescriptorSetLayout failed");
+					engine->gl->SetObjectName((uint64_t)vulkan_globals.indirect_compute_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "indirect compute");
+				}
+
+#if defined(_DEBUG)
+				if (vulkan_globals.ray_query)
+				{
+					ZEROED_STRUCT_ARRAY(VkDescriptorSetLayoutBinding, ray_debug_layout_bindings, 2);
+					ray_debug_layout_bindings[0].binding = 0;
+					ray_debug_layout_bindings[0].descriptorCount = 1;
+					ray_debug_layout_bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+					ray_debug_layout_bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+					ray_debug_layout_bindings[1].binding = 1;
+					ray_debug_layout_bindings[1].descriptorCount = 1;
+					ray_debug_layout_bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+					ray_debug_layout_bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+					descriptor_set_layout_create_info.bindingCount = countof(ray_debug_layout_bindings);
+					descriptor_set_layout_create_info.pBindings = ray_debug_layout_bindings;
+
+					memset(&vulkan_globals.ray_debug_set_layout, 0, sizeof(vulkan_globals.ray_debug_set_layout));
+					vulkan_globals.ray_debug_set_layout.num_storage_images = 1;
+
+					err = vkCreateDescriptorSetLayout(vulkan_globals.device, &descriptor_set_layout_create_info, NULL, &vulkan_globals.ray_debug_set_layout.handle);
+					if (err != VK_SUCCESS)
+						SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateDescriptorSetLayout failed");
+					engine->gl->SetObjectName((uint64_t)vulkan_globals.screen_effects_set_layout.handle, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "ray debug");
+				}
+#endif
 
 			}
 		};
@@ -1453,6 +1736,7 @@ public:
 		Device* device = nullptr;
 		CommandBuffers* cbuf = nullptr;
 		StagingBuffers* sbuf = nullptr;
+		DSLayouts* dslayouts = nullptr;
 
 		GL(Engine e) {
 			engine = &e;
@@ -1461,7 +1745,8 @@ public:
 			device = new Device(*engine);
 			cbuf = new CommandBuffers(*engine);
 			vulkan_globals.staging_buffer_size = INITIAL_STAGING_BUFFER_SIZE_KB * 1024;
-
+			sbuf = new StagingBuffers(*engine);
+			dslayouts = new DSLayouts(*engine);
 		}
 
 	};
