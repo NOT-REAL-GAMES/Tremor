@@ -36,7 +36,7 @@
 #include <vulkan/vulkan.hpp>
 using namespace std;
 
-#define MAX_QPATH 64
+#define MAX_QPATH 2048
 
 #define NUM_COLOR_BUFFERS 2
 
@@ -864,6 +864,32 @@ typedef struct
 	vulkan_pipeline_t fte_particle_pipelines[FTE_PARTICLE_PIPELINE_COUNT];
 #endif
 
+	typedef struct pipeline_create_infos_s
+	{
+		VkPipelineShaderStageCreateInfo		   shader_stages[2];
+		VkPipelineDynamicStateCreateInfo	   dynamic_state;
+		VkDynamicState						   dynamic_states[3];
+		VkPipelineVertexInputStateCreateInfo   vertex_input_state;
+		VkPipelineInputAssemblyStateCreateInfo input_assembly_state;
+		VkPipelineViewportStateCreateInfo	   viewport_state;
+		VkPipelineRasterizationStateCreateInfo rasterization_state;
+		VkPipelineMultisampleStateCreateInfo   multisample_state;
+		VkPipelineDepthStencilStateCreateInfo  depth_stencil_state;
+		VkPipelineColorBlendStateCreateInfo	   color_blend_state;
+		VkPipelineColorBlendAttachmentState	   blend_attachment_state;
+		VkGraphicsPipelineCreateInfo		   graphics_pipeline;
+		VkComputePipelineCreateInfo			   compute_pipeline;
+	} pipeline_create_infos_t;
+
+	VkVertexInputAttributeDescription basic_vertex_input_attribute_descriptions[3];
+	VkVertexInputBindingDescription	 basic_vertex_binding_description;
+	VkVertexInputAttributeDescription world_vertex_input_attribute_descriptions[3];
+	VkVertexInputBindingDescription	 world_vertex_binding_description;
+	VkVertexInputAttributeDescription alias_vertex_input_attribute_descriptions[5];
+	VkVertexInputBindingDescription	 alias_vertex_binding_descriptions[3];
+	VkVertexInputAttributeDescription md5_vertex_input_attribute_descriptions[5];
+	VkVertexInputBindingDescription	 md5_vertex_binding_description;
+
 	// Descriptors
 	VkDescriptorPool		 descriptor_pool;
 	vulkan_desc_set_layout_t ubo_set_layout;
@@ -953,7 +979,7 @@ vulkanglobals_t vulkan_globals;
 GetDeviceVendorFromDriverProperties
 ===============
 */
-static const char* GetDeviceVendorFromDriverProperties(VkPhysicalDeviceDriverProperties* driver_properties)
+const char* GetDeviceVendorFromDriverProperties(VkPhysicalDeviceDriverProperties* driver_properties)
 {
 	switch ((int)driver_properties->driverID)
 	{
@@ -993,7 +1019,7 @@ static const char* GetDeviceVendorFromDriverProperties(VkPhysicalDeviceDriverPro
 	}
 }
 
-static const char* GetDeviceVendorFromDeviceProperties(void)
+const char* GetDeviceVendorFromDeviceProperties(void)
 {
 	switch (vulkan_globals.device_properties.vendorID)
 	{
@@ -1044,7 +1070,7 @@ float CLAMP(float* value, float min, float max)
 	return *value;
 }
 
-static char* get_va_buffer(void)
+ char* get_va_buffer(void)
 {
 	static THREAD_LOCAL char va_buffers[VA_NUM_BUFFS][VA_BUFFERLEN];
 	static THREAD_LOCAL int	 buffer_idx = 0;
@@ -1090,8 +1116,8 @@ typedef struct
 class Engine {
 public:
 
-	static int			numgltextures;
-	static gltexture_t* active_gltextures, * free_gltextures;
+	 int			numgltextures;
+	 gltexture_t* active_gltextures, * free_gltextures;
 	gltexture_t* notexture, * nulltexture, * whitetexture, * greytexture, * greylightmap, * bluenoisetexture;
 
 
@@ -1188,7 +1214,7 @@ public:
 		SDL_UnlockMutex(gl->sbuf->staging_mutex);
 	}
 
-	static void R_FlushStagingCommandBuffer(stagingbuffer_t* staging_buffer)
+	 void R_FlushStagingCommandBuffer(stagingbuffer_t* staging_buffer)
 	{
 		VkResult err;
 
@@ -1440,7 +1466,7 @@ public:
 
 	void R_InitSamplers()
 	{
-		gl->WaitForDeviceIdle();
+		//gl->WaitForDeviceIdle();
 		SDL_Log("Initializing samplers\n");
 
 		VkResult err;
@@ -1770,6 +1796,350 @@ public:
 				buffers[i].device_address = device_address;
 			}
 		}
+	}
+	void R_CreatePipelineLayouts()
+	{
+		SDL_Log("Creating pipeline layouts\n");
+
+		VkResult err;
+
+		{
+			// Basic
+			VkDescriptorSetLayout basic_descriptor_set_layouts[1] = { vulkan_globals.single_texture_set_layout.handle };
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 21 * sizeof(float);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 1;
+			pipeline_layout_create_info.pSetLayouts = basic_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.basic_pipeline_layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.basic_pipeline_layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "basic_pipeline_layout");
+			vulkan_globals.basic_pipeline_layout.push_constant_range = push_constant_range;
+		}
+
+		{
+			// World
+			VkDescriptorSetLayout world_descriptor_set_layouts[3] = {
+				vulkan_globals.single_texture_set_layout.handle, vulkan_globals.single_texture_set_layout.handle, vulkan_globals.single_texture_set_layout.handle };
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 21 * sizeof(float);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 3;
+			pipeline_layout_create_info.pSetLayouts = world_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.world_pipeline_layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.world_pipeline_layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "world_pipeline_layout");
+			vulkan_globals.world_pipeline_layout.push_constant_range = push_constant_range;
+		}
+
+		{
+			// Alias
+			VkDescriptorSetLayout alias_descriptor_set_layouts[3] = {
+				vulkan_globals.single_texture_set_layout.handle, vulkan_globals.single_texture_set_layout.handle, vulkan_globals.ubo_set_layout.handle };
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 21 * sizeof(float);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 3;
+			pipeline_layout_create_info.pSetLayouts = alias_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.alias_pipelines[0].layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.alias_pipelines[0].layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "alias_pipeline_layout");
+			vulkan_globals.alias_pipelines[0].layout.push_constant_range = push_constant_range;
+		}
+
+		{
+			// MD5
+			VkDescriptorSetLayout md5_descriptor_set_layouts[4] = {
+				vulkan_globals.single_texture_set_layout.handle, vulkan_globals.single_texture_set_layout.handle, vulkan_globals.ubo_set_layout.handle,
+				vulkan_globals.joints_buffer_set_layout.handle };
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 21 * sizeof(float);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 4;
+			pipeline_layout_create_info.pSetLayouts = md5_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.md5_pipelines[0].layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.md5_pipelines[0].layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "md5_pipeline_layout");
+			vulkan_globals.md5_pipelines[0].layout.push_constant_range = push_constant_range;
+		}
+
+		{
+			// Sky
+			VkDescriptorSetLayout sky_layer_descriptor_set_layouts[2] = {
+				vulkan_globals.single_texture_set_layout.handle,
+				vulkan_globals.single_texture_set_layout.handle,
+			};
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 23 * sizeof(float);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 1;
+			pipeline_layout_create_info.pSetLayouts = sky_layer_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.sky_pipeline_layout[0].handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.sky_pipeline_layout[0].handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "sky_pipeline_layout");
+			vulkan_globals.sky_pipeline_layout[0].push_constant_range = push_constant_range;
+
+			push_constant_range.size = 25 * sizeof(float);
+			pipeline_layout_create_info.setLayoutCount = 2;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.sky_pipeline_layout[1].handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.sky_pipeline_layout[1].handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "sky_layer_pipeline_layout");
+			vulkan_globals.sky_pipeline_layout[1].push_constant_range = push_constant_range;
+		}
+
+		{
+			// Postprocess
+			VkDescriptorSetLayout postprocess_descriptor_set_layouts[1] = {
+				vulkan_globals.input_attachment_set_layout.handle,
+			};
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 2 * sizeof(float);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 1;
+			pipeline_layout_create_info.pSetLayouts = postprocess_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.postprocess_pipeline.layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.postprocess_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "postprocess_pipeline_layout");
+			vulkan_globals.postprocess_pipeline.layout.push_constant_range = push_constant_range;
+		}
+
+		{
+			// Screen effects
+			VkDescriptorSetLayout screen_effects_descriptor_set_layouts[1] = {
+				vulkan_globals.screen_effects_set_layout.handle,
+			};
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 3 * sizeof(uint32_t) + 8 * sizeof(float);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 1;
+			pipeline_layout_create_info.pSetLayouts = screen_effects_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.screen_effects_pipeline.layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.screen_effects_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "screen_effects_pipeline_layout");
+			vulkan_globals.screen_effects_pipeline.layout.push_constant_range = push_constant_range;
+			vulkan_globals.screen_effects_scale_pipeline.layout.handle = vulkan_globals.screen_effects_pipeline.layout.handle;
+			vulkan_globals.screen_effects_scale_pipeline.layout.push_constant_range = push_constant_range;
+			vulkan_globals.screen_effects_scale_sops_pipeline.layout.handle = vulkan_globals.screen_effects_pipeline.layout.handle;
+			vulkan_globals.screen_effects_scale_sops_pipeline.layout.push_constant_range = push_constant_range;
+		}
+
+		{
+			// Texture warp
+			VkDescriptorSetLayout tex_warp_descriptor_set_layouts[2] = {
+				vulkan_globals.single_texture_set_layout.handle,
+				vulkan_globals.single_texture_cs_write_set_layout.handle,
+			};
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 1 * sizeof(float);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 2;
+			pipeline_layout_create_info.pSetLayouts = tex_warp_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.cs_tex_warp_pipeline.layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.cs_tex_warp_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "cs_tex_warp_pipeline_layout");
+			vulkan_globals.cs_tex_warp_pipeline.layout.push_constant_range = push_constant_range;
+		}
+
+		{
+			// Show triangles
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 0;
+			pipeline_layout_create_info.pushConstantRangeCount = 0;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.showtris_pipeline.layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.showtris_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "showtris_pipeline_layout");
+			vulkan_globals.showtris_pipeline.layout.push_constant_range = push_constant_range;
+		}
+
+		{
+			// Update lightmaps
+			VkDescriptorSetLayout update_lightmap_descriptor_set_layouts[1] = {
+				vulkan_globals.lightmap_compute_set_layout.handle,
+			};
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 6 * sizeof(uint32_t);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 1;
+			pipeline_layout_create_info.pSetLayouts = update_lightmap_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.update_lightmap_pipeline.layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.update_lightmap_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "update_lightmap_pipeline_layout");
+			vulkan_globals.update_lightmap_pipeline.layout.push_constant_range = push_constant_range;
+		}
+
+		if (vulkan_globals.ray_query)
+		{
+			// Update lightmaps RT
+			VkDescriptorSetLayout update_lightmap_rt_descriptor_set_layouts[1] = {
+				vulkan_globals.lightmap_compute_rt_set_layout.handle,
+			};
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 6 * sizeof(uint32_t);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 1;
+			pipeline_layout_create_info.pSetLayouts = update_lightmap_rt_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.update_lightmap_rt_pipeline.layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName(
+				(uint64_t)vulkan_globals.update_lightmap_rt_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "update_lightmap_rt_pipeline_layout");
+			vulkan_globals.update_lightmap_rt_pipeline.layout.push_constant_range = push_constant_range;
+		}
+
+		{
+			// Indirect draw
+			VkDescriptorSetLayout indirect_draw_descriptor_set_layouts[1] = {
+				vulkan_globals.indirect_compute_set_layout.handle,
+			};
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 6 * sizeof(uint32_t);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 1;
+			pipeline_layout_create_info.pSetLayouts = indirect_draw_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.indirect_draw_pipeline.layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.indirect_draw_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "indirect_draw_pipeline_layout");
+			vulkan_globals.indirect_draw_pipeline.layout.push_constant_range = push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.indirect_clear_pipeline.layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.indirect_clear_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "indirect_clear_pipeline_layout");
+			vulkan_globals.indirect_clear_pipeline.layout.push_constant_range = push_constant_range;
+		}
+
+#if defined(_DEBUG)
+		if (vulkan_globals.ray_query)
+		{
+			// Ray debug
+			VkDescriptorSetLayout ray_debug_descriptor_set_layouts[1] = {
+				vulkan_globals.ray_debug_set_layout.handle,
+			};
+
+			ZEROED_STRUCT(VkPushConstantRange, push_constant_range);
+			push_constant_range.offset = 0;
+			push_constant_range.size = 15 * sizeof(float);
+			push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+			ZEROED_STRUCT(VkPipelineLayoutCreateInfo, pipeline_layout_create_info);
+			pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+			pipeline_layout_create_info.setLayoutCount = 1;
+			pipeline_layout_create_info.pSetLayouts = ray_debug_descriptor_set_layouts;
+			pipeline_layout_create_info.pushConstantRangeCount = 1;
+			pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+
+			err = vkCreatePipelineLayout(vulkan_globals.device, &pipeline_layout_create_info, NULL, &vulkan_globals.ray_debug_pipeline.layout.handle);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreatePipelineLayout failed");
+			gl->SetObjectName((uint64_t)vulkan_globals.ray_debug_pipeline.layout.handle, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "ray_debug_pipeline_layout");
+			vulkan_globals.ray_debug_pipeline.layout.push_constant_range = push_constant_range;
+		}
+#endif
 	}
 
 
@@ -3157,6 +3527,8 @@ public:
 			gpu_buffers = new GPUBuffers(*engine);
 			mesh_heap = new MeshHeap(*engine);
 			tex_heap = new TexHeap(*engine);
+			engine->R_InitSamplers();
+			engine->R_CreatePipelineLayouts();
 		}
 
 	};
