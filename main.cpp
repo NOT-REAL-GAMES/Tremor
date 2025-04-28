@@ -45,6 +45,10 @@ using namespace std;
 #define NUM_WORLD_CBX				6
 #define NUM_ENTITIES_CBX			6
 
+#define MAX_GLTEXTURES				4096
+#define MAX_SANITY_LIGHTMAPS		256
+#define MIN_NB_DESCRIPTORS_PER_TYPE 32
+
 #define MAX_SWAP_CHAIN_IMAGES 8
 #define DOUBLE_BUFFERED 2
 
@@ -52,7 +56,22 @@ using namespace std;
 
 #define THREAD_LOCAL  __declspec (thread)
 
+#define FAN_INDEX_BUFFER_SIZE 126
+
 #define MAXLIGHTMAPS 4
+
+#define MESH_HEAP_SIZE_MB	1024
+#define MESH_HEAP_PAGE_SIZE 4096
+#define MESH_HEAP_NAME		"Mesh heap"
+
+#define TEXTURE_HEAP_MEMORY_SIZE_MB 1024
+#define TEXTURE_HEAP_PAGE_SIZE		16384
+
+
+#define NUM_SMALL_ALLOC_SIZES  6 // 64 bit mask
+#define NUM_BLOCK_SIZE_CLASSES 8
+#define MAX_PAGES			   (UINT64_MAX - 1)
+#define INVALID_PAGE_INDEX	   UINT64_MAX
 
 #define VA_NUM_BUFFS 4
 #if (MAX_OSPATH >= 1024)
@@ -124,6 +143,14 @@ static const int SECONDARY_CB_MULTIPLICITY[SCBX_NUM] = {
 	1,				  // SCBX_GUI,
 	1,				  // SCBX_POST_PROCESS,
 };
+
+#define INITIAL_DYNAMIC_VERTEX_BUFFER_SIZE_KB  256
+#define INITIAL_DYNAMIC_INDEX_BUFFER_SIZE_KB   1024
+#define INITIAL_DYNAMIC_UNIFORM_BUFFER_SIZE_KB 256
+#define NUM_DYNAMIC_BUFFERS					   2
+#define GARBAGE_FRAME_COUNT					   3
+#define MAX_UNIFORM_ALLOC					   2048
+
 
 #define INITIAL_STAGING_BUFFER_SIZE_KB 16384
 
@@ -201,6 +228,16 @@ typedef struct vulkan_desc_set_layout_s
 	int					  num_acceleration_structures;
 } vulkan_desc_set_layout_t;
 
+typedef struct
+{
+	VkBuffer		buffer;
+	VkCommandBuffer command_buffer;
+	VkFence			fence;
+	int				current_offset;
+	bool			submitted;
+	unsigned char* data;
+} stagingbuffer_t;
+
 typedef enum
 {
 	VULKAN_MEMORY_TYPE_DEVICE,
@@ -243,6 +280,68 @@ typedef struct cb_context_s
 	uint32_t		  vbo_indices[MAX_BATCH_SIZE];
 	unsigned int	  num_vbo_indices;
 } cb_context_t;
+
+typedef uint16_t page_index_t;
+
+typedef struct glheappagehdr_s
+{
+	page_index_t size_in_pages;
+	page_index_t prev_block_page_index;
+} glheappagehdr_t;
+
+typedef struct glheapsmallalloclinks_s
+{
+	page_index_t prev_small_alloc_page;
+	page_index_t next_small_alloc_page;
+} glheapsmallalloclinks_t;
+
+
+typedef struct glheapsegment_s
+{
+	vulkan_memory_t			 memory;
+	glheappagehdr_t* page_hdrs;
+	glheapsmallalloclinks_t* small_alloc_links;
+	uint64_t* small_alloc_masks;
+	uint64_t* free_blocks_bitfields[NUM_BLOCK_SIZE_CLASSES];
+	uint64_t* free_blocks_skip_bitfields[NUM_BLOCK_SIZE_CLASSES];
+	page_index_t			 small_alloc_free_list_heads[NUM_SMALL_ALLOC_SIZES];
+	page_index_t			 num_pages_allocated;
+} glheapsegment_t;
+
+typedef struct glheapstats_s
+{
+	uint32_t num_segments;
+	uint32_t num_allocations;
+	uint32_t num_small_allocations;
+	uint32_t num_block_allocations;
+	uint32_t num_dedicated_allocations;
+	uint32_t num_blocks_used;
+	uint32_t num_blocks_free;
+	uint32_t num_pages_allocated;
+	uint32_t num_pages_free;
+	uint64_t num_bytes_allocated;
+	uint64_t num_bytes_free;
+	uint64_t num_bytes_wasted;
+} glheapstats_t;
+
+typedef struct glheap_s
+{
+	const char* name;
+	VkDeviceSize		 segment_size;
+	uint32_t			 page_size;
+	uint32_t			 page_size_shift;
+	uint32_t			 min_small_alloc_size;
+	uint32_t			 small_alloc_shift;
+	uint32_t			 memory_type_index;
+	vulkan_memory_type_t memory_type;
+	uint32_t			 num_segments;
+	page_index_t		 num_pages_per_segment;
+	page_index_t		 num_masks_per_segment;
+	glheapsegment_t** segments;
+	uint64_t			 dedicated_alloc_bytes;
+	glheapstats_t		 stats;
+} glheap_t;
+
 
 typedef struct
 {
@@ -543,12 +642,388 @@ unsigned int VKAPI_PTR DebugMessageCallback(
 
 #endif
 
-
+typedef struct
+{
+	VkBuffer		buffer;
+	uint32_t		current_offset;
+	unsigned char* data;
+	VkDeviceAddress device_address;
+} dynbuffer_t;
 
 
 
 class Engine {
 public:
+
+	static inline int FindLastBitNonZero(const uint32_t mask)
+	{
+		unsigned long result;
+		_BitScanReverse(&result, mask);
+		return result;
+	}
+
+	static inline uint32_t Q_log2(uint32_t val)
+	{
+		assert(val > 0);
+		return FindLastBitNonZero(val);
+	}
+
+	static inline uint32_t Q_nextPow2(uint32_t val)
+	{
+		uint32_t result = 1;
+		if (val > 1)
+			result = 1 << (FindLastBitNonZero(val - 1) + 1);
+		return result;
+	}
+
+	void R_SubmitStagingBuffer(int index)
+	{
+		while (gl->sbuf->num_stagings_in_flight > 0)
+			SDL_CondWait(gl->sbuf->staging_cond, gl->sbuf->staging_mutex);
+
+		ZEROED_STRUCT(VkMemoryBarrier, memory_barrier);
+		memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		memory_barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+		vkCmdPipelineBarrier(
+			gl->sbuf->staging_buffers[index].command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &memory_barrier, 0, NULL, 0, NULL);
+
+		vkEndCommandBuffer(gl->sbuf->staging_buffers[index].command_buffer);
+
+		ZEROED_STRUCT(VkMappedMemoryRange, range);
+		range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+		range.memory = gl->sbuf->staging_memory.handle;
+		range.size = VK_WHOLE_SIZE;
+		vkFlushMappedMemoryRanges(vulkan_globals.device, 1, &range);
+
+		ZEROED_STRUCT(VkSubmitInfo, submit_info);
+		submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submit_info.commandBufferCount = 1;
+		submit_info.pCommandBuffers = &gl->sbuf->staging_buffers[index].command_buffer;
+
+		vkQueueSubmit(vulkan_globals.queue, 1, &submit_info, gl->sbuf->staging_buffers[index].fence);
+
+		gl->sbuf->staging_buffers[index].submitted = true;
+		gl->sbuf->current_staging_buffer = (gl->sbuf->current_staging_buffer + 1) % NUM_STAGING_BUFFERS;
+	}
+
+
+	void R_SubmitStagingBuffers(void)
+	{
+		SDL_LockMutex(gl->staging_mutex);
+
+		while (gl->sbuf->num_stagings_in_flight > 0)
+			SDL_CondWait(gl->sbuf->staging_cond, gl->sbuf->staging_mutex);
+
+		int i;
+		for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
+		{
+			if (!gl->sbuf->staging_buffers[i].submitted && gl->sbuf->staging_buffers[i].current_offset > 0)
+				R_SubmitStagingBuffer(i);
+		}
+
+		SDL_UnlockMutex(gl->sbuf->staging_mutex);
+	}
+
+	static void R_FlushStagingCommandBuffer(stagingbuffer_t* staging_buffer)
+	{
+		VkResult err;
+
+		if (!staging_buffer->submitted)
+			return;
+
+		err = vkWaitForFences(vulkan_globals.device, 1, &staging_buffer->fence, VK_TRUE, UINT64_MAX);
+		if (err != VK_SUCCESS)
+			SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkWaitForFences failed");
+		
+		err = vkResetFences(vulkan_globals.device, 1, &staging_buffer->fence);
+		if (err != VK_SUCCESS)
+			SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkResetFences failed");
+
+		staging_buffer->current_offset = 0;
+		staging_buffer->submitted = false;
+
+		ZEROED_STRUCT(VkCommandBufferBeginInfo, command_buffer_begin_info);
+		command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+		err = vkBeginCommandBuffer(staging_buffer->command_buffer, &command_buffer_begin_info);
+		if (err != VK_SUCCESS)
+			SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkBeginCommandBuffer failed");
+	}
+
+	void R_FreeVulkanMemory(vulkan_memory_t* memory, atomic_uint32_t* num_allocations)
+	{
+		if (memory->type == VULKAN_MEMORY_TYPE_DEVICE)
+			(gl->total_device_vulkan_allocation_size-= memory->size);
+		else if (memory->type == VULKAN_MEMORY_TYPE_HOST)
+			(gl->total_host_vulkan_allocation_size-= memory->size);
+		if (memory->type != VULKAN_MEMORY_TYPE_NONE)
+		{
+			vkFreeMemory(vulkan_globals.device, memory->handle, NULL);
+			if (num_allocations)
+				(num_allocations--);
+		}
+		memory->handle = VK_NULL_HANDLE;
+		memory->size = 0;
+	}
+
+	void R_DestroyStagingBuffers(void)
+	{
+		int i;
+
+		R_FreeVulkanMemory(&gl->sbuf->staging_memory, NULL);
+		for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
+		{
+			vkDestroyBuffer(vulkan_globals.device, gl->sbuf->staging_buffers[i].buffer, NULL);
+		}
+	}
+
+	void R_CreateStagingBuffers()
+	{
+		int		 i;
+		VkResult err;
+
+		ZEROED_STRUCT(VkBufferCreateInfo, buffer_create_info);
+		buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		buffer_create_info.size = vulkan_globals.staging_buffer_size;
+		buffer_create_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+		for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
+		{
+			gl->sbuf->staging_buffers[i].current_offset = 0;
+			gl->sbuf->staging_buffers[i].submitted = false;
+
+			err = vkCreateBuffer(vulkan_globals.device, &buffer_create_info, NULL, &gl->sbuf->staging_buffers[i].buffer);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreateBuffer failed");
+
+			gl->SetObjectName((uint64_t)gl->sbuf->staging_buffers[i].buffer, VK_OBJECT_TYPE_BUFFER, "Staging Buffer");
+		}
+
+		VkMemoryRequirements memory_requirements;
+		vkGetBufferMemoryRequirements(vulkan_globals.device, gl->sbuf->staging_buffers[0].buffer, &memory_requirements);
+		const size_t aligned_size = (memory_requirements.size + memory_requirements.alignment);
+
+		ZEROED_STRUCT(VkMemoryAllocateInfo, memory_allocate_info);
+		memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		memory_allocate_info.allocationSize = NUM_STAGING_BUFFERS * aligned_size;
+		memory_allocate_info.memoryTypeIndex =
+			gl->MemoryTypeFromProperties(memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+
+		R_AllocateVulkanMemory(&gl->sbuf->staging_memory, &memory_allocate_info, VULKAN_MEMORY_TYPE_HOST, &gl->num_vulkan_misc_allocations);
+		gl->SetObjectName((uint64_t)gl->sbuf->staging_memory.handle, VK_OBJECT_TYPE_DEVICE_MEMORY, "Staging Buffers");
+
+		for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
+		{
+			err = vkBindBufferMemory(vulkan_globals.device, gl->sbuf->staging_buffers[i].buffer, gl->sbuf->staging_memory.handle, i * aligned_size);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkBindBufferMemory failed");
+		}
+
+		void* data;
+		err = vkMapMemory(vulkan_globals.device, gl->sbuf->staging_memory.handle, 0, NUM_STAGING_BUFFERS * aligned_size, 0, &data);
+		if (err != VK_SUCCESS)
+			SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkMapMemory failed");
+
+		for (i = 0; i < NUM_STAGING_BUFFERS; ++i)
+			gl->sbuf->staging_buffers[i].data = (unsigned char*)data + (i * aligned_size);
+	}
+
+
+
+	byte* R_StagingAllocate(int size, int alignment, VkCommandBuffer* command_buffer, VkBuffer* buffer, int* buffer_offset)
+	{
+		SDL_LockMutex(gl->staging_mutex);
+
+		while (gl->num_stagings_in_flight > 0)
+			SDL_CondWait(gl->staging_cond, gl->staging_mutex);
+
+		vulkan_globals.device_idle = false;
+
+		if (size > vulkan_globals.staging_buffer_size)
+		{
+			R_SubmitStagingBuffers();
+
+			for (int i = 0; i < NUM_STAGING_BUFFERS; ++i)
+				R_FlushStagingCommandBuffer(&gl->sbuf->staging_buffers[i]);
+
+			vulkan_globals.staging_buffer_size = size;
+
+			R_DestroyStagingBuffers();
+			R_CreateStagingBuffers();
+		}
+
+		stagingbuffer_t* staging_buffer = &gl->sbuf->staging_buffers[gl->sbuf->current_staging_buffer];
+		assert(alignment == Q_nextPow2(alignment));
+		staging_buffer->current_offset = (staging_buffer->current_offset + alignment);
+
+		if ((staging_buffer->current_offset + size) >= vulkan_globals.staging_buffer_size && !staging_buffer->submitted)
+			R_SubmitStagingBuffer(gl->sbuf->current_staging_buffer);
+
+		staging_buffer = & gl->sbuf->staging_buffers[gl->sbuf->current_staging_buffer];
+		R_FlushStagingCommandBuffer(staging_buffer);
+
+		if (command_buffer)
+			*command_buffer = staging_buffer->command_buffer;
+		if (buffer)
+			*buffer = staging_buffer->buffer;
+		if (buffer_offset)
+			*buffer_offset = staging_buffer->current_offset;
+
+		unsigned char* data = staging_buffer->data + staging_buffer->current_offset;
+		staging_buffer->current_offset += size;
+		gl->sbuf->num_stagings_in_flight += 1;
+
+		return (byte*)data;
+	}
+
+	void R_StagingBeginCopy(void)
+	{
+		SDL_UnlockMutex(gl->staging_mutex);
+	}
+
+	void R_StagingEndCopy(void)
+	{
+		SDL_LockMutex(gl->staging_mutex);
+		gl->num_stagings_in_flight -= 1;
+		SDL_CondBroadcast(gl->staging_cond);
+		SDL_UnlockMutex(gl->staging_mutex);
+	}
+
+
+	void R_InitFanIndexBuffer()
+	{
+		VkResult	   err;
+		VkDeviceMemory memory;
+		const int	   bufferSize = sizeof(uint16_t) * FAN_INDEX_BUFFER_SIZE;
+
+		ZEROED_STRUCT(VkBufferCreateInfo, buffer_create_info);
+		buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		buffer_create_info.size = bufferSize;
+		buffer_create_info.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+		err = vkCreateBuffer(vulkan_globals.device, &buffer_create_info, NULL, &vulkan_globals.fan_index_buffer);
+		if (err != VK_SUCCESS)
+			SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreateBuffer failed");
+
+		gl->SetObjectName((uint64_t)vulkan_globals.fan_index_buffer, VK_OBJECT_TYPE_BUFFER, "Quad Index Buffer");
+
+		VkMemoryRequirements memory_requirements;
+		vkGetBufferMemoryRequirements(vulkan_globals.device, vulkan_globals.fan_index_buffer, &memory_requirements);
+
+		ZEROED_STRUCT(VkMemoryAllocateInfo, memory_allocate_info);
+		memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		memory_allocate_info.allocationSize = memory_requirements.size;
+		memory_allocate_info.memoryTypeIndex = gl->MemoryTypeFromProperties(memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+
+		(gl->num_vulkan_dynbuf_allocations++);
+		(gl->total_device_vulkan_allocation_size += memory_requirements.size);
+		err = vkAllocateMemory(vulkan_globals.device, &memory_allocate_info, NULL, &memory);
+		if (err != VK_SUCCESS)
+			SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkAllocateMemory failed");
+
+		err = vkBindBufferMemory(vulkan_globals.device, vulkan_globals.fan_index_buffer, memory, 0);
+		if (err != VK_SUCCESS)
+			SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkBindBufferMemory failed");
+
+		{
+			VkBuffer		staging_buffer;
+			VkCommandBuffer command_buffer;
+			int				staging_offset;
+			int				current_index = 0;
+			int				i;
+			uint16_t* staging_mem = (uint16_t*)R_StagingAllocate(bufferSize, 1, &command_buffer, &staging_buffer, &staging_offset);
+
+			VkBufferCopy region;
+			region.srcOffset = staging_offset;
+			region.dstOffset = 0;
+			region.size = bufferSize;
+			vkCmdCopyBuffer(command_buffer, staging_buffer, vulkan_globals.fan_index_buffer, 1, &region);
+
+			R_StagingBeginCopy();
+			for (i = 0; i < FAN_INDEX_BUFFER_SIZE / 3; ++i)
+			{
+				staging_mem[current_index++] = 0;
+				staging_mem[current_index++] = 1 + i;
+				staging_mem[current_index++] = 2 + i;
+			}
+			R_StagingEndCopy();
+		}
+	}
+
+	VkDescriptorSet R_AllocateDescriptorSet(vulkan_desc_set_layout_t* layout)
+	{
+		ZEROED_STRUCT(VkDescriptorSetAllocateInfo, descriptor_set_allocate_info);
+		descriptor_set_allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		descriptor_set_allocate_info.descriptorPool = vulkan_globals.descriptor_pool;
+		descriptor_set_allocate_info.descriptorSetCount = 1;
+		descriptor_set_allocate_info.pSetLayouts = &layout->handle;
+
+		VkDescriptorSet handle;
+		vkAllocateDescriptorSets(vulkan_globals.device, &descriptor_set_allocate_info, &handle);
+
+		(gl->num_vulkan_combined_image_samplers += layout->num_combined_image_samplers);
+		(gl->num_vulkan_ubos_dynamic += layout->num_ubos_dynamic);
+		(gl->num_vulkan_ubos += layout->num_ubos);
+		(gl->num_vulkan_storage_buffers += layout->num_storage_buffers);
+		(gl->num_vulkan_input_attachments+= layout->num_input_attachments);
+		(gl->num_vulkan_storage_images+= layout->num_storage_images);
+		(gl->num_vulkan_sampled_images+= layout->num_sampled_images);
+		(gl->num_acceleration_structures+= layout->num_acceleration_structures);
+
+		return handle;
+	}
+
+
+
+	void R_InitDynamicUniformBuffers(void)
+	{
+		R_InitDynamicBuffers(
+			gl->dyn_uniform_buffers, &gl->dyn_uniform_buffer_memory, &gl->current_dyn_uniform_buffer_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, false, "uniform buffer");
+
+		ZEROED_STRUCT(VkDescriptorSetAllocateInfo, descriptor_set_allocate_info);
+		descriptor_set_allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		descriptor_set_allocate_info.descriptorPool = vulkan_globals.descriptor_pool;
+		descriptor_set_allocate_info.descriptorSetCount = 1;
+		descriptor_set_allocate_info.pSetLayouts = &vulkan_globals.ubo_set_layout.handle;
+
+		gl->ubo_descriptor_sets[0] = R_AllocateDescriptorSet(&vulkan_globals.ubo_set_layout);
+		gl->ubo_descriptor_sets[1] = R_AllocateDescriptorSet(&vulkan_globals.ubo_set_layout);
+
+		ZEROED_STRUCT(VkDescriptorBufferInfo, buffer_info);
+		buffer_info.offset = 0;
+		buffer_info.range = MAX_UNIFORM_ALLOC;
+
+		ZEROED_STRUCT(VkWriteDescriptorSet, ubo_write);
+		ubo_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		ubo_write.dstBinding = 0;
+		ubo_write.dstArrayElement = 0;
+		ubo_write.descriptorCount = 1;
+		ubo_write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+		ubo_write.pBufferInfo = &buffer_info;
+
+		for (int i = 0; i < NUM_DYNAMIC_BUFFERS; ++i)
+		{
+			buffer_info.buffer = gl->dyn_uniform_buffers[i].buffer;
+			ubo_write.dstSet = gl->ubo_descriptor_sets[i];
+			vkUpdateDescriptorSets(vulkan_globals.device, 1, &ubo_write, 0, NULL);
+		}
+	}
+
+
+	void R_InitDynamicIndexBuffers(void)
+	{
+		R_InitDynamicBuffers(gl->dyn_index_buffers, &gl->dyn_index_buffer_memory, &gl->current_dyn_index_buffer_size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, false, "index buffer");
+	}
+
+
+	void R_InitDynamicVertexBuffers(void)
+	{
+		R_InitDynamicBuffers(
+			gl->dyn_vertex_buffers, &gl->dyn_vertex_buffer_memory, &gl->current_dyn_vertex_buffer_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, false, "vertex buffer");
+	}
+
 	void R_AllocateVulkanMemory(vulkan_memory_t* memory, VkMemoryAllocateInfo* memory_allocate_info, vulkan_memory_type_t type, atomic_uint32_t* num_allocations)
 	{
 		memory->type = type;
@@ -567,9 +1042,109 @@ public:
 			gl->total_host_vulkan_allocation_size += memory->size;
 	}
 
+	void R_InitDynamicBuffers(
+		dynbuffer_t* buffers, vulkan_memory_t* memory, uint32_t* current_size, VkBufferUsageFlags usage_flags, bool get_device_address, const char* name)
+	{
+		int i;
+
+		SDL_Log("Reallocating dynamic %ss (%u KB)\n", name, *current_size / 1024);
+
+		VkResult err;
+
+		if (get_device_address)
+			usage_flags |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR;
+
+		ZEROED_STRUCT(VkBufferCreateInfo, buffer_create_info);
+		buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		buffer_create_info.size = *current_size;
+		buffer_create_info.usage = usage_flags;
+
+		for (i = 0; i < NUM_DYNAMIC_BUFFERS; ++i)
+		{
+			buffers[i].current_offset = 0;
+
+			err = vkCreateBuffer(vulkan_globals.device, &buffer_create_info, NULL, &buffers[i].buffer);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreateBuffer failed");
+
+			gl->SetObjectName((uint64_t)buffers[i].buffer, VK_OBJECT_TYPE_BUFFER, name);
+		}
+
+		VkMemoryRequirements memory_requirements;
+		vkGetBufferMemoryRequirements(vulkan_globals.device, buffers[0].buffer, &memory_requirements);
+
+		const size_t aligned_size = memory_requirements.size + memory_requirements.alignment;
+
+		ZEROED_STRUCT(VkMemoryAllocateFlagsInfo, memory_allocate_flags_info);
+		if (get_device_address)
+		{
+			memory_allocate_flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO_KHR;
+			memory_allocate_flags_info.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+		}
+
+		ZEROED_STRUCT(VkMemoryAllocateInfo, memory_allocate_info);
+		memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		memory_allocate_info.pNext = get_device_address ? &memory_allocate_flags_info : NULL;
+		memory_allocate_info.allocationSize = NUM_DYNAMIC_BUFFERS * aligned_size;
+		memory_allocate_info.memoryTypeIndex =
+			gl->MemoryTypeFromProperties(memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+
+		R_AllocateVulkanMemory(memory, &memory_allocate_info, VULKAN_MEMORY_TYPE_HOST, &gl->num_vulkan_dynbuf_allocations);
+		gl->SetObjectName((uint64_t)memory->handle, VK_OBJECT_TYPE_DEVICE_MEMORY, name);
+
+		for (i = 0; i < NUM_DYNAMIC_BUFFERS; ++i)
+		{
+			err = vkBindBufferMemory(vulkan_globals.device, buffers[i].buffer, memory->handle, i * aligned_size);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkBindBufferMemory failed");
+		}
+
+		void* data;
+		err = vkMapMemory(vulkan_globals.device, memory->handle, 0, NUM_DYNAMIC_BUFFERS * aligned_size, 0, &data);
+		if (err != VK_SUCCESS)
+			SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkMapMemory failed");
+
+		for (i = 0; i < NUM_DYNAMIC_BUFFERS; ++i)
+		{
+			buffers[i].data = (unsigned char*)data + (i * aligned_size);
+
+			if (get_device_address)
+			{
+				VkBufferDeviceAddressInfoKHR buffer_device_address_info;
+				memset(&buffer_device_address_info, 0, sizeof(buffer_device_address_info));
+				buffer_device_address_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO_KHR;
+				buffer_device_address_info.buffer = buffers[i].buffer;
+				VkDeviceAddress device_address = vulkan_globals.vk_get_buffer_device_address(vulkan_globals.device, &buffer_device_address_info);
+				buffers[i].device_address = device_address;
+			}
+		}
+	}
+
+
 	class GL {
 	public:
 		Engine* engine;
+
+		glheap_t* HeapCreate(VkDeviceSize segment_size, uint32_t page_size, uint32_t memory_type_index, vulkan_memory_type_t memory_type, const char* heap_name)
+		{
+			assert(Q_nextPow2(page_size) == page_size);
+			assert(page_size >= (1 << (NUM_SMALL_ALLOC_SIZES + 1)));
+			assert(segment_size >= page_size);
+			assert((segment_size % page_size) == 0);
+			assert((segment_size / page_size) <= MAX_PAGES);
+			glheap_t* heap = (glheap_t*)Mem_Alloc(sizeof(glheap_t));
+			heap->segment_size = segment_size;
+			heap->num_pages_per_segment = segment_size / page_size;
+			heap->num_masks_per_segment = (heap->num_pages_per_segment + 63) / 64;
+			heap->page_size = page_size;
+			heap->min_small_alloc_size = heap->page_size / 64;
+			heap->page_size_shift = Q_log2(page_size);
+			heap->small_alloc_shift = Q_log2(page_size / (1 << NUM_SMALL_ALLOC_SIZES));
+			heap->memory_type_index = memory_type_index;
+			heap->memory_type = memory_type;
+			heap->name = heap_name;
+			return heap;
+		}
 
 		void SetObjectName(uint64_t object, VkObjectType object_type, const char* name)
 		{
@@ -585,6 +1160,31 @@ public:
 			};
 #endif
 		}
+
+		uint32_t		   current_dyn_vertex_buffer_size = INITIAL_DYNAMIC_VERTEX_BUFFER_SIZE_KB * 1024;
+		uint32_t		   current_dyn_index_buffer_size = INITIAL_DYNAMIC_INDEX_BUFFER_SIZE_KB * 1024;
+		uint32_t		   current_dyn_uniform_buffer_size = INITIAL_DYNAMIC_UNIFORM_BUFFER_SIZE_KB * 1024;
+		uint32_t		   current_dyn_storage_buffer_size = 0; // Only used for RT so allocate lazily
+		vulkan_memory_t dyn_vertex_buffer_memory;
+		vulkan_memory_t dyn_index_buffer_memory;
+		vulkan_memory_t dyn_uniform_buffer_memory;
+		vulkan_memory_t dyn_storage_buffer_memory;
+		vulkan_memory_t lights_buffer_memory;
+		dynbuffer_t	   dyn_vertex_buffers[NUM_DYNAMIC_BUFFERS];
+		dynbuffer_t	   dyn_index_buffers[NUM_DYNAMIC_BUFFERS];
+		dynbuffer_t	   dyn_uniform_buffers[NUM_DYNAMIC_BUFFERS];
+		dynbuffer_t	   dyn_storage_buffers[NUM_DYNAMIC_BUFFERS];
+		int			   current_dyn_buffer_index = 0;
+		VkDescriptorSet ubo_descriptor_sets[2];
+
+		int				current_garbage_index = 0;
+		int				num_device_memory_garbage[GARBAGE_FRAME_COUNT];
+		int				num_buffer_garbage[GARBAGE_FRAME_COUNT];
+		int				num_desc_set_garbage[GARBAGE_FRAME_COUNT];
+		vulkan_memory_t* device_memory_garbage[GARBAGE_FRAME_COUNT];
+		VkDescriptorSet* descriptor_set_garbage[GARBAGE_FRAME_COUNT];
+		VkBuffer* buffer_garbage[GARBAGE_FRAME_COUNT];
+
 
 		VkInstance				vulkan_instance;
 		VkPhysicalDevice			vulkan_physical_device;
@@ -1332,17 +1932,13 @@ public:
 		public:
 			Engine* engine;
 
-			typedef struct
-			{
-				VkBuffer		buffer;
-				VkCommandBuffer command_buffer;
-				VkFence			fence;
-				int				current_offset;
-				bool			submitted;
-				unsigned char* data;
-			} stagingbuffer_t;
-
+			VkCommandPool   staging_command_pool;
+			vulkan_memory_t staging_memory;
 			stagingbuffer_t staging_buffers[NUM_STAGING_BUFFERS];
+			int			   current_staging_buffer = 0;
+			int			   num_stagings_in_flight = 0;
+			SDL_mutex* staging_mutex;
+			SDL_cond* staging_cond;
 
 			void R_CreateStagingBuffers()
 			{
@@ -1731,22 +2327,159 @@ public:
 
 			}
 		};
+		class DescPool {
+		public:
+			Engine* engine;
+			DescPool(Engine e) {
+				engine = &e;
+				engine->gl->desc_pool = this;
+
+				ZEROED_STRUCT_ARRAY(VkDescriptorPoolSize, pool_sizes, 9);
+				pool_sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+				pool_sizes[0].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (MAX_SANITY_LIGHTMAPS * 2) + (MAX_GLTEXTURES + 1);
+				pool_sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+				pool_sizes[1].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS;
+				pool_sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+				pool_sizes[2].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE;
+				pool_sizes[3].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+				pool_sizes[3].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE;
+				pool_sizes[4].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+				pool_sizes[4].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_SANITY_LIGHTMAPS * 2;
+				pool_sizes[5].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+				pool_sizes[5].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (MAX_SANITY_LIGHTMAPS * 2);
+				pool_sizes[6].type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+				pool_sizes[6].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE;
+				pool_sizes[7].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+				pool_sizes[7].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + (1 + MAXLIGHTMAPS * 3 / 4) * MAX_SANITY_LIGHTMAPS;
+				int num_sizes = 8;
+				if (vulkan_globals.ray_query)
+				{
+					pool_sizes[8].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+					pool_sizes[8].descriptorCount = MIN_NB_DESCRIPTORS_PER_TYPE + MAX_SANITY_LIGHTMAPS;
+					num_sizes = 9;
+				}
+
+				ZEROED_STRUCT(VkDescriptorPoolCreateInfo, descriptor_pool_create_info);
+				descriptor_pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+				descriptor_pool_create_info.maxSets = MAX_GLTEXTURES + MAX_SANITY_LIGHTMAPS + 128;
+				descriptor_pool_create_info.poolSizeCount = num_sizes;
+				descriptor_pool_create_info.pPoolSizes = pool_sizes;
+				descriptor_pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+
+				vkCreateDescriptorPool(vulkan_globals.device, &descriptor_pool_create_info, NULL, &vulkan_globals.descriptor_pool);
+			}
+
+		};
+		class GPUBuffers {
+		public:
+			Engine* engine;
+			GPUBuffers(Engine e) {
+				engine = &e;
+				engine->gl->gpu_buffers = this;
+				SDL_Log("Creating GPU buffers\n");
+				engine->R_InitDynamicVertexBuffers();
+				engine->R_InitDynamicIndexBuffers();
+				engine->R_InitDynamicUniformBuffers();
+				engine->R_InitFanIndexBuffer();
+
+			}
+		};
+		class MeshHeap {
+		public:
+			glheap_t* heap;
+			Engine* engine;
+			MeshHeap(Engine e) {
+				engine = &e;
+				engine->gl->mesh_heap = this;
+				SDL_Log("Creating mesh heap\n");
+
+				// Allocate index buffer & upload to GPU
+				ZEROED_STRUCT(VkBufferCreateInfo, buffer_create_info);
+				buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+				buffer_create_info.size = 16;
+				buffer_create_info.usage =
+					VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+				VkBuffer dummy_buffer;
+				VkResult err = vkCreateBuffer(vulkan_globals.device, &buffer_create_info, NULL, &dummy_buffer);
+				if (err != VK_SUCCESS)
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreateBuffer failed");
+
+				VkMemoryRequirements memory_requirements;
+				vkGetBufferMemoryRequirements(vulkan_globals.device, dummy_buffer, &memory_requirements);
+
+				const uint32_t memory_type_index = engine->gl->MemoryTypeFromProperties(memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+				VkDeviceSize   heap_size = MESH_HEAP_SIZE_MB * (VkDeviceSize)1024 * (VkDeviceSize)1024;
+				heap = engine->gl->HeapCreate(heap_size, MESH_HEAP_PAGE_SIZE, memory_type_index, VULKAN_MEMORY_TYPE_DEVICE, MESH_HEAP_NAME);
+
+				vkDestroyBuffer(vulkan_globals.device, dummy_buffer, NULL);
+
+			}
+		};
+		class TexHeap {
+		public:
+			Engine* engine;
+			glheap_t* heap;
+			TexHeap(Engine e) {
+				engine = &e;
+				engine->gl->tex_heap = this;
+				SDL_Log("Creating texture heap\n");
+				ZEROED_STRUCT(VkImageCreateInfo, image_create_info);
+				image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+				image_create_info.imageType = VK_IMAGE_TYPE_2D;
+				image_create_info.format = VK_FORMAT_R8G8B8A8_UNORM;
+				image_create_info.extent.width = 1;
+				image_create_info.extent.height = 1;
+				image_create_info.extent.depth = 1;
+				image_create_info.mipLevels = 1;
+				image_create_info.arrayLayers = 1;
+				image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+				image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+				image_create_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+					VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+				image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+				image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+				VkImage	 dummy_image;
+				VkResult err = vkCreateImage(vulkan_globals.device, &image_create_info, NULL, &dummy_image);
+				if (err != VK_SUCCESS)
+					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreateImage failed");
+
+				VkMemoryRequirements memory_requirements;
+				vkGetImageMemoryRequirements(vulkan_globals.device, dummy_image, &memory_requirements);
+				const uint32_t memory_type_index = engine->gl->MemoryTypeFromProperties(memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+
+				const VkDeviceSize heap_memory_size = TEXTURE_HEAP_MEMORY_SIZE_MB * (VkDeviceSize)1024 * (VkDeviceSize)1024;
+				heap = engine->gl->HeapCreate(heap_memory_size, TEXTURE_HEAP_PAGE_SIZE, memory_type_index, VULKAN_MEMORY_TYPE_DEVICE, "Texture Heap");
+
+				vkDestroyImage(vulkan_globals.device, dummy_image, NULL);
+
+			}
+		};
 
 		Instance* instance = nullptr;
 		Device* device = nullptr;
 		CommandBuffers* cbuf = nullptr;
 		StagingBuffers* sbuf = nullptr;
 		DSLayouts* dslayouts = nullptr;
+		DescPool* desc_pool = nullptr;
+		GPUBuffers* gpu_buffers = nullptr;
+		MeshHeap* mesh_heap = nullptr;
+		TexHeap* tex_heap = nullptr;
 
 		GL(Engine e) {
 			engine = &e;
 			engine->gl = this;
+
 			instance = new Instance(*engine);
 			device = new Device(*engine);
 			cbuf = new CommandBuffers(*engine);
 			vulkan_globals.staging_buffer_size = INITIAL_STAGING_BUFFER_SIZE_KB * 1024;
 			sbuf = new StagingBuffers(*engine);
 			dslayouts = new DSLayouts(*engine);
+			desc_pool = new DescPool(*engine);
+			gpu_buffers = new GPUBuffers(*engine);
+			mesh_heap = new MeshHeap(*engine);
+			tex_heap = new TexHeap(*engine);
 		}
 
 	};
