@@ -36,8 +36,13 @@
 #include <vulkan/vulkan.hpp>
 using namespace std;
 
+#define MAX_QPATH 64
+
 #define NUM_COLOR_BUFFERS 2
 
+#define MIPLEVELS 4
+
+#define NUM_AMBIENTS 4
 #define WORLD_PIPELINE_COUNT		16
 #define MODEL_PIPELINE_COUNT		6
 #define FTE_PARTICLE_PIPELINE_COUNT 16
@@ -49,6 +54,14 @@ using namespace std;
 #define MAX_SANITY_LIGHTMAPS		256
 #define MIN_NB_DESCRIPTORS_PER_TYPE 32
 
+#define NUM_INDEX_BITS		 8
+#define MAX_PENDING_TASKS	 (1u << NUM_INDEX_BITS)
+#define MAX_EXECUTABLE_TASKS 256
+#define MAX_DEPENDENT_TASKS	 16
+#define MAX_PAYLOAD_SIZE	 128
+#define WORKER_HUNK_SIZE	 (1 * 1024 * 1024)
+#define WAIT_SPIN_COUNT		 100
+
 #define MAX_SWAP_CHAIN_IMAGES 8
 #define DOUBLE_BUFFERED 2
 
@@ -58,7 +71,10 @@ using namespace std;
 
 #define FAN_INDEX_BUFFER_SIZE 126
 
+#define MAX_MAP_HULLS 4
+
 #define MAXLIGHTMAPS 4
+#define MAX_DLIGHTS 64
 
 #define MESH_HEAP_SIZE_MB	1024
 #define MESH_HEAP_PAGE_SIZE 4096
@@ -68,10 +84,13 @@ using namespace std;
 #define TEXTURE_HEAP_PAGE_SIZE		16384
 
 
+
 #define NUM_SMALL_ALLOC_SIZES  6 // 64 bit mask
 #define NUM_BLOCK_SIZE_CLASSES 8
 #define MAX_PAGES			   (UINT64_MAX - 1)
 #define INVALID_PAGE_INDEX	   UINT64_MAX
+
+#define VERTEXSIZE 7
 
 #define VA_NUM_BUFFS 4
 #if (MAX_OSPATH >= 1024)
@@ -103,6 +122,24 @@ GENERIC_INT_TYPES(IMPL_GENERIC_INT_FUNCS, NO_COMMA)
 #define q_align(size, alignment) _Generic((size) + (alignment), \
 	GENERIC_INT_TYPES (SELECT_ALIGN, COMMA))(size, alignment)
 
+typedef uint64_t task_handle_t;
+typedef void (*task_func_t) (void*);
+typedef void (*task_indexed_func_t) (int, void*);
+
+typedef enum
+{
+	VULKAN_MEMORY_TYPE_DEVICE,
+	VULKAN_MEMORY_TYPE_HOST,
+	VULKAN_MEMORY_TYPE_NONE,
+} vulkan_memory_type_t;
+
+
+typedef struct vulkan_memory_s
+{
+	VkDeviceMemory		 handle;
+	size_t				 size;
+	vulkan_memory_type_t type;
+} vulkan_memory_t;
 
 typedef enum
 {
@@ -130,6 +167,14 @@ typedef enum
 	SCBX_NUM,
 } secondary_cb_contexts_t;
 
+typedef uint16_t page_index_t;
+
+typedef struct glheappagehdr_s
+{
+	page_index_t size_in_pages;
+	page_index_t prev_block_page_index;
+} glheappagehdr_t;
+
 
 static const int SECONDARY_CB_MULTIPLICITY[SCBX_NUM] = {
 	NUM_WORLD_CBX,	  // SCBX_WORLD,
@@ -151,6 +196,8 @@ static const int SECONDARY_CB_MULTIPLICITY[SCBX_NUM] = {
 #define GARBAGE_FRAME_COUNT					   3
 #define MAX_UNIFORM_ALLOC					   2048
 
+#define INVALID_TASK_HANDLE UINT64_MAX
+#define TASKS_MAX_WORKERS	32
 
 #define INITIAL_STAGING_BUFFER_SIZE_KB 16384
 
@@ -203,6 +250,25 @@ static const int SECONDARY_CB_MULTIPLICITY[SCBX_NUM] = {
 			SDL_LogError (SDL_LOG_PRIORITY_ERROR,"vkGetDeviceProcAddr failed to find " #entrypoint);                                \
 	}
 
+typedef struct glheapsmallalloclinks_s
+{
+	page_index_t prev_small_alloc_page;
+	page_index_t next_small_alloc_page;
+} glheapsmallalloclinks_t;
+
+
+typedef struct glheapsegment_s
+{
+	vulkan_memory_t			 memory;
+	glheappagehdr_t* page_hdrs;
+	glheapsmallalloclinks_t* small_alloc_links;
+	uint64_t* small_alloc_masks;
+	uint64_t* free_blocks_bitfields[NUM_BLOCK_SIZE_CLASSES];
+	uint64_t* free_blocks_skip_bitfields[NUM_BLOCK_SIZE_CLASSES];
+	page_index_t			 small_alloc_free_list_heads[NUM_SMALL_ALLOC_SIZES];
+	page_index_t			 num_pages_allocated;
+} glheapsegment_t;
+
 typedef struct vulkan_pipeline_layout_s
 {
 	VkPipelineLayout	handle;
@@ -228,6 +294,384 @@ typedef struct vulkan_desc_set_layout_s
 	int					  num_acceleration_structures;
 } vulkan_desc_set_layout_t;
 
+typedef float vec_t;
+typedef vec_t vec2_t[2];
+typedef vec_t vec3_t[3];
+typedef vec_t vec4_t[4];
+typedef vec_t vec5_t[5];
+typedef int	  fixed4_t;
+typedef int	  fixed8_t;
+typedef int	  fixed16_t;
+
+typedef uintptr_t src_offset_t;
+
+typedef enum
+{
+	chain_world,
+	chain_model_0,
+	chain_model_1,
+	chain_model_2,
+	chain_model_3,
+	chain_model_4,
+	chain_model_5,
+	chain_alpha_model_across_water,
+	chain_alpha_model,
+	chain_num,
+} texchain_t;
+
+typedef struct texture_s
+{
+	char				name[16];
+	unsigned			width, height;
+	unsigned			shift;					  // Q64
+	char				source_file[MAX_QPATH];	  // relative filepath to data source, or "" if source is in memory
+	src_offset_t		source_offset;			  // offset from start of BSP file for BSP textures
+	struct gltexture_s* gltexture;				  // johnfitz -- pointer to gltexture
+	struct gltexture_s* fullbright;				  // johnfitz -- fullbright mask texture
+	struct gltexture_s* warpimage;				  // johnfitz -- for water animation
+	atomic_uint32_t		update_warp;			  // johnfitz -- update warp this frame
+	struct msurface_s* texturechains[chain_num]; // for texture chains
+	uint32_t			chain_size[chain_num];	  // for texture chains
+	int					anim_total;				  // total tenths in sequence ( 0 = no)
+	int					anim_min, anim_max;		  // time for this frame min <=time< max
+	struct texture_s* anim_next;				  // in the animation sequence
+	struct texture_s* alternate_anims;		  // bmodels in frmae 1 use these
+	unsigned			offsets[MIPLEVELS];		  // four mip maps stored
+	bool			palette;
+} texture_t;
+
+typedef struct
+{
+	float mins[3], maxs[3];
+	float origin[3];
+	int	  headnode[MAX_MAP_HULLS];
+	int	  visleafs; // not including the solid leaf 0
+	int	  firstface, numfaces;
+} dmodel_t;
+
+typedef struct mplane_s
+{
+	vec3_t normal;
+	float  dist;
+	byte   type;	 // for texture axis selection and fast side tests
+	byte   signbits; // signx + signy<<1 + signz<<1
+	byte   pad[2];
+} mplane_t;
+
+typedef struct efrag_s
+{
+	struct efrag_s* leafnext;
+	struct entity_s* entity;
+} efrag_t;
+
+typedef struct mleaf_s
+{
+	// common with node
+	int	  contents;	  // wil be a negative contents number
+	float minmaxs[6]; // for bounding box culling
+
+	// leaf specific
+	int		 nummarksurfaces;
+	int		 combined_deps; // contains index into brush_deps_data[] with used warp and lightmap textures
+	byte	 ambient_sound_level[NUM_AMBIENTS];
+	byte* compressed_vis;
+	int* firstmarksurface;
+	efrag_t* efrags;
+} mleaf_t;
+
+typedef struct
+{
+	vec3_t position;
+} mvertex_t;
+
+typedef struct
+{
+	unsigned int v[2];
+	unsigned int cachededgeoffset;
+} medge_t;
+
+typedef struct mnode_s
+{
+	// common with leaf
+	int	  contents;	  // 0, to differentiate from leafs
+	float minmaxs[6]; // for bounding box culling
+
+	// node specific
+	unsigned int	firstsurface;
+	unsigned int	numsurfaces;
+	mplane_t* plane;
+	struct mnode_s* children[2];
+} mnode_t;
+
+typedef struct
+{
+	float	   vecs[2][4];
+	texture_t* texture;
+	int		   flags;
+	int		   tex_idx;
+} mtexinfo_t;
+
+typedef struct glpoly_s
+{
+	struct glpoly_s* next;
+	int				 numverts;
+	float			 verts[4][VERTEXSIZE]; // variable sized (xyz s1t1 s2t2)
+} glpoly_t;
+
+typedef struct mclipnode_s
+{
+	int planenum;
+	int children[2]; // negative numbers are contents
+} mclipnode_t;
+
+typedef struct msurface_s
+{
+	int visframe; // should be drawn when node is crossed
+
+	mplane_t* plane;
+	int		  flags;
+
+	int firstedge; // look up in model->surfedges[], negative numbers
+	int numedges;  // are backwards edges
+
+	short texturemins[2];
+	short extents[2];
+
+	int light_s, light_t; // gl lightmap coordinates
+
+	glpoly_t* polys; // multiple if warped
+	struct msurface_s* texturechains[chain_num];
+
+	mtexinfo_t* texinfo;
+	int			indirect_idx;
+
+	int vbo_firstvert; // index of this surface's first vert in the VBO
+
+	// lighting info
+	int			 dlightframe;
+	unsigned int dlightbits[(MAX_DLIGHTS + 31) >> 5];
+	// int is 32 bits, need an array for MAX_DLIGHTS > 32
+
+	int		 lightmaptexturenum;
+	byte	 styles[MAXLIGHTMAPS];
+	uint32_t styles_bitmap;				 // bitmap of styles used (16..64 OR-folded into bits 16..31)
+	int		 cached_light[MAXLIGHTMAPS]; // values currently used in lightmap
+	bool cached_dlight;				 // true if dynamic light in cache
+	byte* samples;					 // [numstyles*surfsize]
+} msurface_t;
+
+typedef float soa_aabb_t[2 * 3 * 8]; // 8 AABB's in SoA form
+typedef float soa_plane_t[4 * 8];	 // 8 planes in SoA form
+
+typedef enum
+{
+	mod_brush,
+	mod_sprite,
+	mod_alias
+} modtype_t;
+
+typedef enum
+{
+	ST_SYNC = 0,
+	ST_RAND,
+	ST_FRAMETIME /*sync to when .frame changes*/
+} synctype_t;
+
+typedef struct
+{
+	mclipnode_t* clipnodes; // johnfitz -- was dclipnode_t
+	mplane_t* planes;
+	int			 firstclipnode;
+	int			 lastclipnode;
+	vec3_t		 clip_mins;
+	vec3_t		 clip_maxs;
+} hull_t;
+
+typedef struct qmodel_s
+{
+	char		 name[MAX_QPATH];
+	unsigned int path_id;  // path id of the game directory
+	// that this model came from
+	bool	 needload; // bmodels and sprites don't cache normally
+
+	modtype_t  type;
+	int		   numframes;
+	synctype_t synctype;
+
+	int flags;
+
+#ifdef PSET_SCRIPT
+	int					  emiteffect;  // spike -- this effect is emitted per-frame by entities with this model
+	int					  traileffect; // spike -- this effect is used when entities move
+	struct skytris_s* skytris;	   // spike -- surface-based particle emission for this model
+	struct skytriblock_s* skytrimem;   // spike -- surface-based particle emission for this model (for better cache performance+less allocs)
+	double				  skytime;	   // doesn't really cope with multiples. oh well...
+#endif
+	//
+	// volume occupied by the model graphics
+	//
+	vec3_t mins, maxs;
+	vec3_t ymins, ymaxs; // johnfitz -- bounds for entities with nonzero yaw
+	vec3_t rmins, rmaxs; // johnfitz -- bounds for entities with nonzero pitch or roll
+	// johnfitz -- removed float radius;
+
+	//
+	// solid volume for clipping
+	//
+	bool clipbox;
+	vec3_t	 clipmins, clipmaxs;
+
+	//
+	// brush model
+	//
+	int firstmodelsurface, nummodelsurfaces;
+
+	int		  numsubmodels;
+	dmodel_t* submodels;
+
+	int		  numplanes;
+	mplane_t* planes;
+
+	int		 numleafs; // number of visible leafs, not counting 0
+	mleaf_t* leafs;
+
+	int		   numvertexes;
+	mvertex_t* vertexes;
+
+	int		 numedges;
+	medge_t* edges;
+
+	int		 numnodes;
+	mnode_t* nodes;
+
+	int			numtexinfo;
+	mtexinfo_t* texinfo;
+
+	int			numsurfaces;
+	msurface_t* surfaces;
+
+	int	 numsurfedges;
+	int* surfedges;
+
+	int			 numclipnodes;
+	mclipnode_t* clipnodes; // johnfitz -- was dclipnode_t
+
+	int	 nummarksurfaces;
+	int* marksurfaces;
+
+	soa_aabb_t* soa_leafbounds;
+	byte* surfvis;
+	soa_plane_t* soa_surfplanes;
+
+	hull_t hulls[MAX_MAP_HULLS];
+
+	int			numtextures;
+	texture_t** textures;
+
+	byte* visdata;
+	byte* lightdata;
+	char* entities;
+
+	bool viswarn;	 // for Mod_DecompressVis()
+	bool bogus_tree; // BSP node tree doesn't visit nummodelsurfaces surfaces
+
+	int bspversion;
+	int contentstransparent; // spike -- added this so we can disable glitchy wateralpha where its not supported.
+
+	int combined_deps; // contains index into brush_deps_data[] with used warp and lightmap textures
+	int used_specials; // contains SURF_DRAWSKY, SURF_DRAWTURB, SURF_DRAWWATER, SURF_DRAWLAVA, SURF_DRAWSLIME, SURF_DRAWTELE flags if used by any surf
+
+	int* water_surfs; // worldmodel only: list of surface indices with SURF_DRAWTURB flag of transparent types
+	int	 used_water_surfs;
+	int	 water_surfs_specials; // which surfaces are in water_surfs (SURF_DRAWWATER, SURF_DRAWLAVA, SURF_DRAWSLIME, SURF_DRAWTELE) to track transparency changes
+
+	//
+	// additional model data
+	//
+	byte* extradata[2]; // only access through Mod_Extradata
+
+	bool md5_prio; // if true, the MD5 model has at least as much path priority as the MDL model
+
+	// Ray tracing
+	VkAccelerationStructureKHR blas;
+	VkBuffer				   blas_buffer;
+	VkDeviceAddress			   blas_address;
+} qmodel_t;
+
+typedef enum
+{
+	TEXPREF_NONE = 0x0000,
+	TEXPREF_MIPMAP = 0x0001,   // generate mipmaps
+	// TEXPREF_NEAREST and TEXPREF_LINEAR aren't supposed to be ORed with TEX_MIPMAP
+	TEXPREF_LINEAR = 0x0002,   // force linear
+	TEXPREF_NEAREST = 0x0004,   // force nearest
+	TEXPREF_ALPHA = 0x0008,   // allow alpha
+	TEXPREF_PAD = 0x0010,   // allow padding
+	TEXPREF_PERSIST = 0x0020,   // never free
+	TEXPREF_OVERWRITE = 0x0040,   // overwrite existing same-name texture
+	TEXPREF_NOPICMIP = 0x0080,   // always load full-sized
+	TEXPREF_FULLBRIGHT = 0x0100,   // use fullbright mask palette
+	TEXPREF_NOBRIGHT = 0x0200,   // use nobright mask palette
+	TEXPREF_CONCHARS = 0x0400,   // use conchars palette
+	TEXPREF_WARPIMAGE = 0x0800,   // resize this texture when warpimagesize changes
+	TEXPREF_PREMULTIPLY = 0x1000,   // rgb = rgb*a; a=a; 	
+} textureflags_t;
+
+typedef enum
+{
+	ALLOC_TYPE_NONE,
+	ALLOC_TYPE_PAGES,
+	ALLOC_TYPE_DEDICATED,
+	ALLOC_TYPE_SMALL_ALLOC,
+} alloc_type_t;
+
+typedef struct glheapallocation_s
+{
+	union
+	{
+		glheapsegment_t* segment;
+		vulkan_memory_t* memory;
+	};
+	VkDeviceSize size;
+	VkDeviceSize offset;
+	alloc_type_t alloc_type;
+#ifndef NDEBUG
+	uint32_t small_alloc_slot;
+	uint32_t small_alloc_size;
+#endif
+} glheapallocation_t;
+
+
+typedef struct gltexture_s
+{
+	// managed by texture manager
+	struct gltexture_s* next;
+	qmodel_t* owner;
+	// managed by image loading
+	char				name[64];
+	unsigned int		path_id; // path id of the game directory
+	// that owner came from, if owner != NULL, else 0
+	unsigned int		width;	 // size of image as it exists in opengl
+	unsigned int		height;	 // size of image as it exists in opengl
+	textureflags_t		flags;
+	char				source_file[MAX_QPATH]; // relative filepath to data source, or "" if source is in memory
+	src_offset_t		source_offset;			// byte offset into file, or memory address
+	enum srcformat		source_format;			// format of pixel data (indexed, lightmap, or rgba)
+	unsigned int		source_width;			// size of image in source data
+	unsigned int		source_height;			// size of image in source data
+	unsigned short		source_crc;				// generated by source data before modifications
+	signed char			shirt;					// 0-13 shirt color, or -1 if never colormapped
+	signed char			pants;					// 0-13 pants color, or -1 if never colormapped
+	// used for rendering
+	VkImage				image;
+	VkImageView			image_view;
+	VkImageView			target_image_view;
+	glheapallocation_t* allocation;
+	VkDescriptorSet		descriptor_set;
+	VkFramebuffer		frame_buffer;
+	VkDescriptorSet		storage_descriptor_set;
+} gltexture_t;
+
 typedef struct
 {
 	VkBuffer		buffer;
@@ -237,21 +681,6 @@ typedef struct
 	bool			submitted;
 	unsigned char* data;
 } stagingbuffer_t;
-
-typedef enum
-{
-	VULKAN_MEMORY_TYPE_DEVICE,
-	VULKAN_MEMORY_TYPE_HOST,
-	VULKAN_MEMORY_TYPE_NONE,
-} vulkan_memory_type_t;
-
-
-typedef struct vulkan_memory_s
-{
-	VkDeviceMemory		 handle;
-	size_t				 size;
-	vulkan_memory_type_t type;
-} vulkan_memory_t;
 
 typedef enum
 {
@@ -281,32 +710,38 @@ typedef struct cb_context_s
 	unsigned int	  num_vbo_indices;
 } cb_context_t;
 
-typedef uint16_t page_index_t;
 
-typedef struct glheappagehdr_s
+typedef enum
 {
-	page_index_t size_in_pages;
-	page_index_t prev_block_page_index;
-} glheappagehdr_t;
+	CVAR_NONE = 0,
+	CVAR_ARCHIVE = (1U << 0),	 // if set, causes it to be saved to config
+	CVAR_NOTIFY = (1U << 1),	 // changes will be broadcasted to all players (q1)
+	CVAR_SERVERINFO = (1U << 2),   // added to serverinfo will be sent to clients (q1/net_dgrm.c and qwsv)
+	CVAR_USERINFO = (1U << 3),	 // added to userinfo, will be sent to server (qwcl)
+	CVAR_CHANGED = (1U << 4),
+	CVAR_ROM = (1U << 6),
+	CVAR_LOCKED = (1U << 8),	 // locked temporarily
+	CVAR_REGISTERED = (1U << 10),  // the var is added to the list of variables
+	CVAR_CALLBACK = (1U << 16),	 // var has a callback
+	CVAR_USERDEFINED = (1U << 17),  // cvar was created by the user/mod, and needs to be saved a bit differently.
+	CVAR_AUTOCVAR = (1U << 18),	 // cvar changes need to feed back to qc global changes.
+	CVAR_SETA = (1U << 19)   // cvar will be saved with seta.
+} cvarflags_t;
 
-typedef struct glheapsmallalloclinks_s
+typedef void (*cvarcallback_t) (struct cvar_s*);
+
+typedef struct cvar_s
 {
-	page_index_t prev_small_alloc_page;
-	page_index_t next_small_alloc_page;
-} glheapsmallalloclinks_t;
+	const char* name;
+	const char* string;
+	cvarflags_t	   flags;
+	float		   value;
+	const char* default_string; // johnfitz -- remember defaults for reset function
+	cvarcallback_t callback;
+	struct cvar_s* next;
+} cvar_t;
 
 
-typedef struct glheapsegment_s
-{
-	vulkan_memory_t			 memory;
-	glheappagehdr_t* page_hdrs;
-	glheapsmallalloclinks_t* small_alloc_links;
-	uint64_t* small_alloc_masks;
-	uint64_t* free_blocks_bitfields[NUM_BLOCK_SIZE_CLASSES];
-	uint64_t* free_blocks_skip_bitfields[NUM_BLOCK_SIZE_CLASSES];
-	page_index_t			 small_alloc_free_list_heads[NUM_SMALL_ALLOC_SIZES];
-	page_index_t			 num_pages_allocated;
-} glheapsegment_t;
 
 typedef struct glheapstats_s
 {
@@ -655,6 +1090,34 @@ typedef struct
 class Engine {
 public:
 
+	static int			numgltextures;
+	static gltexture_t* active_gltextures, * free_gltextures;
+	gltexture_t* notexture, * nulltexture, * whitetexture, * greytexture, * greylightmap, * bluenoisetexture;
+
+
+	cvar_t r_lodbias = { "r_lodbias", "1", CVAR_ARCHIVE };
+	cvar_t gl_lodbias = { "gl_lodbias", "0", CVAR_ARCHIVE };
+	cvar_t r_scale = { "r_scale", "1", CVAR_ARCHIVE };
+	cvar_t vid_fullscreen = { "vid_fullscreen", "0", CVAR_ARCHIVE }; // QuakeSpasm, was "1"
+	cvar_t vid_width = { "vid_width", "1280", CVAR_ARCHIVE };		  // QuakeSpasm, was 640
+	cvar_t vid_height = { "vid_height", "720", CVAR_ARCHIVE };		  // QuakeSpasm, was 480
+	cvar_t vid_refreshrate = { "vid_refreshrate", "60", CVAR_ARCHIVE };
+	cvar_t vid_vsync = { "vid_vsync", "0", CVAR_ARCHIVE };
+	cvar_t vid_desktopfullscreen = { "vid_desktopfullscreen", "0", CVAR_ARCHIVE }; // QuakeSpasm
+	cvar_t vid_borderless = { "vid_borderless", "0", CVAR_ARCHIVE };				// QuakeSpasm
+	cvar_t		  vid_palettize = { "vid_palettize", "0", CVAR_ARCHIVE };
+	cvar_t		  vid_filter = { "vid_filter", "0", CVAR_ARCHIVE };
+	cvar_t		  vid_anisotropic = { "vid_anisotropic", "0", CVAR_ARCHIVE };
+	cvar_t		  vid_fsaa = { "vid_fsaa", "0", CVAR_ARCHIVE };
+	cvar_t		  vid_fsaamode = { "vid_fsaamode", "0", CVAR_ARCHIVE };
+	cvar_t		  vid_gamma = { "gamma", "0.9", CVAR_ARCHIVE };		// johnfitz -- moved here from view.c
+	cvar_t		  vid_contrast = { "contrast", "1.4", CVAR_ARCHIVE }; // QuakeSpasm, MarkV
+	cvar_t		  r_usesops = { "r_usesops", "1", CVAR_ARCHIVE };		// johnfitz
+#if defined(_DEBUG)
+	cvar_t r_raydebug = { "r_raydebug", "0", CVAR_NONE };
+#endif
+
+
 	static inline int FindLastBitNonZero(const uint32_t mask)
 	{
 		unsigned long result;
@@ -975,7 +1438,196 @@ public:
 		return handle;
 	}
 
+	void R_InitSamplers()
+	{
+		gl->WaitForDeviceIdle();
+		SDL_Log("Initializing samplers\n");
 
+		VkResult err;
+
+		if (vulkan_globals.point_sampler == VK_NULL_HANDLE)
+		{
+			ZEROED_STRUCT(VkSamplerCreateInfo, sampler_create_info);
+			sampler_create_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+			sampler_create_info.magFilter = VK_FILTER_NEAREST;
+			sampler_create_info.minFilter = VK_FILTER_NEAREST;
+			sampler_create_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+			sampler_create_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			sampler_create_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			sampler_create_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			sampler_create_info.mipLodBias = 0.0f;
+			sampler_create_info.maxAnisotropy = 1.0f;
+			sampler_create_info.minLod = 0;
+			sampler_create_info.maxLod = FLT_MAX;
+
+			err = vkCreateSampler(vulkan_globals.device, &sampler_create_info, NULL, &vulkan_globals.point_sampler);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"vkCreateSampler failed");
+
+			gl->SetObjectName((uint64_t)vulkan_globals.point_sampler, VK_OBJECT_TYPE_SAMPLER, "point");
+
+			sampler_create_info.anisotropyEnable = VK_TRUE;
+			sampler_create_info.maxAnisotropy = vulkan_globals.device_properties.limits.maxSamplerAnisotropy;
+			err = vkCreateSampler(vulkan_globals.device, &sampler_create_info, NULL, &vulkan_globals.point_aniso_sampler);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateSampler failed");
+
+			gl->SetObjectName((uint64_t)vulkan_globals.point_aniso_sampler, VK_OBJECT_TYPE_SAMPLER, "point_aniso");
+
+			sampler_create_info.magFilter = VK_FILTER_LINEAR;
+			sampler_create_info.minFilter = VK_FILTER_LINEAR;
+			sampler_create_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+			sampler_create_info.anisotropyEnable = VK_FALSE;
+			sampler_create_info.maxAnisotropy = 1.0f;
+
+			err = vkCreateSampler(vulkan_globals.device, &sampler_create_info, NULL, &vulkan_globals.linear_sampler);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateSampler failed");
+
+			gl->SetObjectName((uint64_t)vulkan_globals.linear_sampler, VK_OBJECT_TYPE_SAMPLER, "linear");
+
+			sampler_create_info.anisotropyEnable = VK_TRUE;
+			sampler_create_info.maxAnisotropy = vulkan_globals.device_properties.limits.maxSamplerAnisotropy;
+			err = vkCreateSampler(vulkan_globals.device, &sampler_create_info, NULL, &vulkan_globals.linear_aniso_sampler);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateSampler failed");
+
+			gl->SetObjectName((uint64_t)vulkan_globals.linear_aniso_sampler, VK_OBJECT_TYPE_SAMPLER, "linear_aniso");
+		}
+
+		if (vulkan_globals.point_sampler_lod_bias != VK_NULL_HANDLE)
+		{
+			vkDestroySampler(vulkan_globals.device, vulkan_globals.point_sampler_lod_bias, NULL);
+			vkDestroySampler(vulkan_globals.device, vulkan_globals.point_aniso_sampler_lod_bias, NULL);
+			vkDestroySampler(vulkan_globals.device, vulkan_globals.linear_sampler_lod_bias, NULL);
+			vkDestroySampler(vulkan_globals.device, vulkan_globals.linear_aniso_sampler_lod_bias, NULL);
+		}
+
+		{
+			float lod_bias = 0.0f;
+			if (r_lodbias.value)
+			{
+				if (vulkan_globals.supersampling)
+				{
+					switch (vulkan_globals.sample_count)
+					{
+					case VK_SAMPLE_COUNT_2_BIT:
+						lod_bias -= 0.5f;
+						break;
+					case VK_SAMPLE_COUNT_4_BIT:
+						lod_bias -= 1.0f;
+						break;
+					case VK_SAMPLE_COUNT_8_BIT:
+						lod_bias -= 1.5f;
+						break;
+					case VK_SAMPLE_COUNT_16_BIT:
+						lod_bias -= 2.0f;
+						break;
+					default: /* silences gcc's -Wswitch */
+						break;
+					}
+				}
+
+				if (r_scale.value >= 8)
+					lod_bias += 3.0f;
+				else if (r_scale.value >= 4)
+					lod_bias += 2.0f;
+				else if (r_scale.value >= 2)
+					lod_bias += 1.0f;
+			}
+
+			lod_bias += gl_lodbias.value;
+
+			SDL_Log("Texture lod bias: %f\n", lod_bias);
+
+			ZEROED_STRUCT(VkSamplerCreateInfo, sampler_create_info);
+			sampler_create_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+			sampler_create_info.magFilter = VK_FILTER_NEAREST;
+			sampler_create_info.minFilter = VK_FILTER_NEAREST;
+			sampler_create_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+			sampler_create_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			sampler_create_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			sampler_create_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			sampler_create_info.mipLodBias = lod_bias;
+			sampler_create_info.maxAnisotropy = 1.0f;
+			sampler_create_info.minLod = 0;
+			sampler_create_info.maxLod = FLT_MAX;
+
+			err = vkCreateSampler(vulkan_globals.device, &sampler_create_info, NULL, &vulkan_globals.point_sampler_lod_bias);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateSampler failed");
+
+			gl->SetObjectName((uint64_t)vulkan_globals.point_sampler_lod_bias, VK_OBJECT_TYPE_SAMPLER, "point_lod_bias");
+
+			sampler_create_info.anisotropyEnable = VK_TRUE;
+			sampler_create_info.maxAnisotropy = vulkan_globals.device_properties.limits.maxSamplerAnisotropy;
+			err = vkCreateSampler(vulkan_globals.device, &sampler_create_info, NULL, &vulkan_globals.point_aniso_sampler_lod_bias);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateSampler failed");
+
+			gl->SetObjectName((uint64_t)vulkan_globals.point_aniso_sampler_lod_bias, VK_OBJECT_TYPE_SAMPLER, "point_aniso_lod_bias");
+
+			sampler_create_info.magFilter = VK_FILTER_LINEAR;
+			sampler_create_info.minFilter = VK_FILTER_LINEAR;
+			sampler_create_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+			sampler_create_info.anisotropyEnable = VK_FALSE;
+			sampler_create_info.maxAnisotropy = 1.0f;
+
+			err = vkCreateSampler(vulkan_globals.device, &sampler_create_info, NULL, &vulkan_globals.linear_sampler_lod_bias);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateSampler failed");
+
+			gl->SetObjectName((uint64_t)vulkan_globals.linear_sampler_lod_bias, VK_OBJECT_TYPE_SAMPLER, "linear_lod_bias");
+
+			sampler_create_info.anisotropyEnable = VK_TRUE;
+			sampler_create_info.maxAnisotropy = vulkan_globals.device_properties.limits.maxSamplerAnisotropy;
+			err = vkCreateSampler(vulkan_globals.device, &sampler_create_info, NULL, &vulkan_globals.linear_aniso_sampler_lod_bias);
+			if (err != VK_SUCCESS)
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR, "vkCreateSampler failed");
+
+			gl->SetObjectName((uint64_t)vulkan_globals.linear_aniso_sampler_lod_bias, VK_OBJECT_TYPE_SAMPLER, "linear_aniso_lod_bias");
+		}
+
+		TexMgr_UpdateTextureDescriptorSets();
+	}
+
+	void TexMgr_SetFilterModes(gltexture_t* glt)
+	{
+		ZEROED_STRUCT(VkDescriptorImageInfo, image_info);
+		image_info.imageView = glt->image_view;
+		image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		bool enable_anisotropy = vid_anisotropic.value && !(glt->flags & TEXPREF_NOPICMIP);
+
+		VkSampler point_sampler = enable_anisotropy ? vulkan_globals.point_aniso_sampler_lod_bias : vulkan_globals.point_sampler_lod_bias;
+		VkSampler linear_sampler = enable_anisotropy ? vulkan_globals.linear_aniso_sampler_lod_bias : vulkan_globals.linear_sampler_lod_bias;
+
+		if (glt->flags & TEXPREF_NEAREST)
+			image_info.sampler = point_sampler;
+		else if (glt->flags & TEXPREF_LINEAR)
+			image_info.sampler = linear_sampler;
+		else
+			image_info.sampler = (vid_filter.value == 1) ? point_sampler : linear_sampler;
+
+		ZEROED_STRUCT(VkWriteDescriptorSet, texture_write);
+		texture_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		texture_write.dstSet = glt->descriptor_set;
+		texture_write.dstBinding = 0;
+		texture_write.dstArrayElement = 0;
+		texture_write.descriptorCount = 1;
+		texture_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		texture_write.pImageInfo = &image_info;
+
+		vkUpdateDescriptorSets(vulkan_globals.device, 1, &texture_write, 0, NULL);
+	}
+
+
+	void TexMgr_UpdateTextureDescriptorSets(void)
+	{
+		gltexture_t* glt;
+
+		for (glt = active_gltextures; glt; glt = glt->next)
+			TexMgr_SetFilterModes(glt);
+	}
 
 	void R_InitDynamicUniformBuffers(void)
 	{
@@ -1125,6 +1777,28 @@ public:
 	public:
 		Engine* engine;
 
+		void SynchronizeEndRenderingTask(void)
+		{
+			if (prev_end_rendering_task != INVALID_TASK_HANDLE)
+			{
+				//Task_Join(prev_end_rendering_task, SDL_MUTEX_MAXWAIT);
+				prev_end_rendering_task = INVALID_TASK_HANDLE;
+			}
+		}
+
+		void WaitForDeviceIdle(void)
+		{
+			//assert(!Tasks_IsWorker());
+			SynchronizeEndRenderingTask();
+			if (!vulkan_globals.device_idle)
+			{
+				engine->R_SubmitStagingBuffers();
+				vkDeviceWaitIdle(vulkan_globals.device);
+			}
+
+			vulkan_globals.device_idle = true;
+		}
+
 		glheap_t* HeapCreate(VkDeviceSize segment_size, uint32_t page_size, uint32_t memory_type_index, vulkan_memory_type_t memory_type, const char* heap_name)
 		{
 			assert(Q_nextPow2(page_size) == page_size);
@@ -1160,6 +1834,9 @@ public:
 			};
 #endif
 		}
+
+
+		task_handle_t prev_end_rendering_task = INVALID_TASK_HANDLE;
 
 		uint32_t		   current_dyn_vertex_buffer_size = INITIAL_DYNAMIC_VERTEX_BUFFER_SIZE_KB * 1024;
 		uint32_t		   current_dyn_index_buffer_size = INITIAL_DYNAMIC_INDEX_BUFFER_SIZE_KB * 1024;
