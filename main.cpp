@@ -2561,7 +2561,7 @@ public:
 
 			for (uint32_t task_index = 0; task_index < (MAX_PENDING_TASKS - 1); ++task_index)
 			{
-				TaskQueuePush(free_task_queue, task_index); //causes shit to fuck up
+				TaskQueuePush(free_task_queue, task_index);
 			}
 
 			for (uint32_t task_index = 0; task_index < MAX_PENDING_TASKS; ++task_index)
