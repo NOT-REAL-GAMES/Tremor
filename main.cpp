@@ -2181,26 +2181,26 @@ typedef struct
 
 #include <windows.h>
 
-static inline uint8_t Atomic_OrUInt8(volatile atomic_uint8_t* atomic, uint8_t val)
+static inline uint8_t Atomic_OrUInt8(volatile a::atomic_uint8_t* atomic, uint8_t val)
 {
-	return InterlockedOr8((volatile char*)&atomic, val);
+	return InterlockedOr8((volatile char*)&atomic->value, val);
 }
 
 static inline uint32_t Atomic_LoadUInt32(volatile a::atomic_uint32_t* atomic)
 {
 	_WriteBarrier();
-	return (volatile uint32_t)atomic;
+	return atomic->value;
 }
 
 static inline void Atomic_StoreUInt32(volatile a::atomic_uint32_t* atomic, uint32_t desired)
 {
-	atomic = (volatile a::atomic_uint32_t*)desired;
+	atomic->value = desired;
 	_ReadBarrier();
 }
 
 static inline bool Atomic_CompareExchangeUInt32(a::atomic_uint32_t* atomic, uint32_t* expected, uint32_t desired)
 {
-	const uint32_t actual = InterlockedCompareExchange((volatile LONG*)&atomic, desired, *expected);
+	const uint32_t actual = InterlockedCompareExchange((volatile LONG*)&atomic->value, desired, *expected);
 	if (actual == *expected)
 	{
 		return true;
@@ -2211,44 +2211,44 @@ static inline bool Atomic_CompareExchangeUInt32(a::atomic_uint32_t* atomic, uint
 
 static inline uint32_t Atomic_AddUInt32(volatile a::atomic_uint32_t* atomic, uint32_t value)
 {
-	return InterlockedAdd((volatile LONG*)&atomic, value) - value;
+	return InterlockedAdd((volatile LONG*)&atomic->value, value) - value;
 }
 
 static inline uint32_t Atomic_SubUInt32(volatile a::atomic_uint32_t* atomic, uint32_t value)
 {
-	return InterlockedAdd((volatile LONG*)&atomic, ~value + 1) + value;
+	return InterlockedAdd((volatile LONG*)&atomic->value, ~value + 1) + value;
 }
 
 static inline uint32_t Atomic_OrUInt32(volatile a::atomic_uint32_t* atomic, uint32_t val)
 {
-	return InterlockedOr((volatile LONG*)&atomic, val);
+	return InterlockedOr((volatile LONG*)&atomic->value, val);
 }
 
 static inline uint32_t Atomic_IncrementUInt32(volatile a::atomic_uint32_t* atomic)
 {
-	return InterlockedIncrement((volatile LONG*)&atomic) - 1;
+	return InterlockedIncrement((volatile LONG*)&atomic->value) - 1;
 }
 
 static inline uint32_t Atomic_DecrementUInt32(volatile a::atomic_uint32_t* atomic)
 {
-	return InterlockedDecrement((volatile LONG*)&atomic) + 1;
+	return InterlockedDecrement((volatile LONG*)&atomic->value) + 1;
 }
 
-static inline uint64_t Atomic_LoadUInt64(atomic_uint64_t* atomic)
+static inline uint64_t Atomic_LoadUInt64(a::atomic_uint64_t* atomic)
 {
 	_WriteBarrier();
-	return (volatile uint64_t)atomic;
+	return (volatile uint64_t)atomic->value;
 }
 
-static inline void Atomic_StoreUInt64(atomic_uint64_t* atomic, uint64_t desired)
+static inline void Atomic_StoreUInt64(a::atomic_uint64_t* atomic, uint64_t desired)
 {
-	atomic = (atomic_uint64_t*)desired;
+	atomic->value = desired;
 	_ReadBarrier();
 }
 
-static inline bool Atomic_CompareExchangeUInt64(atomic_uint64_t* atomic, uint64_t* expected, uint64_t desired)
+static inline bool Atomic_CompareExchangeUInt64(a::atomic_uint64_t* atomic, uint64_t* expected, uint64_t desired)
 {
-	const uint64_t actual = InterlockedCompareExchange64((volatile LONG64*)&atomic, desired, *expected);
+	const uint64_t actual = InterlockedCompareExchange64((volatile LONG64*)&atomic->value, desired, *expected);
 	if (actual == *expected)
 	{
 		return true;
@@ -2257,259 +2257,23 @@ static inline bool Atomic_CompareExchangeUInt64(atomic_uint64_t* atomic, uint64_
 	return false;
 }
 
-static inline uint64_t Atomic_IncrementUInt64(volatile atomic_uint64_t* atomic)
+static inline uint64_t Atomic_IncrementUInt64(volatile a::atomic_uint64_t* atomic)
 {
-	return InterlockedIncrement64((volatile LONG64*)&atomic) - 1;
+	return InterlockedIncrement64((volatile LONG64*)&atomic->value) - 1;
 }
 
-static inline uint64_t Atomic_AddUInt64(volatile atomic_uint64_t* atomic, uint64_t value)
+static inline uint64_t Atomic_AddUInt64(volatile a::atomic_uint64_t* atomic, uint64_t value)
 {
-	return InterlockedAdd64((volatile LONG64*)&atomic, value) - value;
+	return InterlockedAdd64((volatile LONG64*)&atomic->value, value) - value;
 }
 
-static inline uint64_t Atomic_SubUInt64(volatile atomic_uint64_t* atomic, uint64_t value)
+static inline uint64_t Atomic_SubUInt64(volatile a::atomic_uint64_t* atomic, uint64_t value)
 {
-	return InterlockedAdd64((volatile LONG64*)&atomic, (~value) + 1) + value;
+	return InterlockedAdd64((volatile LONG64*)&atomic->value, (~value) + 1) + value;
 }
 
 static THREAD_LOCAL bool is_worker = false;
 static THREAD_LOCAL int		 tl_worker_index;
-
-static int					 num_workers = 0;
-static SDL_Thread** worker_threads;
-static task_t				 the_tasks[MAX_PENDING_TASKS];
-static task_queue_t* free_task_queue;
-static task_queue_t* executable_task_queue;
-static task_counter_t* indexed_task_counters;
-static uint8_t				 steal_worker_indices[TASKS_MAX_WORKERS * 2];
-
-static inline void CPUPause()
-{
-	// Don't have to actually check for SSE2 support, the
-	// instruction is backwards compatible and executes as a NOP
-	_mm_pause();
-}
-
-static inline int IndexedTaskCounterIndex(int task_index, int worker_index)
-{
-	return (MAX_PENDING_TASKS * worker_index) + task_index;
-}
-
-static inline void SpinWaitSemaphore(SDL_sem* semaphore)
-{
-	int remaining_spins = WAIT_SPIN_COUNT;
-	int result = 0;
-	while ((result = SDL_SemTryWait(semaphore)) != 0)
-	{
-		CPUPause();
-		if (--remaining_spins == 0)
-			break;
-	}
-	if (result != 0)
-		SDL_SemWait(semaphore);
-}
-
-static uint32_t ShuffleIndex(uint32_t i)
-{
-	// Swap bits 0-3 and 4-7 to avoid false sharing
-	return (i & ~0xFF) | ((i & 0xF) << 4) | ((i >> 4) & 0xF);
-}
-
-static inline uint32_t TaskQueuePop(task_queue_t* queue)
-{
-	SpinWaitSemaphore(queue->pop_semaphore);
-	uint32_t tail = Atomic_LoadUInt32(&queue->tail);
-	bool cas_successful = false;
-	do
-	{
-		const uint32_t next = (tail + 1u) & queue->capacity_mask;
-		cas_successful = Atomic_CompareExchangeUInt32(&queue->tail, &tail, next);
-	} while (!cas_successful);
-
-	const uint32_t shuffled_index = ShuffleIndex(tail);
-	while (Atomic_LoadUInt32(&queue->task_indices[shuffled_index]) == 0u)
-		CPUPause();
-
-	const uint32_t val = Atomic_LoadUInt32(&queue->task_indices[shuffled_index]) - 1;
-	Atomic_StoreUInt32(&queue->task_indices[shuffled_index], 0u);
-	SDL_SemPost(queue->push_semaphore);
-	ANNOTATE_HAPPENS_AFTER(&queue->task_indices[shuffled_index]);
-
-	return val;
-}
-
-
-
-static inline void TaskQueuePush(task_queue_t* queue, uint32_t task_index)
-{
-	SpinWaitSemaphore(queue->push_semaphore);
-	uint32_t head = Atomic_LoadUInt32(&queue->head);
-	bool cas_successful = false;
-	do
-	{
-		const uint32_t next = (head + 1u) & queue->capacity_mask;
-		cas_successful = Atomic_CompareExchangeUInt32(&queue->head, &head, next);
-	} while (!cas_successful);
-
-	const uint32_t shuffled_index = ShuffleIndex(head);
-	while (Atomic_LoadUInt32(&queue->task_indices[shuffled_index]) != 0u)
-		CPUPause();
-
-	ANNOTATE_HAPPENS_BEFORE(&queue->task_indices[shuffled_index]);
-	Atomic_StoreUInt32(&queue->task_indices[shuffled_index], task_index + 1);
-	SDL_SemPost(queue->pop_semaphore);
-}
-
-static inline void Task_ExecuteIndexed(int worker_index, task_t* task, uint32_t task_index)
-{
-	for (int i = 0; i < num_workers; ++i)
-	{
-		const int		steal_worker_index = steal_worker_indices[worker_index + i];
-		int				counter_index = IndexedTaskCounterIndex(task_index, steal_worker_index);
-		task_counter_t* counter = &indexed_task_counters[counter_index];
-		uint32_t		index = 0;
-		while ((index = Atomic_IncrementUInt32(&counter->index)) < counter->limit)
-		{
-			((task_indexed_func_t)task->func) (index, task->payload);
-		}
-	}
-}
-
-static inline uint32_t IndexFromTaskHandle(task_handle_t handle)
-{
-	return handle & (MAX_PENDING_TASKS - 1);
-}
-
-/*
-====================
-EpochFromTaskHandle
-====================
-*/
-static inline uint64_t EpochFromTaskHandle(task_handle_t handle)
-{
-	return handle >> NUM_INDEX_BITS;
-}
-
-
-void Task_Submit(task_handle_t handle)
-{
-	uint32_t task_index = IndexFromTaskHandle(handle);
-	task_t* task = &the_tasks[task_index];
-	assert(task->epoch == EpochFromTaskHandle(handle));
-	ANNOTATE_HAPPENS_BEFORE(task);
-	if (Atomic_DecrementUInt32(&task->remaining_dependencies) == 1)
-	{
-		const int num_task_workers = (task->task_type == TASK_TYPE_INDEXED) ? min(task->indexed_limit, num_workers) : 1;
-		Atomic_StoreUInt32(&task->remaining_workers, num_task_workers);
-		for (int i = 0; i < num_task_workers; ++i)
-		{
-			TaskQueuePush(executable_task_queue, task_index);
-		}
-	}
-}
-
-static task_queue_t* CreateTaskQueue(int capacity)
-{
-	assert(capacity > 0);
-	assert((capacity & (capacity - 1)) == 0); // Needs to be power of 2
-	task_queue_t* queue = (task_queue_t*)Mem_Alloc(sizeof(task_queue_t) + (sizeof(atomic_uint32_t) * (capacity - 1)));
-	queue->capacity_mask = capacity - 1;
-	queue->push_semaphore = SDL_CreateSemaphore(capacity - 1);
-	queue->pop_semaphore = SDL_CreateSemaphore(0);
-	return queue;
-}
-
-static int Task_Worker(void* data)
-{
-	is_worker = true;
-
-	const int worker_index = (intptr_t)data;
-	tl_worker_index = worker_index;
-	while (true)
-	{
-		uint32_t task_index = TaskQueuePop(executable_task_queue);
-		task_t* task = &the_tasks[task_index];
-		ANNOTATE_HAPPENS_AFTER(task);
-
-		if (task->task_type == TASK_TYPE_SCALAR)
-		{
-			((task_func_t)task->func) (task->payload);
-		}
-		else if (task->task_type == TASK_TYPE_INDEXED)
-		{
-			Task_ExecuteIndexed(worker_index, task, task_index);
-		}
-
-#if defined(USE_HELGRIND)
-		ANNOTATE_HAPPENS_BEFORE(task);
-		qboolean indexed_task = task->task_type == TASK_TYPE_INDEXED;
-		if (indexed_task)
-		{
-			// Helgrind needs to know about all threads
-			// that participated in an indexed execution
-			SDL_LockMutex(task->epoch_mutex);
-			for (int i = 0; i < task->num_dependents; ++i)
-			{
-				const int task_index = IndexFromTaskHandle(task->dependent_task_handles[i]);
-				task_t* dep_task = &tasks[task_index];
-				ANNOTATE_HAPPENS_BEFORE(dep_task);
-			}
-		}
-#endif
-
-		if (Atomic_DecrementUInt32(&task->remaining_workers) == 1)
-		{
-			SDL_LockMutex(task->epoch_mutex);
-			for (int i = 0; i < task->num_dependents; ++i)
-				Task_Submit(task->dependent_task_handles[i]);
-			task->epoch += 1;
-			SDL_CondBroadcast(task->epoch_condition);
-			SDL_UnlockMutex(task->epoch_mutex);
-			TaskQueuePush(free_task_queue, task_index);
-		}
-
-#if defined(USE_HELGRIND)
-		if (indexed_task)
-			SDL_UnlockMutex(task->epoch_mutex);
-#endif
-	}
-	return 0;
-}
-
-
-void Tasks_Init(void)
-{
-	free_task_queue = CreateTaskQueue(MAX_PENDING_TASKS);
-	executable_task_queue = CreateTaskQueue(MAX_EXECUTABLE_TASKS);
-
-	for (uint32_t task_index = 0; task_index < (MAX_PENDING_TASKS - 1); ++task_index)
-	{
-		//TaskQueuePush(free_task_queue, task_index); //causes shit to fuck up
-	}
-
-	for (uint32_t task_index = 0; task_index < MAX_PENDING_TASKS; ++task_index)
-	{
-		the_tasks[task_index].epoch_mutex = SDL_CreateMutex();
-		the_tasks[task_index].epoch_condition = SDL_CreateCond();
-	}
-
-	float f = 1.0f;
-	num_workers = CLAMP(&f, SDL_GetCPUCount(), TASKS_MAX_WORKERS);
-
-	// Fill lookup table to avoid modulo in Task_ExecuteIndexed
-	for (int i = 0; i < num_workers; ++i)
-	{
-		steal_worker_indices[i] = i;
-		steal_worker_indices[i + num_workers] = i;
-	}
-
-	indexed_task_counters = (task_counter_t*)Mem_Alloc(sizeof(task_counter_t) * num_workers * MAX_PENDING_TASKS);
-	worker_threads = (SDL_Thread**)Mem_Alloc(sizeof(SDL_Thread*) * num_workers);
-	for (int i = 0; i < num_workers; ++i)
-	{
-		worker_threads[i] = SDL_CreateThread(Task_Worker, "Task_Worker", (void*)(intptr_t)i);
-	}
-}
 
 
 
@@ -2546,6 +2310,290 @@ public:
 	cvar_t r_raydebug = { "r_raydebug", "0", CVAR_NONE };
 #endif
 
+	class Tasks {
+	public:
+		Engine* engine;
+		int					 num_workers;
+		SDL_Thread** worker_threads;
+		task_t				 the_tasks[MAX_PENDING_TASKS];
+		task_queue_t* free_task_queue;
+		task_queue_t* executable_task_queue;
+		task_counter_t* indexed_task_counters;
+		uint8_t				 steal_worker_indices[TASKS_MAX_WORKERS * 2];
+
+		void Initialize() {
+			num_workers = SDL_GetCPUCount();
+			worker_threads = (SDL_Thread**)SDL_calloc(num_workers, sizeof(SDL_Thread*));
+			free_task_queue = CreateTaskQueue(MAX_PENDING_TASKS);
+			executable_task_queue = CreateTaskQueue(MAX_PENDING_TASKS);
+			indexed_task_counters = (task_counter_t*)SDL_calloc(num_workers * MAX_PENDING_TASKS, sizeof(task_counter_t));
+			for (int i = 0; i < num_workers; ++i)
+			{
+				steal_worker_indices[i] = i;
+				steal_worker_indices[num_workers + i] = (i + 1) % num_workers;
+			}
+		}
+
+		Tasks() {
+			//empty constructor for wrapper class
+		}
+
+		Tasks(Engine e){
+			engine = &e;
+			engine->tasks = this;
+			
+			Initialize();
+			Tasks_Init();
+		}
+
+		static inline void CPUPause()
+		{
+			// Don't have to actually check for SSE2 support, the
+			// instruction is backwards compatible and executes as a NOP
+			_mm_pause();
+		}
+
+		static inline int IndexedTaskCounterIndex(int task_index, int worker_index)
+		{
+			return (MAX_PENDING_TASKS * worker_index) + task_index;
+		}
+
+		static inline void SpinWaitSemaphore(SDL_sem* semaphore)
+		{
+			int remaining_spins = WAIT_SPIN_COUNT;
+			int result = 0;
+			int i = 0;
+
+			while ((result = SDL_SemTryWait(semaphore)) != 0)
+			{
+				SDL_Log("SpinWaitSemaphore: %d", result);
+				CPUPause();
+				if (--remaining_spins == 0)
+					break;
+			}
+			if (result != 0)
+				SDL_SemWait(semaphore);
+		}
+
+		static uint32_t ShuffleIndex(uint32_t i)
+		{
+			// Swap bits 0-3 and 4-7 to avoid false sharing
+			return (i & ~0xFF) | ((i & 0xF) << 4) | ((i >> 4) & 0xF);
+		}
+
+		static inline uint32_t TaskQueuePop(task_queue_t* queue)
+		{
+			SpinWaitSemaphore(queue->pop_semaphore);
+			uint32_t tail = Atomic_LoadUInt32(&queue->tail);
+			bool cas_successful = false;
+			do
+			{
+				const uint32_t next = (tail + 1u) & queue->capacity_mask;
+				cas_successful = Atomic_CompareExchangeUInt32(&queue->tail, &tail, next);
+			} while (!cas_successful);
+
+			const uint32_t shuffled_index = ShuffleIndex(tail);
+			while (Atomic_LoadUInt32(&queue->task_indices[shuffled_index]) == 0u)
+				CPUPause();
+
+			const uint32_t val = Atomic_LoadUInt32(&queue->task_indices[shuffled_index]) - 1;
+			Atomic_StoreUInt32(&queue->task_indices[shuffled_index], 0u);
+			SDL_SemPost(queue->push_semaphore);
+			ANNOTATE_HAPPENS_AFTER(&queue->task_indices[shuffled_index]);
+
+			return val;
+		}
+
+
+
+		static inline void TaskQueuePush(task_queue_t* queue, uint32_t task_index)
+		{
+			SpinWaitSemaphore(queue->push_semaphore);
+			uint32_t head = Atomic_LoadUInt32(&queue->head);
+			bool cas_successful = false;
+			do
+			{
+				const uint32_t next = (head + 1u) & queue->capacity_mask;
+				cas_successful = Atomic_CompareExchangeUInt32(&queue->head, &head, next);
+			} while (!cas_successful);
+
+			const uint32_t shuffled_index = ShuffleIndex(head);
+			while (Atomic_LoadUInt32(&queue->task_indices[shuffled_index]) != 0u)
+				CPUPause();
+
+			ANNOTATE_HAPPENS_BEFORE(&queue->task_indices[shuffled_index]);
+			Atomic_StoreUInt32(&queue->task_indices[shuffled_index], task_index + 1);
+			SDL_SemPost(queue->pop_semaphore);
+		}
+
+		inline void Task_ExecuteIndexed(int worker_index, task_t* task, uint32_t task_index)
+		{
+			for (int i = 0; i < num_workers; ++i)
+			{
+				const int		steal_worker_index = steal_worker_indices[worker_index + i];
+				int				counter_index = IndexedTaskCounterIndex(task_index, steal_worker_index);
+				task_counter_t* counter = &indexed_task_counters[counter_index];
+				uint32_t		index = 0;
+				while ((index = Atomic_IncrementUInt32(&counter->index)) < counter->limit)
+				{
+					((task_indexed_func_t)task->func) (index, task->payload);
+				}
+			}
+		}
+
+		static inline uint32_t IndexFromTaskHandle(task_handle_t handle)
+		{
+			return handle & (MAX_PENDING_TASKS - 1);
+		}
+
+		/*
+		====================
+		EpochFromTaskHandle
+		====================
+		*/
+		static inline uint64_t EpochFromTaskHandle(task_handle_t handle)
+		{
+			return handle >> NUM_INDEX_BITS;
+		}
+
+
+		void Task_Submit(task_handle_t handle)
+		{
+			uint32_t task_index = IndexFromTaskHandle(handle);
+			task_t* task = &the_tasks[task_index];
+			assert(task->epoch == EpochFromTaskHandle(handle));
+			ANNOTATE_HAPPENS_BEFORE(task);
+			if (Atomic_DecrementUInt32(&task->remaining_dependencies) == 1)
+			{
+				const int num_task_workers = (task->task_type == TASK_TYPE_INDEXED) ? min(task->indexed_limit, num_workers) : 1;
+				Atomic_StoreUInt32(&task->remaining_workers, num_task_workers);
+				for (int i = 0; i < num_task_workers; ++i)
+				{
+					TaskQueuePush(executable_task_queue, task_index);
+				}
+			}
+		}
+
+		static task_queue_t* CreateTaskQueue(int capacity)
+		{
+			assert(capacity > 0);
+			assert((capacity & (capacity - 1)) == 0); // Needs to be power of 2
+			task_queue_t* queue = (task_queue_t*)Mem_Alloc(sizeof(task_queue_t) + (sizeof(a::atomic_uint32_t) * (capacity - 1)));
+			queue->capacity_mask = capacity - 1;
+			queue->push_semaphore = SDL_CreateSemaphore(capacity - 1);
+			queue->pop_semaphore = SDL_CreateSemaphore(0);
+			return queue;
+		}
+
+		int Task_Worker(Engine* engine,void* data)
+		{
+			is_worker = true;
+
+			const int worker_index = (intptr_t)data;
+			tl_worker_index = worker_index;
+			while (true)
+			{
+				uint32_t task_index = TaskQueuePop(engine->tasks->executable_task_queue);
+				task_t* task = &the_tasks[task_index];
+				ANNOTATE_HAPPENS_AFTER(task);
+
+				if (task->task_type == TASK_TYPE_SCALAR)
+				{
+					((task_func_t)task->func) (task->payload);
+				}
+				else if (task->task_type == TASK_TYPE_INDEXED)
+				{
+					Task_ExecuteIndexed(worker_index, task, task_index);
+				}
+
+#if defined(USE_HELGRIND)
+				ANNOTATE_HAPPENS_BEFORE(task);
+				qboolean indexed_task = task->task_type == TASK_TYPE_INDEXED;
+				if (indexed_task)
+				{
+					// Helgrind needs to know about all threads
+					// that participated in an indexed execution
+					SDL_LockMutex(task->epoch_mutex);
+					for (int i = 0; i < task->num_dependents; ++i)
+					{
+						const int task_index = IndexFromTaskHandle(task->dependent_task_handles[i]);
+						task_t* dep_task = &tasks[task_index];
+						ANNOTATE_HAPPENS_BEFORE(dep_task);
+					}
+				}
+#endif
+
+				if (Atomic_DecrementUInt32(&task->remaining_workers) == 1)
+				{
+					SDL_LockMutex(task->epoch_mutex);
+					for (int i = 0; i < task->num_dependents; ++i)
+						Task_Submit(task->dependent_task_handles[i]);
+					task->epoch += 1;
+					SDL_CondBroadcast(task->epoch_condition);
+					SDL_UnlockMutex(task->epoch_mutex);
+					TaskQueuePush(free_task_queue, task_index);
+				}
+
+#if defined(USE_HELGRIND)
+				if (indexed_task)
+					SDL_UnlockMutex(task->epoch_mutex);
+#endif
+			}
+			return 0;
+		}
+
+		typedef struct {
+			void* data;
+			Engine* engine;
+		} chucklenuts;
+
+		static int Wrapper(void* data){
+			auto bla = (chucklenuts*)data;
+			Engine* engine = bla->engine;
+			engine->tasks->Task_Worker(engine, bla->data);
+			return 0;
+		}
+
+		void Tasks_Init(void)
+		{
+			free_task_queue = CreateTaskQueue(MAX_PENDING_TASKS);
+			executable_task_queue = CreateTaskQueue(MAX_EXECUTABLE_TASKS);
+
+			for (uint32_t task_index = 0; task_index < (MAX_PENDING_TASKS - 1); ++task_index)
+			{
+				TaskQueuePush(free_task_queue, task_index); //causes shit to fuck up
+			}
+
+			for (uint32_t task_index = 0; task_index < MAX_PENDING_TASKS; ++task_index)
+			{
+				the_tasks[task_index].epoch_mutex = SDL_CreateMutex();
+				the_tasks[task_index].epoch_condition = SDL_CreateCond();
+			}
+
+			float f = 1.0f;
+			num_workers = CLAMP(&f, SDL_GetCPUCount(), TASKS_MAX_WORKERS);
+
+			// Fill lookup table to avoid modulo in Task_ExecuteIndexed
+			for (int i = 0; i < num_workers; ++i)
+			{
+				steal_worker_indices[i] = i;
+				steal_worker_indices[i + num_workers] = i;
+			}
+
+
+			indexed_task_counters = (task_counter_t*)Mem_Alloc(sizeof(task_counter_t) * num_workers * MAX_PENDING_TASKS);
+			worker_threads = (SDL_Thread**)Mem_Alloc(sizeof(SDL_Thread*) * num_workers);
+			for (int i = 0; i < num_workers; ++i)
+			{
+				chucklenuts bla{};
+				bla.data = (void*)(intptr_t)i;
+				bla.engine = engine;
+				worker_threads[i] = SDL_CreateThread(Wrapper, "Task_Worker", &bla);
+			}
+		}
+
+
+	};
 
 	static inline int FindLastBitNonZero(const uint32_t mask)
 	{
@@ -2647,9 +2695,9 @@ public:
 	void R_FreeVulkanMemory(vulkan_memory_t* memory, a::atomic_uint32_t* num_allocations)
 	{
 		if (memory->type == VULKAN_MEMORY_TYPE_DEVICE)
-			(gl->total_device_vulkan_allocation_size-= memory->size);
+			Atomic_SubUInt64(&gl->total_device_vulkan_allocation_size, memory->size);
 		else if (memory->type == VULKAN_MEMORY_TYPE_HOST)
-			(gl->total_host_vulkan_allocation_size-= memory->size);
+			Atomic_SubUInt64(&gl->total_host_vulkan_allocation_size, memory->size);
 		if (memory->type != VULKAN_MEMORY_TYPE_NONE)
 		{
 			vkFreeMemory(vulkan_globals.device, memory->handle, NULL);
@@ -3886,8 +3934,8 @@ public:
 		a::atomic_uint32_t num_vulkan_storage_images;
 		a::atomic_uint32_t num_vulkan_sampled_images;
 		a::atomic_uint32_t num_acceleration_structures;
-		atomic_uint64_t total_device_vulkan_allocation_size;
-		atomic_uint64_t total_host_vulkan_allocation_size;
+		a::atomic_uint64_t total_device_vulkan_allocation_size;
+		a::atomic_uint64_t total_host_vulkan_allocation_size;
 
 		bool use_simd;
 
@@ -5172,13 +5220,13 @@ public:
 	VID* vid = nullptr;
 	GL* gl = nullptr;
 	COM* com = nullptr;
-
+	Tasks* tasks = nullptr;
 
 	Engine(int ct, char* var[]) {	
 
 		max_thread_stack_alloc_size = MAX_STACK_ALLOC_SIZE;
 
-		Tasks_Init();
+		tasks = new Tasks(*this);
 
 		com = new COM(ct, var);			
 		vid = new VID(*this);
