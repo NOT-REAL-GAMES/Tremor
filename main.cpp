@@ -5315,7 +5315,7 @@ int main(int argc, char* argv[]) {
 				SDL_Quit();
 				return 0;
 			}
-			SDL_Delay(5); // Simulate a frame delay
+			SDL_Delay(4); // Simulate a frame delay
 			newtime = DoubleTime();
 			double curtime = newtime - oldtime;
 			t->host->Frame(curtime);
