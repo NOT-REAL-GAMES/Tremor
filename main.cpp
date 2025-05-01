@@ -2363,16 +2363,17 @@ public:
 			int remaining_spins = WAIT_SPIN_COUNT;
 			int result = 0;
 			int i = 0;
+				
 
 			while ((result = SDL_SemTryWait(semaphore)) != 0)
 			{
-				SDL_Log("SpinWaitSemaphore: %d", result);
 				CPUPause();
 				if (--remaining_spins == 0)
 					break;
 			}
-			if (result != 0)
+			if (result != 0) {
 				SDL_SemWait(semaphore);
+			}
 		}
 
 		static uint32_t ShuffleIndex(uint32_t i)
@@ -2547,6 +2548,7 @@ public:
 			Engine* engine;
 		} chucklenuts;
 
+		// REALLY hacky, but this works
 		static int Wrapper(void* data){
 			auto bla = (chucklenuts*)data;
 			Engine* engine = bla->engine;
@@ -2590,6 +2592,7 @@ public:
 				bla.engine = engine;
 				worker_threads[i] = SDL_CreateThread(Wrapper, "Task_Worker", &bla);
 			}
+			SDL_Log("Created %d worker threads.\n", num_workers);
 		}
 
 
@@ -5239,7 +5242,7 @@ public:
 					SDL_Quit();
 					return;
 				}
-				SDL_Delay(1); // Simulate a frame delay
+				SDL_Delay(5); // Simulate a frame delay
 			}
 		}
 	}
