@@ -27,7 +27,7 @@
 // Quake Engine is licensed under the GPLv2 license. 
 
 // The Tremor project is not affiliated with or endorsed by id Software.
-// idTech 2's dependencies on Quake will be removed from the Tremor project. 
+// idTech 2's dependencies on Quake will be gradually phased out of the Tremor project. 
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -43,6 +43,8 @@ using namespace std;
 #define NUM_COLOR_BUFFERS 2
 
 #define MIPLEVELS 4
+
+#define COM_RAND_MAX 0xFFFFFF
 
 #define NUM_AMBIENTS 4
 #define WORLD_PIPELINE_COUNT		16
@@ -103,6 +105,8 @@ using namespace std;
 #define NUM_BLOCK_SIZE_CLASSES 8
 #define MAX_PAGES			   (UINT64_MAX - 1)
 #define INVALID_PAGE_INDEX	   UINT64_MAX
+
+#define HOST_NETITERVAL_FREQ (71.9990)
 
 #define VERTEXSIZE 7
 
@@ -2083,6 +2087,12 @@ const char* GetDeviceVendorFromDriverProperties(VkPhysicalDeviceDriverProperties
 		return NULL;
 	}
 }
+
+double DoubleTime(void)
+{
+	return (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
+}
+
 
 const char* GetDeviceVendorFromDeviceProperties(void)
 {
@@ -5195,6 +5205,9 @@ public:
 	class COM {
 	public:
 		int argc; char** argv;
+		uint32_t xorshiro_state[2] = { 0xcdb38550, 0x720a8392 };
+
+		
 		COM(int c, char* v[]) {
 			argc = c;
 			argv = v;
@@ -5218,12 +5231,61 @@ public:
 		{
 			return CheckParmNext(0, parm);
 		}
+
+		void SeedRand(uint64_t seed)
+		{
+			// SplitMix64
+			uint64_t z = (seed + 0x9e3779b97f4a7c15);
+			z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
+			z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
+			uint64_t state = z ^ (z >> 31);
+			xorshiro_state[0] = (uint32_t)state;
+			xorshiro_state[1] = (uint32_t)(state >> 32);
+		}
+
+		int32_t Rand()
+		{
+			// Xorshiro64**
+			const uint32_t s0 = xorshiro_state[0];
+			uint32_t	   s1 = xorshiro_state[1];
+			const uint32_t result = rotl(s0 * 0x9E3779BB, 5) * 5;
+			s1 ^= s0;
+			xorshiro_state[0] = rotl(s0, 26) ^ s1 ^ (s1 << 9);
+			xorshiro_state[1] = rotl(s1, 13);
+
+			return (int32_t)(result & COM_RAND_MAX);
+		}
+	};
+
+	class Host {
+	public:
+		Engine* engine;
+
+		jmp_buf abortserver;
+
+
+		Host(Engine e) {
+			engine = &e;
+		}
+
+		void Frame(double time) {
+
+			double before = DoubleTime();
+
+			double accumtime = 0;
+			if (setjmp(abortserver)) {
+				return;
+			}
+
+			engine->com->Rand();
+		}
 	};
 
 	VID* vid = nullptr;
 	GL* gl = nullptr;
 	COM* com = nullptr;
 	Tasks* tasks = nullptr;
+	Host* host = nullptr;
 
 	Engine(int ct, char* var[]) {	
 
@@ -5233,28 +5295,33 @@ public:
 
 		com = new COM(ct, var);			
 		vid = new VID(*this);
-
-		while (1) {
-			SDL_Event event;
-			while (SDL_PollEvent(&event)) {
-				if (event.type == SDL_QUIT) {
-					SDL_DestroyWindow(vid->draw_context);
-					SDL_Quit();
-					return;
-				}
-				SDL_Delay(5); // Simulate a frame delay
-			}
-		}
+		host = new Host(*this);
+		
 	}
 };
 
 int main(int argc, char* argv[]) {
 
 
-	auto tremor = new Engine(argc, argv);
+	auto t = new Engine(argc, argv);
 
+	double oldtime{0}, newtime{0};
 
-
+	while (1) {
+		SDL_Event event;
+		while (SDL_PollEvent(&event)) {
+			if (event.type == SDL_QUIT) {
+				SDL_DestroyWindow(t->vid->draw_context);
+				SDL_Quit();
+				return 0;
+			}
+			SDL_Delay(5); // Simulate a frame delay
+			newtime = DoubleTime();
+			double curtime = newtime - oldtime;
+			t->host->Frame(curtime);
+			oldtime = newtime;
+		}
+	}
 
 	return 0;
 }
