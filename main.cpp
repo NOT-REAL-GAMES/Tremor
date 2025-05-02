@@ -33,6 +33,16 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+#include <algorithm>
+#include <future>
+#include <iostream>
+#include <mutex>
+#include <numeric>
+#include <string>
+#include <vector>
+
+#include <random>
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
 #include <vulkan/vulkan.hpp>
@@ -4261,9 +4271,9 @@ public:
 					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Couldn't find any Vulkan devices");
 
 				arg_index = engine->com->CheckParm("-device");
-				if (arg_index && (arg_index < (engine->com->argc - 1)))
+				if (arg_index && (arg_index < (engine->argc - 1)))
 				{
-					const char* device_num = engine->com->argv[arg_index + 1];
+					const char* device_num = engine->argv[arg_index + 1];
 					device_index = CLAMP(0, atoi(device_num) - 1, (int)physical_device_count - 1);
 				}
 
@@ -5204,24 +5214,24 @@ public:
 
 	class COM {
 	public:
-		int argc; char** argv;
+		Engine* engine;
 		uint32_t xorshiro_state[2] = { 0xcdb38550, 0x720a8392 };
 
 		
-		COM(int c, char* v[]) {
-			argc = c;
-			argv = v;
+		COM(Engine e) {
+			engine = &e;
+			engine->com = this;
 		}
 
 		int CheckParmNext(int last, const char* parm)
 		{
 			int i;
 
-			for (i = last + 1; i < argc; i++)
+			for (i = last + 1; i < engine->argc; i++)
 			{
-				if (!argv[i])
+				if (!engine->argv[i])
 					continue; // NEXTSTEP sometimes clears appkit vars.
-				if (!strcmp(parm, argv[i]))
+				if (!strcmp(parm, engine->argv[i]))
 					return i;
 			}
 
@@ -5232,28 +5242,27 @@ public:
 			return CheckParmNext(0, parm);
 		}
 
-		void SeedRand(uint64_t seed)
+		void SeedRand(uint64_t seed) // probably broken :(
 		{
-			// SplitMix64
-			uint64_t z = (seed + 0x9e3779b97f4a7c15);
-			z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
-			z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
-			uint64_t state = z ^ (z >> 31);
-			xorshiro_state[0] = (uint32_t)state;
-			xorshiro_state[1] = (uint32_t)(state >> 32);
+			// Xorshiro128+
+			uint64_t s0 = seed + 0x9e3779b97f4a7c15;
+			uint64_t s1 = seed + 0x9e3779b97f4a7c15;
+			s0 ^= (s0 << 23) ^ (s1 >> 17) ^ (s1 << 26);
+			s1 ^= (s1 << 23) ^ (s0 >> 17) ^ (s0 << 26);
+			xorshiro_state[0] = (uint32_t)s0;
+			xorshiro_state[1] = (uint32_t)(s1 >> 32);
 		}
 
-		int32_t Rand()
+		uint32_t Rand() //xorshiro was broken, so it can go to hell :)
 		{
-			// Xorshiro64**
-			const uint32_t s0 = xorshiro_state[0];
-			uint32_t	   s1 = xorshiro_state[1];
-			const uint32_t result = rotl(s0 * 0x9E3779BB, 5) * 5;
-			s1 ^= s0;
-			xorshiro_state[0] = rotl(s0, 26) ^ s1 ^ (s1 << 9);
-			xorshiro_state[1] = rotl(s1, 13);
+			std::random_device rd;  // a seed source for the random number engine
+			std::mt19937 gen(rd()); // mersenne_twister_engine seeded with rd()
+			std::uniform_real_distribution<> distrib(0, 0xFFFFFF);
 
-			return (int32_t)(result & COM_RAND_MAX);
+			uint32_t bla = distrib(gen);
+
+			SDL_Log("rand: %d\n", bla);
+			return bla;
 		}
 	};
 
@@ -5287,17 +5296,23 @@ public:
 	Tasks* tasks = nullptr;
 	Host* host = nullptr;
 
+	int argc; char** argv;
+
 	Engine(int ct, char* var[]) {	
 
 		max_thread_stack_alloc_size = MAX_STACK_ALLOC_SIZE;
 
-		tasks = new Tasks(*this);
+		argc = ct; argv = var;
 
-		com = new COM(ct, var);			
-		vid = new VID(*this);
+		tasks = new Tasks(*this);
+		com = new COM(*this);
 		host = new Host(*this);
-		
+
+		vid = new VID(*this);
+		gl = new GL(*this);
+
 	}
+
 };
 
 int main(int argc, char* argv[]) {
@@ -5305,22 +5320,28 @@ int main(int argc, char* argv[]) {
 
 	auto t = new Engine(argc, argv);
 
+
+
 	double oldtime{0}, newtime{0};
 
 	while (1) {
-		SDL_Event event;
+		
+
+		SDL_Event event{};
 		while (SDL_PollEvent(&event)) {
+
 			if (event.type == SDL_QUIT) {
 				SDL_DestroyWindow(t->vid->draw_context);
 				SDL_Quit();
 				return 0;
 			}
-			SDL_Delay(4); // Simulate a frame delay
-			newtime = DoubleTime();
-			double curtime = newtime - oldtime;
-			t->host->Frame(curtime);
-			oldtime = newtime;
-		}
+		}			
+		SDL_Delay(4); // Simulate a frame delay
+		newtime = DoubleTime();
+		double curtime = newtime - oldtime;
+		t->host->Frame(curtime);
+		oldtime = newtime;
+
 	}
 
 	return 0;
