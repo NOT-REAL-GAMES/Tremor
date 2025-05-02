@@ -2303,8 +2303,10 @@ static THREAD_LOCAL int		 tl_worker_index;
 class Engine {
 public:
 
-	 int			numgltextures;
-	 gltexture_t* active_gltextures, * free_gltextures;
+	uint64_t ticks;
+
+	int			numgltextures;
+	gltexture_t* active_gltextures, * free_gltextures;
 	gltexture_t* notexture, * nulltexture, * whitetexture, * greytexture, * greylightmap, * bluenoisetexture;
 
 
@@ -5287,6 +5289,11 @@ public:
 			}
 
 			engine->com->Rand();
+
+			double after = DoubleTime();
+
+			double delta = after - before;
+			engine->ticks++;
 		}
 	};
 
