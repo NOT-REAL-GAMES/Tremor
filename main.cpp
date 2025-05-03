@@ -3003,7 +3003,7 @@ public:
 		{
 			std::random_device rd;  // a seed source for the random number engine
 			std::mt19937 gen(rd()); // mersenne_twister_engine seeded with rd()
-			std::uniform_real_distribution<> distrib(0, 0xFFFFFF);
+			std::uniform_int_distribution<> distrib(0, 0xFFFFFF);
 
 			uint32_t bla = distrib(gen);
 
@@ -3061,7 +3061,7 @@ public:
 
 		vid = new VID(*this);
 		gl = new GL(*this);
-		//cuz we already init it
+		// we already init this in GL
 		if (ren == nullptr) {
 			ren = new REN(*this);
 		}
