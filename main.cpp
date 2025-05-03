@@ -3013,6 +3013,8 @@ public:
 	};
 	class Host {
 	public:
+		float  netinterval = 1.0 / HOST_NETITERVAL_FREQ;
+
 		Engine* engine;
 
 		jmp_buf abortserver;
@@ -3024,6 +3026,8 @@ public:
 
 		void Frame(double time) {
 
+			double accumtime = 0;
+
 			double before = DoubleTime();
 
 			double accumtime = 0;
@@ -3032,6 +3036,8 @@ public:
 			}
 
 			engine->com->Rand();
+
+			accumtime += engine->host->netinterval ? CLAMP(0, time, 0.2) : 0; // for renderer/server isolation
 
 			double after = DoubleTime();
 
