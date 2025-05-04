@@ -112,8 +112,8 @@ public:
 			//empty constructor for wrapper class
 		}
 
-		Tasks(Engine e){
-			engine = &e;
+		Tasks(Engine* e){
+			engine = e;
 			engine->tasks = this;
 			
 			Initialize();
@@ -326,7 +326,11 @@ public:
 		static int Wrapper(void* data){
 			auto bla = (chucklenuts*)data;
 			Engine* engine = bla->engine;
-			engine->tasks->Task_Worker(engine, bla->data);
+			void* tdata = bla->data;
+
+			delete bla;
+
+			engine->tasks->Task_Worker(engine, tdata);
 			return 0;
 		}
 
@@ -347,7 +351,7 @@ public:
 			}
 
 			float f = 1.0f;
-			num_workers = CLAMP(&f, SDL_GetCPUCount(), TASKS_MAX_WORKERS);
+			num_workers = CLAMP(f, SDL_GetCPUCount(), TASKS_MAX_WORKERS);
 
 			// Fill lookup table to avoid modulo in Task_ExecuteIndexed
 			for (int i = 0; i < num_workers; ++i)
@@ -361,10 +365,10 @@ public:
 			worker_threads = (SDL_Thread**)Mem_Alloc(sizeof(SDL_Thread*) * num_workers);
 			for (int i = 0; i < num_workers; ++i)
 			{
-				chucklenuts bla{};
-				bla.data = (void*)(intptr_t)i;
-				bla.engine = engine;
-				worker_threads[i] = SDL_CreateThread(Wrapper, "Task_Worker", &bla);
+				chucklenuts* bla = new chucklenuts();
+				bla->data = (void*)(intptr_t)i;
+				bla->engine = engine;
+				worker_threads[i] = SDL_CreateThread(Wrapper, "Task_Worker", bla);
 			}
 			SDL_Log("Created %d worker threads.\n", num_workers);
 		}
@@ -375,8 +379,8 @@ public:
 	class REN {
 	public:
 		Engine* engine;
-		REN(Engine e) {
-			engine = &e;
+		REN(Engine* e) {
+			engine = e;
 			engine->ren = this;
 		}
 		
@@ -1756,8 +1760,8 @@ public:
 			Engine* engine;
 
 
-			Instance(Engine e) {
-				engine = &e;
+			Instance(Engine* e) {
+				engine = e;
 				engine->gl->instance = this;
 
 				// Initialize Vulkan instance
@@ -1903,8 +1907,8 @@ public:
 		class CommandBuffers {
 		public:
 			Engine* engine;
-			CommandBuffers(Engine e) {
-				engine = &e;
+			CommandBuffers(Engine* e) {
+				engine = e;
 				engine->gl->cbuf = this;
 
 				SDL_Log("Creating command buffers\n");
@@ -1997,8 +2001,8 @@ public:
 		class Device {
 		public:
 			Engine* engine;
-			Device(Engine e) {
-				engine = &e;
+			Device(Engine* e) {
+				engine = e;
 				engine->gl->device = this;
 
 				VkResult err;
@@ -2435,8 +2439,8 @@ public:
 			}
 
 
-			StagingBuffers(Engine e) {
-				engine = &e;
+			StagingBuffers(Engine* e) {
+				engine = e;
 				engine->gl->sbuf = this;
 
 				int		 i;
@@ -2498,8 +2502,8 @@ public:
 		class DSLayouts {
 		public:
 			Engine* engine;
-			DSLayouts(Engine e) {
-				engine = &e;
+			DSLayouts(Engine* e) {
+				engine = e;
 
 				SDL_Log("Creating descriptor set layouts\n");
 
@@ -2773,8 +2777,8 @@ public:
 		class DescPool {
 		public:
 			Engine* engine;
-			DescPool(Engine e) {
-				engine = &e;
+			DescPool(Engine* e) {
+				engine = e;
 				engine->gl->desc_pool = this;
 
 				ZEROED_STRUCT_ARRAY(VkDescriptorPoolSize, pool_sizes, 9);
@@ -2816,8 +2820,8 @@ public:
 		class GPUBuffers {
 		public:
 			Engine* engine;
-			GPUBuffers(Engine e) {
-				engine = &e;
+			GPUBuffers(Engine* e) {
+				engine = e;
 				engine->gl->gpu_buffers = this;
 				SDL_Log("Creating GPU buffers\n");
 				engine->ren->R_InitDynamicVertexBuffers();
@@ -2831,8 +2835,8 @@ public:
 		public:
 			glheap_t* heap;
 			Engine* engine;
-			MeshHeap(Engine e) {
-				engine = &e;
+			MeshHeap(Engine* e) {
+				engine = e;
 				engine->gl->mesh_heap = this;
 				SDL_Log("Creating mesh heap\n");
 
@@ -2862,8 +2866,8 @@ public:
 		public:
 			Engine* engine;
 			glheap_t* heap;
-			TexHeap(Engine e) {
-				engine = &e;
+			TexHeap(Engine* e) {
+				engine = e;
 				engine->gl->tex_heap = this;
 				SDL_Log("Creating texture heap\n");
 				ZEROED_STRUCT(VkImageCreateInfo, image_create_info);
@@ -2909,24 +2913,24 @@ public:
 		MeshHeap* mesh_heap = nullptr;
 		TexHeap* tex_heap = nullptr;
 
-		GL(Engine e) {
-			engine = &e;
+		GL(Engine* e) {
+			engine = e;
 			engine->gl = this;
 
 			if (engine->ren == nullptr) {
-				engine->ren = new REN(*engine);
+				engine->ren = new REN(engine);
 			}
 
-			instance = new Instance(*engine);
-			device = new Device(*engine);
-			cbuf = new CommandBuffers(*engine);
+			instance = new Instance(engine);
+			device = new Device(engine);
+			cbuf = new CommandBuffers(engine);
 			vulkan_globals.staging_buffer_size = INITIAL_STAGING_BUFFER_SIZE_KB * 1024;
-			sbuf = new StagingBuffers(*engine);
-			dslayouts = new DSLayouts(*engine);
-			desc_pool = new DescPool(*engine);
-			gpu_buffers = new GPUBuffers(*engine);
-			mesh_heap = new MeshHeap(*engine);
-			tex_heap = new TexHeap(*engine);
+			sbuf = new StagingBuffers(engine);
+			dslayouts = new DSLayouts(engine);
+			desc_pool = new DescPool(engine);
+			gpu_buffers = new GPUBuffers(engine);
+			mesh_heap = new MeshHeap(engine);
+			tex_heap = new TexHeap(engine);
 			engine->ren->R_InitSamplers();
 			engine->ren->R_CreatePipelineLayouts();
 			R_CreatePaletteOctreeBuffers(palette_octree_colors, NUM_PALETTE_OCTREE_COLORS, palette_octree_nodes, NUM_PALETTE_OCTREE_NODES);
@@ -2938,8 +2942,8 @@ public:
 	public:
 		Engine* engine;
 		SDL_Window* draw_context;
-		VID(Engine e) {
-			engine = &e;
+		VID(Engine* e) {
+			engine = e;
 			engine->vid = this;
 
 			// Initialize SDL
@@ -2953,7 +2957,7 @@ public:
 			// Create a window
 			draw_context = SDL_CreateWindow("Tremor Engine", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_VULKAN);
 
-			engine->gl = new GL(*engine);
+			engine->gl = new GL(engine);
 
 			
 		}
@@ -2964,8 +2968,8 @@ public:
 		uint32_t xorshiro_state[2] = { 0xcdb38550, 0x720a8392 };
 
 		
-		COM(Engine e) {
-			engine = &e;
+		COM(Engine* e) {
+			engine = e;
 			engine->com = this;
 		}
 
@@ -2999,7 +3003,8 @@ public:
 			xorshiro_state[1] = (uint32_t)(s1 >> 32);
 		}
 
-		uint32_t Rand() //xorshiro was broken, so it can go to hell :)
+		uint32_t Rand() //yeah yeah, i know xorshiro was faster
+			//i'll add choices for RNG methods eventually
 		{
 			std::random_device rd;  // a seed source for the random number engine
 			std::mt19937 gen(rd()); // mersenne_twister_engine seeded with rd()
@@ -3011,18 +3016,90 @@ public:
 			return bla;
 		}
 	};
+	class CL {
+	public:
+		client_static_t* s;
+		client_state_t* state;
+		Engine* engine;
+
+		CL(Engine* e) {
+			engine = e;
+			engine->cl = this;
+
+			s = (new client_static_t());
+			state = (new client_state_t());
+		}
+
+	};
 	class Host {
 	public:
 		float  netinterval = 1.0 / HOST_NETITERVAL_FREQ;
+		cvar_t maxfps = { "host_maxfps", "200", CVAR_ARCHIVE };	// johnfitz
+		cvar_t timescale = { "host_timescale", "0", CVAR_NONE }; // johnfitz
+		cvar_t framerate = { "host_framerate", "0", CVAR_NONE }; // set for slow motion
+
+
+
+		double frametime;
+
+		double realtime;	// without any filtering or bounding
+		double oldrealtime; // last frame run
+
 
 		Engine* engine;
 
 		jmp_buf abortserver;
 
 
-		Host(Engine e) {
-			engine = &e;
+		Host(Engine* e) {
+			engine = e;
+			engine->host = this;
 		}
+
+		bool FilterTime(float time)
+		{
+
+			float max_fps; // johnfitz
+			float min_frame_time;
+			float delta_since_last_frame;
+
+			realtime += time;
+			delta_since_last_frame = realtime - oldrealtime;
+
+			if (maxfps.value)
+			{
+				// johnfitz -- max fps cvar
+				max_fps = CLAMP(10.0, maxfps.value, 1000.0);
+
+				// Check if we still have more than 2ms till next frame and if so wait for "1ms"
+				// E.g. Windows is not a real time OS and the sleeps can vary in length even with timeBeginPeriod(1)
+				min_frame_time = 1.0f / max_fps;
+				if ((min_frame_time - delta_since_last_frame) > (2.0f / 1000.0f))
+					SDL_Delay(1);
+
+				if (!engine->cl->s->timedemo && (delta_since_last_frame < min_frame_time))
+					return false; // framerate is too high
+				// johnfitz
+			}
+
+			frametime = delta_since_last_frame;
+			oldrealtime = realtime;
+
+			if (engine->cl->s->demoplayback && engine->cl->s->demospeed != 1.f && engine->cl->s->demospeed > 0.f)
+				frametime *= engine->cl->s->demospeed;
+			// johnfitz -- host_timescale is more intuitive than host_framerate
+			else if (timescale.value > 0)
+				frametime *= timescale.value;
+			// johnfitz
+			else if (framerate.value > 0)
+				frametime = framerate.value;
+			else if (maxfps.value)								  // don't allow really long or short frames
+				frametime = CLAMP(0.0001, frametime, 0.1); // johnfitz -- use CLAMP
+
+			return true;
+		}
+
+
 
 		void Frame(double time) {
 
@@ -3030,19 +3107,31 @@ public:
 
 			double before = DoubleTime();
 
-			double accumtime = 0;
 			if (setjmp(abortserver)) {
 				return;
 			}
 
 			engine->com->Rand();
 
-			accumtime += engine->host->netinterval ? CLAMP(0, time, 0.2) : 0; // for renderer/server isolation
+			accumtime += netinterval ? CLAMP(0, time, 0.2) : 0; // for renderer/server isolation
+			if (!FilterTime(time))
+				return; // don't run too fast, or packets will flood out
+
+
+
 
 			double after = DoubleTime();
 
 			double delta = after - before;
 			engine->ticks++;
+		}
+	};
+	class SCR {
+	public:
+		Engine* engine;
+		SCR(Engine* e) {
+			engine = e;
+			engine->scr = this;
 		}
 	};
 
@@ -3052,6 +3141,8 @@ public:
 	Tasks* tasks = nullptr;
 	Host* host = nullptr;
 	REN* ren = nullptr;
+	CL* cl = nullptr;
+	SCR* scr = nullptr;
 
 	int argc; char** argv;
 
@@ -3061,16 +3152,16 @@ public:
 
 		argc = ct; argv = var;
 
-		tasks = new Tasks(*this);
-		com = new COM(*this);
-		host = new Host(*this);
+		tasks = new Tasks(this);
+		com = new COM(this);
+		host = new Host(this);
 
-		vid = new VID(*this);
-		gl = new GL(*this);
-		// we already init this in GL
-		if (ren == nullptr) {
-			ren = new REN(*this);
-		}
+		vid = new VID(this);
+		gl = new GL(this);
+
+		scr = new SCR(this);
+
+		cl = new CL(this);
 
 	}
 
@@ -3086,7 +3177,7 @@ int main(int argc, char* argv[]) {
 	double oldtime{0}, newtime{0};
 
 	while (1) {
-		
+
 
 		SDL_Event event{};
 		while (SDL_PollEvent(&event)) {

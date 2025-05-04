@@ -18,11 +18,30 @@
 #include <vulkan/vulkan.hpp>
 using namespace std;
 
+#define MAX_MAPSTRING 2048
+#define MAX_DEMOS	  8
+#define MAX_DEMONAME  16
+
+#define CSHIFT_CONTENTS 0
+#define CSHIFT_DAMAGE	1
+#define CSHIFT_BONUS	2
+#define CSHIFT_POWERUP	3
+#define NUM_CSHIFTS		4
+
+#define MAX_SCOREBOARD	   16
+#define MAX_SCOREBOARDNAME 32
+
+#define MAX_MODELS		  8192 // johnfitz -- was 256
+#define MAX_SOUNDS		  2048 // johnfitz -- was 256
+#define MAX_PARTICLETYPES 2048
+
 #define MAX_QPATH 2048
 
 #define NUM_COLOR_BUFFERS 2
 
 #define MIPLEVELS 4
+
+#define LERP_BANDAID // HACK: send think interval over FTE protocol (loopback only, no demos)
 
 #define COM_RAND_MAX 0xFFFFFF
 
@@ -59,6 +78,9 @@ using namespace std;
 
 #define MAXLIGHTMAPS 4
 #define MAX_DLIGHTS 64
+
+#define VID_CBITS  6
+#define VID_GRADES (1 << VID_CBITS)
 
 #define MESH_HEAP_SIZE_MB	1024
 #define MESH_HEAP_PAGE_SIZE 4096
@@ -167,6 +189,8 @@ GENERIC_INT_TYPES(IMPL_GENERIC_INT_FUNCS, NO_COMMA)
 typedef uint64_t task_handle_t;
 typedef void (*task_func_t) (void*);
 typedef void (*task_indexed_func_t) (int, void*);
+
+typedef int64_t qfileofs_t;
 
 typedef enum
 {
@@ -2116,13 +2140,13 @@ void Mem_Free(const void* ptr)
 	SDL_free((void*)ptr);
 }
 
-float CLAMP(float* value, float min, float max)
+float CLAMP(float value, float min, float max)
 {
-	if (*value < min)
-		*value = min;
-	else if (*value > max)
-		*value = max;
-	return *value;
+	if (value < min)
+		value = min;
+	else if (value > max)
+		value = max;
+	return value;
 }
 
 char* get_va_buffer(void)
@@ -2266,5 +2290,366 @@ static THREAD_LOCAL bool is_worker = false;
 static THREAD_LOCAL int		 tl_worker_index;
 
 
+typedef enum
+{
+	ca_dedicated,	 // a dedicated server with no ability to start a client
+	ca_disconnected, // full screen console with no connection
+	ca_connected	 // valid netcon, talking to a server
+} cactive_t;
 
+typedef struct sizebuf_s
+{
+	bool allowoverflow; // if false, do a Sys_Error
+	bool overflowed;	// set to true if the buffer size failed
+	byte* data;
+	int		 maxsize;
+	int		 cursize;
+} sizebuf_t;
 
+typedef struct
+{
+	float  servertime;
+	float  seconds; // servertime-previous->servertime
+	vec3_t viewangles;
+
+	// intended velocities
+	float forwardmove;
+	float sidemove;
+	float upmove;
+
+	// used by client for mouse-based movements that should accumulate over multiple client frames
+	float forwardmove_accumulator;
+	float sidemove_accumulator;
+	float upmove_accumulator;
+
+	unsigned int buttons;
+	unsigned int impulse;
+
+	unsigned int sequence;
+
+	int weapon;
+} usercmd_t;
+
+typedef enum
+{
+	MAX_CL_BASE_STATS = 32,
+	MAX_CL_STATS = 256,
+
+	STAT_HEALTH = 0,
+	STAT_FRAGS = 1,
+	STAT_WEAPON = 2,
+	STAT_AMMO = 3,
+	STAT_ARMOR = 4,
+	STAT_WEAPONFRAME = 5,
+	STAT_SHELLS = 6,
+	STAT_NAILS = 7,
+	STAT_ROCKETS = 8,
+	STAT_CELLS = 9,
+	STAT_ACTIVEWEAPON = 10,
+	STAT_NONCLIENT = 11,	// first stat not included in svc_clientdata
+	STAT_TOTALSECRETS = 11,
+	STAT_TOTALMONSTERS = 12,
+	STAT_SECRETS = 13,	// bumped on client side by svc_foundsecret
+	STAT_MONSTERS = 14,	// bumped by svc_killedmonster
+	STAT_ITEMS = 15,	//replaces clc_clientdata info
+	STAT_VIEWHEIGHT = 16, // replaces clc_clientdata info
+	STAT_VIEWZOOM = 21, // DP
+	STAT_IDEALPITCH = 25, // nq-emu
+	STAT_PUNCHANGLE_X = 26, // nq-emu
+	STAT_PUNCHANGLE_Y = 27, // nq-emu
+	STAT_PUNCHANGLE_Z = 28, // nq-emu
+} stat_t;
+
+typedef struct
+{
+	int	  destcolor[3];
+	float percent; // 0-256
+} cshift_t;
+
+class client_static_t
+{
+public:
+	cactive_t state;
+
+	// personalization data sent to server
+	char spawnparms[MAX_MAPSTRING]; // to restart a level
+
+	// demo loop control
+	int	 demonum;						 // -1 = don't play demos
+	char demos[MAX_DEMOS][MAX_DEMONAME]; // when not playing
+
+	// demo recording info must be here, because record is started before
+	// entering a map (and clearing client_state_t)
+	bool demorecording;
+	bool demoplayback;
+
+	// did the user pause demo playback? (separate from cl.paused because we don't
+	// want a svc_setpause inside the demo to actually pause demo playback).
+	bool demopaused;
+	bool demoseeking;
+	float	 seektime;
+	float	 demospeed;
+
+	// demo file position where the current level starts (after signon packets)
+	qfileofs_t demo_prespawn_end;
+
+	bool timedemo;
+	int		 forcetrack; // -1 = use normal cd track
+	FILE* demofile;
+	int		 td_lastframe;	// to meter out one message a frame
+	int		 td_startframe; // host_framecount at start
+	float	 td_starttime;	// realtime at second frame of timedemo
+
+	// connection information
+	int				  signon; // 0 to SIGNONS
+	struct qsocket_s* netcon;
+	sizebuf_t		  message; // writing buffer to send to server
+
+	char userinfo[8192];
+};
+
+typedef struct entity_state_s
+{
+	vec3_t		   origin;
+	vec3_t		   angles;
+	unsigned short modelindex; // johnfitz -- was int
+	unsigned short frame;	   // johnfitz -- was int
+	unsigned int   effects;
+	unsigned char  colormap;	   // johnfitz -- was int
+	unsigned char  skin;		   // johnfitz -- was int
+	unsigned char  scale;		   // spike -- *16
+	unsigned char  pmovetype;	   // spike
+	unsigned short traileffectnum; // spike -- for qc-defined particle trails. typically evilly used for things that are not trails.
+	unsigned short emiteffectnum;  // spike -- for qc-defined particle trails. typically evilly used for things that are not trails.
+	short		   velocity[3];	   // spike -- the player's velocity.
+	unsigned char  eflags;
+	unsigned char  tagindex;
+	unsigned short tagentity;
+	unsigned short pad;
+	unsigned char  colormod[3]; // spike -- entity tints, *32
+	unsigned char  alpha;		// johnfitz -- added
+	unsigned int   solidsize;	// for csqc prediction logic.
+#define ES_SOLID_NOT   0
+#define ES_SOLID_BSP   31
+#define ES_SOLID_HULL1 0x80201810
+#define ES_SOLID_HULL2 0x80401820
+#ifdef LERP_BANDAID
+	unsigned short lerp;
+#endif
+} entity_state_t;
+
+typedef struct lightcache_s
+{
+	int	   surfidx; // < 0: black surface; == 0: no cache; > 0: 1+index of surface
+	vec3_t pos;
+	short  ds;
+	short  dt;
+} lightcache_t;
+
+typedef struct entity_s
+{
+	bool forcelink; // model changed
+
+	int update_type;
+
+	entity_state_t baseline; // to fill in defaults in updates
+	entity_state_t netstate; // the latest network state
+
+	double			 msgtime;		 // time of last update
+	vec3_t			 msg_origins[2]; // last two updates (0 is newest)
+	vec3_t			 origin;
+	vec3_t			 msg_angles[2]; // last two updates (0 is newest)
+	vec3_t			 angles;
+	struct qmodel_s* model; // NULL = no model
+	struct efrag_s* efrag; // linked list of efrags
+	int				 frame;
+	float			 syncbase; // for client-side animations
+	byte* colormap;
+	int				 effects;  // light, particles, etc
+	int				 skinnum;  // for Alias models
+	int				 visframe; // last frame this entity was
+	//  found in an active leaf
+
+	int dlightframe; // dynamic lighting
+	int dlightbits;
+
+	// FIXME: could turn these into a union
+	struct mnode_s* topnode; // for bmodels, first world node
+	//  that splits bmodel, or NULL if
+	//  not split
+
+	byte   eflags;		 // spike -- mostly a mirror of netstate, but handles tag inheritance (eww!)
+	byte   alpha;		 // johnfitz -- alpha
+	byte   lerpflags;	 // johnfitz -- lerping
+	float  lerpstart;	 // johnfitz -- animation lerping
+	float  lerptime;	 // johnfitz -- animation lerping
+	float  lerpfinish;	 // johnfitz -- lerping -- server sent us a more accurate interval, use it instead of 0.1
+	short  previouspose; // johnfitz -- animation lerping
+	short  currentpose;	 // johnfitz -- animation lerping
+	//	short					futurepose;		//johnfitz -- animation lerping
+	float  movelerpstart;  // johnfitz -- transform lerping
+	vec3_t previousorigin; // johnfitz -- transform lerping
+	vec3_t currentorigin;  // johnfitz -- transform lerping
+	vec3_t previousangles; // johnfitz -- transform lerping
+	vec3_t currentangles;  // johnfitz -- transform lerping
+
+	float scale; // rbQuake -- scale factor for model
+
+#ifdef PSET_SCRIPT
+	struct trailstate_s* trailstate; // spike -- managed by the particle system, so we don't loose our position and spawn the wrong number of particles, and we
+	// can track beams etc
+	struct trailstate_s* emitstate;	 // spike -- for effects which are not so static.
+#endif
+	float  traildelay; // time left until next particle trail update
+	vec3_t trailorg;   // previous particle trail point
+
+	lightcache_t lightcache; // alias light trace cache
+
+	int	   contentscache;
+	vec3_t contentscache_origin;
+} entity_t;
+
+typedef struct
+{
+	char  name[MAX_SCOREBOARDNAME];
+	float entertime;
+	int	  frags;
+	int	  colors; // two 4 bit fields
+	int	  ping;
+	byte  translations[VID_GRADES * 256];
+
+	char userinfo[8192];
+} scoreboard_t;
+
+//FIXME: NONE OF THIS IS GOING TO BE HARDCODED IN THE FUTURE
+class client_state_t
+{
+public:
+	int		  movemessages;		 // since connecting to this server
+	// throw out the first couple, so the player
+	// doesn't accidentally do something the
+	// first frame
+	int		  ackedmovemessages; // echo of movemessages from the server.
+	usercmd_t movecmds[64];		 // ringbuffer of previous movement commands (journal for prediction)
+#define MOVECMDS_MASK (countof (cl.movecmds) - 1)
+	usercmd_t pendingcmd; // accumulated state from mice+joysticks.
+
+	// information for local display
+	int	  stats[MAX_CL_STATS]; // health, etc
+	float statsf[MAX_CL_STATS];
+	char* statss[MAX_CL_STATS];
+	int	  items;			// inventory bit flags
+	float item_gettime[32]; // cl.time of aquiring item, for blinking
+	float faceanimtime;		// use anim frame if cl.time < this
+
+	float v_dmg_time, v_dmg_roll, v_dmg_pitch;
+
+	cshift_t cshift_empty;				// can be modified by V_cshift_f ()
+	cshift_t cshifts[NUM_CSHIFTS];		// color shifts for damage, powerups
+	cshift_t prev_cshifts[NUM_CSHIFTS]; // and content types
+
+	// the client maintains its own idea of view angles, which are
+	// sent to the server each frame.  The server sets punchangle when
+	// the view is temporarliy offset, and an angle reset commands at the start
+	// of each level and after teleporting.
+	vec3_t mviewangles[2]; // during demo playback viewangles is lerped
+	// between these
+	vec3_t viewangles;
+
+	vec3_t mvelocity[2]; // update by server, used for lean+bob
+	// (0 is newest)
+	vec3_t velocity;	 // lerped between mvelocity[0] and [1]
+
+	vec3_t punchangle; // temporary offset
+
+	// pitch drifting vars
+	float	 idealpitch;
+	float	 pitchvel;
+	bool nodrift;
+	float	 driftmove;
+	double	 laststop;
+
+	float viewheight;
+	float crouch; // local amount for smoothing stepups
+
+	bool paused; // send over by server
+	bool onground;
+	bool inwater;
+	double	 fixangle_time; // timestamp of last svc_setangle message
+
+	int intermission;	// don't change view angle, full screen, etc
+	int completed_time; // latched at intermission start
+
+	double mtime[2]; // the timestamp of last two messages
+	double time;	 // clients view of time, should be between
+	// servertime and oldservertime to generate
+	// a lerp point for other data
+	double oldtime;	 // previous cl.time, time-oldtime is used
+	// to decay light values and smooth step ups
+
+	float last_received_message; // (realtime) for net trouble icon
+
+	//
+	// information that is static for the entire time connected to a server
+	//
+	struct qmodel_s* model_precache[MAX_MODELS];
+	struct sfx_s* sound_precache[MAX_SOUNDS];
+
+	char mapname[128];
+	char levelname[128]; // for display on solo scoreboard //johnfitz -- was 40.
+	int	 viewentity;	 // cl_entitites[cl.viewentity] = player
+	int	 maxclients;
+	int	 gametype;
+
+	// refresh related state
+	struct qmodel_s* worldmodel; // cl_entitites[0].model
+	struct octree_t* octree;
+	struct efrag_s* free_efrags;
+	int				 num_efrags;
+	struct efrag_s** efrag_allocs;
+	int				 num_efragallocs;
+	entity_t		 viewent; // the gun model
+
+	entity_t* entities; // spike -- moved into here
+	int		  max_edicts;
+	int		  num_entities;
+
+	entity_t** static_entities; // spike -- was static
+	int		   max_static_entities;
+	int		   num_statics;
+
+	int cdtrack, looptrack; // cd audio
+
+	// frag scoreboard
+	scoreboard_t* scores; // [cl.maxclients]
+
+	unsigned protocol; // johnfitz
+	unsigned protocolflags;
+	unsigned protocol_pext1; // spike -- flag of fte protocol extensions
+	unsigned protocol_pext2; // spike -- flag of fte protocol extensions
+
+#ifdef PSET_SCRIPT
+	qboolean protocol_particles;
+	struct
+	{
+		const char* name;
+		int			index;
+	} particle_precache[MAX_PARTICLETYPES];
+	struct
+	{
+		const char* name;
+		int			index;
+	} local_particle_precache[MAX_PARTICLETYPES];
+#endif
+	int			 ackframes[8]; // big enough to cover burst
+	unsigned int ackframes_count;
+	bool	 requestresend;
+	bool	 sendprespawn;
+
+	//qcvm_t qcvm; // for csqc. //TODO: GET THIS SHIT OUT
+
+	float zoom;
+	float zoomdir;
+
+	char serverinfo[8192]; // \key\value infostring data.
+} ;
