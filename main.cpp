@@ -697,7 +697,7 @@ public:
 					if ((engine->net->time - s->lastSendTime) > 1.0)
 						ReSendMessage(s);
 
-				if (engine->net->time - s->lastMessageTime > ((!s->ackSequence) ? net_connecttimeout.value : engine->net->messagetimeout.value))
+				if (engine->net->time - s->lastMessageTime > ((!s->ackSequence) ? engine->net->connecttimeout.value : engine->net->messagetimeout.value))
 				{ // timed out, kick them
 					// FIXME: add a proper challenge rather than assuming spoofers won't fake acks
 					int i;
@@ -705,8 +705,8 @@ public:
 					{
 						if (engine->svs.clients[i].netconnection == s)
 						{
-							host_client = &engine->svs.clients[i];
-							SV_DropClient(false);
+							engine->host->client = &engine->svs.clients[i];
+							engine->server->DropClient(false);
 							break;
 						}
 					}
@@ -960,10 +960,9 @@ public:
 		static int			testDriver;
 		static sys_socket_t testSocket;
 
-		void			 Test_Poll(void*);
-		static PollProcedure testPollProcedure = { NULL, 0.0, Test_Poll };
+		PollProcedure testPollProcedure = { NULL, 0.0, Test_Poll };
 
-		void Test_Poll(void* unused)
+		static void Test_Poll(void* unused, Engine* engine)
 		{
 			struct qsockaddr clientaddr;
 			int				 control;
@@ -1079,9 +1078,9 @@ public:
 			{
 				engine->sz->Clear(&engine->net->message);
 				// save space for the header, filled in later
-				MSG_WriteLong(&engine->net->message, 0);
-				MSG_WriteByte(&engine->net->message, CCREQ_PLAYER_INFO);
-				MSG_WriteByte(&engine->net->message, n);
+				engine->msg->WriteLong(&engine->net->message, 0);
+				engine->msg->WriteByte(&engine->net->message, CCREQ_PLAYER_INFO);
+				engine->msg->WriteByte(&engine->net->message, n);
 				*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 				dfunc.Write(testSocket, engine->net->message.data, engine->net->message.cursize, &sendaddr);
 			}
@@ -1089,12 +1088,12 @@ public:
 			SchedulePollProcedure(&testPollProcedure, 0.1);
 		}
 
-		static bool		test2InProgress = false;
+		bool		test2InProgress = false;
 		static int			test2Driver;
 		static sys_socket_t test2Socket;
 
-		void			 Test2_Poll(void*);
-		static PollProcedure test2PollProcedure = { NULL, 0.0, Test2_Poll };
+		static void			 Test2_Poll(void*);
+		PollProcedure test2PollProcedure = { NULL, 0.0, Test2_Poll };
 
 		void Test2_Poll(void* unused)
 		{
@@ -1479,7 +1478,7 @@ public:
 			command = MSG_ReadByte();
 			if (command == CCREQ_SERVER_INFO)
 			{
-				if (strcmp(MSG_ReadString(), "QUAKE") != 0)
+				if (strcmp(MSG_ReadString(), "TREMOR") != 0)
 					return;
 
 				engine->sz->Clear(&engine->net->message);
@@ -1605,7 +1604,7 @@ public:
 			if (command != CCREQ_CONNECT)
 				return;
 
-			if (strcmp(MSG_ReadString(), "QUAKE") != 0)
+			if (strcmp(MSG_ReadString(), "TREMOR") != 0)
 				return;
 
 			if (MSG_ReadByte() != NET_PROTOCOL_VERSION)
@@ -1830,7 +1829,7 @@ public:
 				// save space for the header, filled in later
 				MSG_WriteLong(&engine->net->message, 0);
 				MSG_WriteByte(&engine->net->message, CCREQ_SERVER_INFO);
-				MSG_WriteString(&engine->net->message, "QUAKE");
+				MSG_WriteString(&engine->net->message, "TREMOR");
 				MSG_WriteByte(&engine->net->message, NET_PROTOCOL_VERSION);
 				*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 			}
@@ -1907,7 +1906,7 @@ public:
 			*out = 0;
 		}
 
-		static bool _Datagram_SearchForHosts(bool xmit)
+		static bool _Datagram_SearchForHosts(bool xmit, Engine* engine)
 		{
 			int				 ret;
 			size_t			 n;
@@ -1927,7 +1926,7 @@ public:
 				// save space for the header, filled in later
 				MSG_WriteLong(&engine->net->message, 0);
 				MSG_WriteByte(&engine->net->message, CCREQ_SERVER_INFO);
-				MSG_WriteString(&engine->net->message, "QUAKE");
+				MSG_WriteString(&engine->net->message, "TREMOR");
 				MSG_WriteByte(&engine->net->message, NET_PROTOCOL_VERSION);
 				*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 				dfunc.Broadcast(dfunc.controlSock, engine->net->message.data, engine->net->message.cursize);
@@ -2206,12 +2205,12 @@ public:
 				if (hostCacheCount == HOSTCACHESIZE)
 					break;
 				if (net_landrivers[engine->net->landriverlevel].initialized)
-					ret |= _Datagram_SearchForHosts(xmit);
+					ret |= _Datagram_SearchForHosts(xmit, engine);
 			}
 			return ret;
 		}
 
-		static qsocket_t* _Datagram_Connect(struct qsockaddr* serveraddr)
+		static qsocket_t* _Datagram_Connect(struct qsockaddr* serveraddr, Engine* engine)
 		{
 			struct qsockaddr readaddr;
 			qsocket_t* sock;
@@ -2226,7 +2225,7 @@ public:
 			if (newsock == INVALID_SOCKET)
 				return NULL;
 
-			sock = NET_NewQSocket();
+			sock = engine->net->NewQSocket();
 			if (sock == NULL)
 				goto ErrorReturn2;
 			sock->socket = newsock;
@@ -2240,7 +2239,7 @@ public:
 
 			// send the connection request
 			SDL_Log("trying...\n");
-			SCR_UpdateScreen(false);
+			//SCR_UpdateScreen(false);
 			start_time = engine->net->time;
 
 			for (reps = 0; reps < 3; reps++)
@@ -2249,7 +2248,7 @@ public:
 				// save space for the header, filled in later
 				MSG_WriteLong(&engine->net->message, 0);
 				MSG_WriteByte(&engine->net->message, CCREQ_CONNECT);
-				MSG_WriteString(&engine->net->message, "QUAKE");
+				MSG_WriteString(&engine->net->message, "TREMOR");
 				MSG_WriteByte(&engine->net->message, NET_PROTOCOL_VERSION);
 				if (sock->proquake_angle_hack)
 				{ /*Spike -- proquake compat. if both engines claim to be using mod==1 then 16bit client->server angles can be used. server->client angles remain
@@ -2504,12 +2503,12 @@ public:
 			int result = 0;
 			for (engine->net->landriverlevel = 0; engine->net->landriverlevel < engine->net->numlandrivers; engine->net->landriverlevel++)
 			{
-				if (!net_landrivers[engine->net->landriverlevel].initialized)
+				if (!engine->net->landrivers[engine->net->landriverlevel].initialized)
 					continue;
 				if (result == maxaddresses)
 					break;
-				if (net_landrivers[engine->net->landriverlevel].QueryAddresses)
-					result += net_landrivers[engine->net->landriverlevel].QueryAddresses(addresses + result, maxaddresses - result);
+				if (engine->net->landrivers[engine->net->landriverlevel].QueryAddresses)
+					result += engine->net->landrivers[engine->net->landriverlevel].QueryAddresses(addresses + result, maxaddresses - result);
 			}
 			return result;
 		}
@@ -3024,7 +3023,7 @@ public:
 			}
 
 			if (!result)
-				q_strlcpy(addresses[result++], my_ipv4_address, sizeof(addresses[0]));
+				q_strlcpy(addresses[result++], engine->net->my_ipv4_address, sizeof(addresses[0]));
 			return result;
 		}
 		int WINIPv6_GetAddresses(qhostaddr_t* addresses, int maxaddresses)
@@ -6980,7 +6979,7 @@ public:
 			//PR_SwitchQCVM(&sv.qcvm);
 			for (i = 0, client = engine->svs.clients; i < engine->svs.maxclients; i++, client++)
 				if (client->active)
-					SV_DropClient(crash);
+					engine->server->DropClient(crash);
 
 			//qcvm->worldmodel = NULL;
 			//PR_SwitchQCVM(NULL);
@@ -7020,18 +7019,18 @@ public:
 			}*/
 
 			if (engine->sv.active)
-				Host_ShutdownServer(false);
+				engine->host->ShutdownServer(false);
 
 			if (engine->cl->s->state == ca_dedicated)
 				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Host_Error: %s\n", string); // dedicated servers exit
 
-			CL_Disconnect();
+			engine->cl->Disconnect();
 			engine->cl->s->demonum = -1;
 			engine->cl->state->intermission = 0; // johnfitz -- for errors during intermissions (changelevel with no map found, etc.)
 
 			inerror = false;
 
-			longjmp(host_abortserver, 1);
+			longjmp(engine->host->abortserver, 1);
 		}
 
 		bool FilterTime(float time)
@@ -7176,6 +7175,71 @@ public:
 			engine = e;
 			engine->server = this;
 		}
+		void DropClient(bool crash)
+		{
+			int		  saveSelf;
+			int		  i;
+			client_t* client;
+
+			if (!crash)
+			{
+				// send any final messages (don't check for errors)
+				if (engine->net->CanSendMessage(engine->host->client->netconnection))
+				{
+					engine->msg->WriteByte(&engine->host->client->message, svc_disconnect);
+					engine->net->NET_SendMessage(engine->host->client->netconnection, &engine->host->client->message);
+				}
+
+				if (engine->host->client->edict && engine->host->client->spawned)
+				{
+					// call the prog function for removing a client
+					// this will set the body to a dead frame, among other things
+					//qcvm_t* oldvm = qcvm;
+					//PR_SwitchQCVM(NULL);
+					//PR_SwitchQCVM(&sv.qcvm);
+					//saveSelf = pr_global_struct->self;
+					//pr_global_struct->self = EDICT_TO_PROG(host_client->edict);
+					//PR_ExecuteProgram(pr_global_struct->ClientDisconnect);
+					//pr_global_struct->self = saveSelf;
+					//PR_SwitchQCVM(NULL);
+					//PR_SwitchQCVM(oldvm);
+				}
+
+				SDL_Log("Client %s removed\n", engine->host->client->name);
+			}
+
+			// break the net connection
+			engine->net->Close(engine->host->client->netconnection);
+			engine->host->client->netconnection = NULL;
+
+			//SVFTE_DestroyFrames(engine->host->client); // release any delta state
+
+			// free the client (the body stays around)
+			engine->host->client->active = false;
+			engine->host->client->name[0] = 0;
+			engine->host->client->old_frags = -999999;
+			engine->net->activeconnections--;
+
+			// send notification to all clients
+			for (i = 0, client = engine->svs.clients; i < engine->svs.maxclients; i++, client++)
+			{
+				if (!client->knowntoqc)
+					continue;
+
+				engine->msg->WriteByte(&client->message, svc_updatename);
+				engine->msg->WriteByte(&client->message, host_client - svs.clients);
+				engine->msg->WriteString(&client->message, "");
+				engine->msg->WriteByte(&client->message, svc_updatecolors);
+				engine->msg->WriteByte(&client->message, host_client - svs.clients);
+				engine->msg->WriteByte(&client->message, 0);
+
+				engine->msg->WriteByte(&client->message, svc_updatefrags);
+				engine->msg->WriteByte(&client->message, host_client - svs.clients);
+				engine->msg->WriteShort(&client->message, 0);
+			}
+		}
+
+
 	};
 	class NET {
 	public:
@@ -7186,8 +7250,8 @@ public:
 
 		int landriverlevel;
 
-		cvar_t net_messagetimeout = { "net_messagetimeout", "300", CVAR_NONE };
-		cvar_t net_connecttimeout = { "net_connecttimeout", "10", CVAR_NONE }; // this might be a little brief, but we don't have a way to protect against smurf attacks.
+		cvar_t messagetimeout = { "net_messagetimeout", "300", CVAR_NONE };
+		cvar_t connecttimeout = { "net_connecttimeout", "10", CVAR_NONE }; // this might be a little brief, but we don't have a way to protect against smurf attacks.
 		cvar_t hostname = { "hostname", "UNNAMED", CVAR_SERVERINFO };
 
 
@@ -7299,8 +7363,8 @@ public:
 		static double	  slistActiveTime;
 		static int		  slistLastShown;
 
-		static void			 Slist_Send(void*);
-		static void			 Slist_Poll(void*);
+		static void			 Slist_Send(void*,Engine* engine);
+		static void			 Slist_Poll(void*,Engine* engine);
 		PollProcedure slistSendProcedure = { NULL, 0.0, Slist_Send };
 		PollProcedure slistPollProcedure = { NULL, 0.0, Slist_Poll };
 
@@ -7312,8 +7376,8 @@ public:
 		int unreliableMessagesSent = 0;
 		int unreliableMessagesReceived = 0;
 
-		cvar_t engine->net->messagetimeout = { "engine->net->messagetimeout", "300", CVAR_NONE };
-		cvar_t net_connecttimeout = { "net_connecttimeout", "10", CVAR_NONE }; // this might be a little brief, but we don't have a way to protect against smurf attacks.
+		cvar_t messagetimeout = { "engine->net->messagetimeout", "300", CVAR_NONE };
+		cvar_t connecttimeout = { "net_connecttimeout", "10", CVAR_NONE }; // this might be a little brief, but we don't have a way to protect against smurf attacks.
 		cvar_t hostname = { "hostname", "UNNAMED", CVAR_SERVERINFO };
 
 		int		driverlevel;
@@ -7482,6 +7546,40 @@ public:
 			engine = e;
 			engine->msg = this;
 		}
+
+		void WriteLong(sizebuf_t* sb, int c)
+		{
+			byte* buf;
+
+			buf = (byte*)engine->sz->GetSpace(sb, 4);
+			buf[0] = c & 0xff;
+			buf[1] = (c >> 8) & 0xff;
+			buf[2] = (c >> 16) & 0xff;
+			buf[3] = c >> 24;
+		}
+
+		void WriteString(sizebuf_t* sb, const char* s)
+		{
+			if (!s)
+				engine->sz->Write(sb, "", 1);
+			else
+				engine->sz->Write(sb, s, strlen(s) + 1);
+		}
+
+		void WriteShort(sizebuf_t* sb, int c)
+		{
+			byte* buf;
+
+#ifdef PARANOID
+			if (c < ((short)0x8000) || c >(short)0x7fff)
+				Sys_Error("MSG_WriteShort: range error");
+#endif
+
+			buf = (byte*)engine->sz->GetSpace(sb, 2);
+			buf[0] = c & 0xff;
+			buf[1] = c >> 8;
+		}
+
 
 		void WriteByte(sizebuf_t* sb, int c)
 		{

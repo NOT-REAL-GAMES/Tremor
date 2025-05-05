@@ -3005,7 +3005,7 @@ typedef struct _PollProcedure
 {
 	struct _PollProcedure* next;
 	double				   nextTime;
-	void (*procedure) (void*);
+	void (*procedure) (void*, Engine* engine);
 	void* arg;
 } PollProcedure;
 
@@ -3281,20 +3281,20 @@ typedef struct
 {
 	const char* name;
 	bool	initialized;
-	int (*Init) (Engine engine);
-	void (*Listen) (bool state, Engine engine);
-	int (*QueryAddresses) (qhostaddr_t* addresses, int maxaddresses, Engine engine);
-	bool(*SearchForHosts) (bool xmit, Engine engine);
-	qsocket_t* (*Connect) (const char* host, Engine engine);
-	qsocket_t* (*CheckNewConnections) (Engine engine);
-	qsocket_t* (*QGetAnyMessage) (Engine engine);
-	int (*QGetMessage) (qsocket_t* sock, Engine engine);
-	int (*QSendMessage) (qsocket_t* sock, sizebuf_t* data, Engine engine);
-	int (*SendUnreliableMessage) (qsocket_t* sock, sizebuf_t* data, Engine engine);
-	bool(*CanSendMessage) (qsocket_t* sock, Engine engine);
-	bool(*CanSendUnreliableMessage) (qsocket_t* sock, Engine engine);
-	void (*Close) (qsocket_t* sock, Engine engine);
-	void (*Shutdown) (Engine engine);
+	int (*Init) (Engine* engine);
+	void (*Listen) (bool state, Engine* engine);
+	int (*QueryAddresses) (qhostaddr_t* addresses, int maxaddresses, Engine* engine);
+	bool(*SearchForHosts) (bool xmit, Engine* engine);
+	qsocket_t* (*Connect) (const char* host, Engine* engine);
+	qsocket_t* (*CheckNewConnections) (Engine* engine);
+	qsocket_t* (*QGetAnyMessage) (Engine* engine);
+	int (*QGetMessage) (qsocket_t* sock, Engine* engine);
+	int (*QSendMessage) (qsocket_t* sock, sizebuf_t* data, Engine* engine);
+	int (*SendUnreliableMessage) (qsocket_t* sock, sizebuf_t* data, Engine* engine);
+	bool(*CanSendMessage) (qsocket_t* sock, Engine* engine);
+	bool(*CanSendUnreliableMessage) (qsocket_t* sock, Engine* engine);
+	void (*Close) (qsocket_t* sock, Engine* engine);
+	void (*Shutdown) (Engine* engine);
 } net_driver_t;
 
 typedef struct net_landriver_s
@@ -3389,3 +3389,19 @@ int q_snprintf(char* str, size_t size, const char* format, ...)
 
 	return ret;
 }
+
+#define CCREQ_CONNECT	  0x01
+#define CCREQ_SERVER_INFO 0x02
+#define CCREQ_PLAYER_INFO 0x03
+#define CCREQ_RULE_INFO	  0x04
+#define CCREQ_RCON		  0x05
+
+#define CCREP_ACCEPT	  0x81
+#define CCREP_REJECT	  0x82
+#define CCREP_SERVER_INFO 0x83
+#define CCREP_PLAYER_INFO 0x84
+#define CCREP_RULE_INFO	  0x85
+#define CCREP_RCON		  0x86
+
+int net_hostport;
+int DEFAULTnet_hostport = 26000;
