@@ -3,6 +3,14 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+#include <windows.h>
+#include <mmsystem.h>
+
+#include <sys/types.h>
+#include <errno.h>
+#include <io.h>
+#include <direct.h>
+
 #include <algorithm>
 #include <future>
 #include <iostream>
@@ -13,10 +21,14 @@
 
 #include <random>
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
 #include <vulkan/vulkan.hpp>
-using namespace std;
+
+#define GAMENAME "tremor" // directory to look in by default
 
 #define MAX_MAPSTRING 2048
 #define MAX_DEMOS	  8
@@ -34,6 +46,10 @@ using namespace std;
 #define MAX_MODELS		  8192 // johnfitz -- was 256
 #define MAX_SOUNDS		  2048 // johnfitz -- was 256
 #define MAX_PARTICLETYPES 2048
+#define MAX_LIGHTSTYLES	  64
+
+#define MAX_MSGLEN	 64000 // max length of a reliable message //ericw -- was 32000
+#define MAX_DATAGRAM 64000 // max length of unreliable message //johnfitz -- was 1024
 
 #define MAX_QPATH 2048
 
@@ -88,6 +104,7 @@ using namespace std;
 
 #define TEXTURE_HEAP_MEMORY_SIZE_MB 1024
 #define TEXTURE_HEAP_PAGE_SIZE		16384
+
 
 #define ANNOTATE_HAPPENS_BEFORE(x) \
 	do                             \
@@ -439,8 +456,9 @@ typedef struct
 
 #ifdef byte
 #undef byte;
-typedef unsigned char byte;
 #endif // byte
+
+typedef unsigned char byte;
 
 
 
@@ -1084,6 +1102,10 @@ typedef struct vulkanglobals_s
 #endif
 } vulkanglobals_t;
 
+static HANDLE hinput, houtput;
+static char	  cwd[1024];
+static double counter_freq;
+
 enum
 {
 	DRIVER_ID_AMD_PROPRIETARY = 1,
@@ -1109,6 +1131,22 @@ enum
 	DRIVER_ID_SAMSUNG_PROPRIETARY = 21,
 	DRIVER_ID_MESA_VENUS = 22,
 };
+
+int q_vsnprintf(char* str, size_t size, const char* format, va_list args)
+{
+	int ret;
+
+	ret = _vsnprintf_s(str, size, size, format, args);
+
+	if (ret < 0)
+		ret = (int)size;
+	if (size == 0) /* no buffer */
+		return ret;
+	if ((size_t)ret >= size)
+		str[size - 1] = '\0';
+
+	return ret;
+}
 
 vulkanglobals_t vulkan_globals;
 
@@ -2629,7 +2667,7 @@ public:
 	unsigned protocol_pext2; // spike -- flag of fte protocol extensions
 
 #ifdef PSET_SCRIPT
-	qboolean protocol_particles;
+	bool protocol_particles;
 	struct
 	{
 		const char* name;
@@ -2653,3 +2691,680 @@ public:
 
 	char serverinfo[8192]; // \key\value infostring data.
 } ;
+
+typedef enum
+{
+	ss_loading,
+	ss_active
+} server_state_t;
+
+typedef unsigned int func_t;
+typedef int			 string_t;
+
+#define Q_ALIGN(a) __declspec (align (a))
+
+typedef Q_ALIGN(4) int64_t qcsint64_t;
+typedef Q_ALIGN(4) uint64_t qcuint64_t;
+typedef Q_ALIGN(4) double qcdouble_t;
+
+typedef union eval_s
+{
+	string_t   string;
+	float	   _float;
+	float	   vector[3];
+	func_t	   function;
+	int32_t	   _int;
+	uint32_t   _uint32;
+	qcsint64_t _sint64;
+	qcuint64_t _uint64;
+	qcdouble_t _double;
+	int		   edict;
+} eval_t;
+
+
+typedef struct
+{
+	bool active; // false if only a net client
+
+	bool paused;
+	bool loadgame;	 // handle connections specially
+	bool nomonsters; // server started with 'nomonsters' cvar active
+
+	char lastsave[128];
+
+	int	   lastcheck; // used by PF_checkclient
+	double lastchecktime;
+
+	//qcvm_t qcvm; // Spike: entire qcvm state
+
+	char			 name[64];					 // map name
+	char			 modelname[64];				 // maps/<name>.bsp, for model_precache[0]
+	const char* model_precache[MAX_MODELS]; // NULL terminated
+	struct qmodel_s* models[MAX_MODELS];
+	const char* sound_precache[MAX_SOUNDS]; // NULL terminated
+	const char* lightstyles[MAX_LIGHTSTYLES];
+	server_state_t	 state; // some actions are only valid during load
+
+	sizebuf_t datagram;
+	byte	  datagram_buf[MAX_DATAGRAM];
+
+	sizebuf_t reliable_datagram; // copied to all clients at end of frame
+	byte	  reliable_datagram_buf[MAX_DATAGRAM];
+
+	sizebuf_t signon;
+	byte	  signon_buf[MAX_MSGLEN - 2]; // johnfitz -- was 8192, now uses MAX_MSGLEN
+
+	unsigned protocol; // johnfitz
+	unsigned protocolflags;
+
+	sizebuf_t multicast; // selectively copied to clients by the multicast builtin
+	byte	  multicast_buf[MAX_DATAGRAM];
+
+	const char* particle_precache[MAX_PARTICLETYPES]; // NULL terminated
+
+	entity_state_t* static_entities;
+	int				num_statics;
+	int				max_statics;
+
+	struct ambientsound_s
+	{
+		vec3_t		 origin;
+		unsigned int soundindex;
+		float		 volume;
+		float		 attenuation;
+	}  *ambientsounds;
+	int num_ambients;
+	int max_ambients;
+
+	struct svcustomstat_s
+	{
+		int		idx;
+		int		type;
+		int		fld;
+		eval_t* ptr;
+	} customstats[MAX_CL_STATS * 2]; // strings or numeric...
+	size_t numcustomstats;
+
+	int effectsmask; // only enable colored quad/penta dlights in 2021 release
+} server_t;
+
+#define NUM_PING_TIMES		  16
+#define NUM_BASIC_SPAWN_PARMS 16
+#define NUM_TOTAL_SPAWN_PARMS 64
+
+//TODO: replace with octree implementation
+typedef struct link_s
+{
+	struct link_s* prev, * next;
+} link_t;
+
+#define MAX_ENT_LEAFS 32
+
+typedef struct edict_s
+{
+	link_t area; /* linked to a division node or leaf */
+
+	unsigned int num_leafs;
+	int			 leafnums[MAX_ENT_LEAFS];
+
+	entity_state_t baseline;
+	unsigned char  alpha;		 /* johnfitz -- hack to support alpha since it's not part of entvars_t */
+	bool	   sendinterval; /* johnfitz -- send time until nextthink to client for better lerp timing */
+	float		   oldframe;
+	float		   oldthinktime;
+	vec3_t		   predthinkpos; /* expected edict origin once its nextthink arrives (sv_smoothplatformlerps) */
+	float		   lastthink;	 /* time when predthinkpos was updated, or 0 if not valid (sv_smoothplatformlerps) */
+
+	float	 freetime; /* sv.time when the object was freed */
+	bool free;
+
+	//entvars_t v; /* C exported fields from progs */
+
+	/* other fields from progs come immediately after */
+} edict_t;
+
+typedef struct client_s
+{
+	bool active;   // false = client is free
+	bool spawned;  // false = don't send datagrams (set when client acked the first entities)
+	bool dropasap; // has been told to go to another level
+	enum
+	{
+		PRESPAWN_DONE,
+		PRESPAWN_FLUSH = 1,
+		//		PRESPAWN_SERVERINFO,
+		PRESPAWN_MODELS,
+		PRESPAWN_SOUNDS,
+		PRESPAWN_PARTICLES,
+		PRESPAWN_BASELINES,
+		PRESPAWN_STATICS,
+		PRESPAWN_AMBIENTS,
+		PRESPAWN_SIGNONMSG,
+	} sendsignon; // only valid before spawned
+	int			 signonidx;
+	unsigned int signon_sounds; //
+	unsigned int signon_models; //
+
+	double last_message; // reliable messages must be sent
+	// periodically
+
+	struct qsocket_s* netconnection; // communications handle
+
+	usercmd_t cmd;	   // movement
+	vec3_t	  wishdir; // intended motion calced from cmd
+
+	sizebuf_t message; // can be added to at any time,
+	// copied and clear once per frame
+	byte	  msgbuf[MAX_MSGLEN];
+	edict_t* edict;	// EDICT_NUM(clientnum+1)
+	char	  name[32]; // for printing to other people
+	int		  colors;
+
+	float ping_times[NUM_PING_TIMES];
+	int	  num_pings; // ping_times[num_pings%NUM_PING_TIMES]
+
+	// spawn parms are carried from level to level
+	float spawn_parms[NUM_TOTAL_SPAWN_PARMS];
+
+	// client known data for deltas
+	int old_frags;
+
+	sizebuf_t datagram;
+	byte	  datagram_buf[MAX_DATAGRAM];
+
+	unsigned int limit_entities;   // vanilla is 600
+	unsigned int limit_unreliable; // max allowed size for unreliables
+	unsigned int limit_reliable;   // max (total) size of a reliable message.
+	unsigned int limit_models;	   //
+	unsigned int limit_sounds;	   //
+	bool	 pextknown;
+	unsigned int protocol_pext1;
+	unsigned int protocol_pext2;
+	unsigned int resendstatsnum[MAX_CL_STATS / 32]; // the stats which need to be resent.
+	unsigned int resendstatsstr[MAX_CL_STATS / 32]; // the stats which need to be resent.
+	int			 oldstats_i[MAX_CL_STATS];			// previous values of stats. if these differ from the current values, reflag resendstats.
+	float		 oldstats_f[MAX_CL_STATS];			// previous values of stats. if these differ from the current values, reflag resendstats.
+	char* oldstats_s[MAX_CL_STATS];
+	struct entity_num_state_s
+	{
+		unsigned int   num; // ascending order, there can be gaps.
+		entity_state_t state;
+	}			 *previousentities;
+	size_t		  numpreviousentities;
+	size_t		  maxpreviousentities;
+	unsigned int  snapshotresume;
+	unsigned int* pendingentities_bits; // UF_ flags for each entity
+	size_t		  numpendingentities;	// realloc if too small
+#define SENDFLAG_PRESENT 0x80000000u	// tracks that we previously sent one of these ents (resulting in a remove if the ent gets remove()d).
+#define SENDFLAG_REMOVE	 0x40000000u	// for packetloss to signal that we need to resend a remove.
+#define SENDFLAG_USABLE	 0x00ffffffu	// SendFlags bits that the qc is actually able to use (don't get confused if the mod uses SendFlags=-1).
+	struct deltaframe_s
+	{ // quick overview of how this stuff actually works:
+		// when the server notices a gap in the ack sequence, we walk through the dropped frames and reflag everything that was dropped.
+		// if the server isn't tracking enough frames, then we just treat those as dropped;
+		// small note: when an entity is new, it re-flags itself as new for the next packet too, this reduces the immediate impact of packetloss on new
+		// entities. reflagged state includes stats updates, entity updates, and entity removes.
+		int			 sequence; // to see if its stale
+		float		 timestamp;
+		unsigned int resendstatsnum[MAX_CL_STATS / 32];
+		unsigned int resendstatsstr[MAX_CL_STATS / 32];
+		struct
+		{
+			unsigned int num;
+			unsigned int ebits;
+			unsigned int csqcbits;
+		}  *ents;
+		int numents; // doesn't contain an entry for every entity, just ones that were sent this frame. no 0 bits
+		int maxents;
+	}		*frames;
+	size_t	 numframes; // preallocated power-of-two
+	int		 lastacksequence;
+	int		 lastmovemessage;
+	double	 lastmovetime;
+	bool knowntoqc; // putclientinserver was called
+} client_t;
+
+typedef struct
+{
+	int				 maxclients;
+	int				 maxclientslimit;
+	struct client_s* clients;			 // [maxclients]
+	int				 serverflags;		 // episode completion information
+	bool		 changelevel_issued; // cleared when at SV_SpawnServer
+} server_static_t;
+
+typedef SOCKET sys_socket_t;
+#define NET_MAXMESSAGE 64000 /* ericw -- was 32000 */
+#define NET_NAMELEN 64
+#define NET_LOOPBACKBUFFERS	   5
+#define NET_LOOPBACKHEADERSIZE 4
+
+struct qsockaddr
+{
+	short qsa_family;
+	unsigned char qsa_data[62];
+};
+
+
+typedef struct qsocket_s
+{
+	struct qsocket_s* next;
+	double			  connecttime;
+	double			  lastMessageTime;
+	double			  lastSendTime;
+
+	bool isvirtual; // qsocket is emulated by the network layer (closing will not close any system sockets).
+	bool disconnected;
+	bool canSend;
+	bool sendNext;
+
+	int			 driver;
+	int			 landriver;
+	sys_socket_t socket;
+	void* driverdata;
+
+	unsigned int ackSequence;
+	unsigned int sendSequence;
+	unsigned int unreliableSendSequence;
+	int			 sendMessageLength;
+	byte		 sendMessage[NET_MAXMESSAGE];
+
+	unsigned int receiveSequence;
+	unsigned int unreliableReceiveSequence;
+	int			 receiveMessageLength;
+	byte		 receiveMessage[NET_MAXMESSAGE * NET_LOOPBACKBUFFERS + NET_LOOPBACKHEADERSIZE];
+
+	struct qsockaddr addr;
+	char			 trueaddress[NET_NAMELEN];	 // lazy address string
+	char			 maskedaddress[NET_NAMELEN]; // addresses for this player that may be displayed publically
+
+	bool proquake_angle_hack;  // 1 if we're trying, 2 if the server acked.
+	int		 max_datagram;		   // 32000 for local, 1442 for 666, 1024 for 15. this is for reliable fragments.
+	int		 pending_max_datagram; // don't change the mtu if we're resending, as that would confuse the peer.
+} qsocket_t;
+
+typedef struct
+{
+	char			 name[64];
+	char			 map[16];
+	char			 gamedir[16];
+	char			 cname[NET_NAMELEN];
+	int				 users;
+	int				 maxusers;
+	int				 driver;
+	int				 ldriver;
+	struct qsockaddr addr;
+} hostcache_t;
+
+#define HOSTCACHESIZE 128
+
+extern enum slistScope_e { SLIST_LOOP, SLIST_LAN, SLIST_INTERNET } slist_scope;
+
+typedef struct _PollProcedure
+{
+	struct _PollProcedure* next;
+	double				   nextTime;
+	void (*procedure) (void*);
+	void* arg;
+} PollProcedure;
+
+typedef enum
+{
+	src_client,	 // came in over a net connection as a clc_stringcmd. host_client will be valid during this state.
+	src_command, // from the command buffer
+	src_server	 // from a svc_stufftext
+} cmd_source_t;
+
+#define svc_bad		   0
+#define svc_nop		   1
+#define svc_disconnect 2
+#define svc_updatestat 3 // [byte] [long]
+#define svc_version	   4 // [long] server version
+#define svc_setview	   5 // [short] entity number
+#define svc_sound	   6 // <see code>
+#define svc_time	   7 // [float] server time
+#define svc_print	   8 // [string] null terminated 
+
+#define clc_bad			0
+#define clc_nop			1
+#define clc_disconnect	2
+#define clc_move		3  // [usercmd_t]
+#define clc_stringcmd	4  // [string] message
+#define clcdp_ackframe	50 // [long] frame sequence. reused by fte replacement deltas
+
+short ShortSwap(short l)
+{
+	byte b1, b2;
+
+	b1 = l & 255;
+	b2 = (l >> 8) & 255;
+
+	return ((unsigned short)b1 << 8) + b2;
+}
+
+short ShortNoSwap(short l)
+{
+	return l;
+}
+
+int LongSwap(int l)
+{
+	byte b1, b2, b3, b4;
+
+	b1 = l & 255;
+	b2 = (l >> 8) & 255;
+	b3 = (l >> 16) & 255;
+	b4 = (l >> 24) & 255;
+
+	return ((unsigned int)b1 << 24) + ((unsigned int)b2 << 16) + ((unsigned int)b3 << 8) + b4;
+}
+
+int LongNoSwap(int l)
+{
+	return l;
+}
+
+float FloatSwap(float f)
+{
+	union
+	{
+		float f;
+		byte  b[4];
+	} dat1, dat2;
+
+	dat1.f = f;
+	dat2.b[0] = dat1.b[3];
+	dat2.b[1] = dat1.b[2];
+	dat2.b[2] = dat1.b[1];
+	dat2.b[3] = dat1.b[0];
+	return dat2.f;
+}
+
+float FloatNoSwap(float f)
+{
+	return f;
+}
+
+short (*BigShort) (short l) = ShortSwap;
+short (*LittleShort) (short l) = ShortNoSwap;
+
+int (*BigLong) (int l) = LongSwap;
+int (*LittleLong) (int l) = LongNoSwap;
+
+float (*BigFloat) (float l) = FloatSwap;
+float (*LittleFloat) (float l) = FloatNoSwap;
+
+typedef struct filelist_item_s
+{
+	char					name[32];
+	struct filelist_item_s* next;
+} filelist_item_t;
+
+void FileList_Clear(filelist_item_t** list)
+{
+	filelist_item_t* blah;
+
+	while (*list)
+	{
+		blah = (*list)->next;
+		Mem_Free(*list);
+		*list = blah;
+	}
+}
+
+#define MAX_OSPATH 20000
+
+typedef struct
+{
+	char name[MAX_QPATH];
+	int	 filepos, filelen;
+} packfile_t;
+
+typedef struct pack_s
+{
+	char		filename[MAX_OSPATH];
+	int			handle;
+	int			numfiles;
+	packfile_t* files;
+} pack_t;
+
+typedef struct searchpath_s
+{
+	unsigned int		 path_id; // identifier assigned to the game directory
+	// Note that <install_dir>/game1 and
+	// <userdir>/game1 have the same id.
+	char				 filename[MAX_OSPATH];
+	pack_t* pack;			 // only one of filename / pack will be used
+	char				 dir[MAX_QPATH]; // directory name: "id1", "rogue", etc.
+	struct searchpath_s* next;
+} searchpath_t;
+
+char			 com_gamenames[1024]; // eg: "hipnotic;quoth;warp" ... no id1
+char			 com_gamedir[MAX_OSPATH];
+char			 com_basedir[MAX_OSPATH];
+THREAD_LOCAL int file_from_pak; // ZOID: global indicating that file came from a pak
+
+size_t q_strlcpy(char* dst, const char* src, size_t siz)
+{
+	char* d = dst;
+	const char* s = src;
+	size_t		n = siz;
+
+	/* Copy as many bytes as will fit */
+	if (n != 0)
+	{
+		while (--n != 0)
+		{
+			if ((*d++ = *s++) == '\0')
+				break;
+		}
+	}
+
+	/* Not enough room in dst, add NUL and traverse rest of src */
+	if (n == 0)
+	{
+		if (siz != 0)
+			*d = '\0'; /* NUL-terminate dst */
+		while (*s++)
+			;
+	}
+
+	return (s - src - 1); /* count does not include NUL */
+}
+
+static inline int q_isascii(int c)
+{
+	return ((c & ~0x7f) == 0);
+}
+
+static inline int q_islower(int c)
+{
+	return (c >= 'a' && c <= 'z');
+}
+
+static inline int q_isupper(int c)
+{
+	return (c >= 'A' && c <= 'Z');
+}
+
+static inline int q_isalpha(int c)
+{
+	return (q_islower(c) || q_isupper(c));
+}
+
+static inline int q_isdigit(int c)
+{
+	return (c >= '0' && c <= '9');
+}
+
+static inline int q_isxdigit(int c)
+{
+	return (q_isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'));
+}
+
+static inline int q_isalnum(int c)
+{
+	return (q_isalpha(c) || q_isdigit(c));
+}
+
+static inline int q_isblank(int c)
+{
+	return (c == ' ' || c == '\t');
+}
+
+static inline int q_isspace(int c)
+{
+	switch (c)
+	{
+	case ' ':
+	case '\t':
+	case '\n':
+	case '\r':
+	case '\f':
+	case '\v':
+		return 1;
+	}
+	return 0;
+}
+
+static inline int q_isgraph(int c)
+{
+	return (c > 0x20 && c <= 0x7e);
+}
+
+static inline int q_isprint(int c)
+{
+	return (c >= 0x20 && c <= 0x7e);
+}
+
+static inline int q_toascii(int c)
+{
+	return (c & 0x7f);
+}
+
+static inline int q_tolower(int c)
+{
+	return ((q_isupper(c)) ? (c | ('a' - 'A')) : c);
+}
+
+static inline int q_toupper(int c)
+{
+	return ((q_islower(c)) ? (c & ~('a' - 'A')) : c);
+}
+
+int q_strcasecmp(const char* s1, const char* s2)
+{
+	const char* p1 = s1;
+	const char* p2 = s2;
+	char		c1, c2;
+
+	if (p1 == p2)
+		return 0;
+
+	do
+	{
+		c1 = q_tolower(*p1++);
+		c2 = q_tolower(*p2++);
+		if (c1 == '\0')
+			break;
+	} while (c1 == c2);
+
+	return (int)(c1 - c2);
+}
+
+#define IS_LOOP_DRIVER(p) ((p) == 0)
+
+typedef char qhostaddr_t[NET_NAMELEN];
+
+typedef struct
+{
+	const char* name;
+	bool	initialized;
+	int (*Init) (Engine engine);
+	void (*Listen) (bool state, Engine engine);
+	int (*QueryAddresses) (qhostaddr_t* addresses, int maxaddresses, Engine engine);
+	bool(*SearchForHosts) (bool xmit, Engine engine);
+	qsocket_t* (*Connect) (const char* host, Engine engine);
+	qsocket_t* (*CheckNewConnections) (Engine engine);
+	qsocket_t* (*QGetAnyMessage) (Engine engine);
+	int (*QGetMessage) (qsocket_t* sock, Engine engine);
+	int (*QSendMessage) (qsocket_t* sock, sizebuf_t* data, Engine engine);
+	int (*SendUnreliableMessage) (qsocket_t* sock, sizebuf_t* data, Engine engine);
+	bool(*CanSendMessage) (qsocket_t* sock, Engine engine);
+	bool(*CanSendUnreliableMessage) (qsocket_t* sock, Engine engine);
+	void (*Close) (qsocket_t* sock, Engine engine);
+	void (*Shutdown) (Engine engine);
+} net_driver_t;
+
+typedef struct net_landriver_s
+{
+	const char* name;
+	bool	 initialized;
+	sys_socket_t controlSock;
+	sys_socket_t(*Init) (void);
+	void (*Shutdown) (void);
+	sys_socket_t(*Listen) (bool state);
+	int (*QueryAddresses) (qhostaddr_t* addresses, int maxaddresses);
+	sys_socket_t(*Open_Socket) (int port);
+	int (*Close_Socket) (sys_socket_t socketid);
+	int (*Connect) (sys_socket_t socketid, struct qsockaddr* addr);
+	sys_socket_t(*CheckNewConnections) (void);
+	int (*Read) (sys_socket_t socketid, byte* buf, int len, struct qsockaddr* addr);
+	int (*Write) (sys_socket_t socketid, byte* buf, int len, struct qsockaddr* addr);
+	int (*Broadcast) (sys_socket_t socketid, byte* buf, int len);
+	const char* (*AddrToString) (struct qsockaddr* addr, bool masked);
+	int (*StringToAddr) (const char* string, struct qsockaddr* addr);
+	int (*GetSocketAddr) (sys_socket_t socketid, struct qsockaddr* addr);
+	int (*GetNameFromAddr) (struct qsockaddr* addr, char* name);
+	int (*GetAddrFromName) (const char* name, struct qsockaddr* addr);
+	int (*AddrCompare) (struct qsockaddr* addr1, struct qsockaddr* addr2);
+	int (*GetSocketPort) (struct qsockaddr* addr);
+	int (*SetSocketPort) (struct qsockaddr* addr, int port);
+
+	sys_socket_t listeningSock;
+} net_landriver_t;
+
+#define Loop_QueryAddresses NULL
+
+#define NET_HEADERSIZE	 (2 * sizeof (unsigned int))
+#define NET_DATAGRAMSIZE (MAX_DATAGRAM + NET_HEADERSIZE)
+
+// NetHeader flags
+#define NETFLAG_LENGTH_MASK 0x0000ffff
+#define NETFLAG_DATA		0x00010000
+#define NETFLAG_ACK			0x00020000
+#define NETFLAG_NAK			0x00040000
+#define NETFLAG_EOM			0x00080000
+#define NETFLAG_UNRELIABLE	0x00100000
+#define NETFLAG_CTL			0x80000000
+
+#if (NETFLAG_LENGTH_MASK & NET_MAXMESSAGE) != NET_MAXMESSAGE
+#error "NET_MAXMESSAGE must fit within NETFLAG_LENGTH_MASK"
+#endif
+
+#define NET_LOOPBACKBUFFERS	   5
+#define NET_LOOPBACKHEADERSIZE 4
+
+#define NET_PROTOCOL_VERSION 3
+
+#define MAX_NET_DRIVERS 8
+
+static struct
+{
+	unsigned int length;
+	unsigned int sequence;
+	byte		 data[MAX_DATAGRAM];
+} packetBuffer;
+
+net_driver_t net_drivers[]{
+	{"Loopback", false, Engine::Loop::Loop_Init, Engine::Loop::Loop_Listen, Loop_QueryAddresses, Engine::Loop::Loop_SearchForHosts, Engine::Loop::Loop_Connect, Engine::Loop::Loop_CheckNewConnections, Engine::Loop::Loop_GetAnyMessage,
+	 Engine::Loop::Loop_GetMessage, Engine::Loop::Loop_SendMessage, Engine::Loop::Loop_SendUnreliableMessage, Engine::Loop::Loop_CanSendMessage, Engine::Loop::Loop_CanSendUnreliableMessage, Engine::Loop::Loop_Close, Engine::Loop::Loop_Shutdown},
+
+	{"Datagram", false, Engine::Datagram::Datagram_Init, Engine::Datagram::Datagram_Listen, Engine::Datagram::Datagram_QueryAddresses, Engine::Datagram::Datagram_SearchForHosts, Engine::Datagram::Datagram_Connect, Engine::Datagram::Datagram_CheckNewConnections,
+	 Engine::Datagram::Datagram_GetAnyMessage, Engine::Datagram::Datagram_GetMessage, Engine::Datagram::Datagram_SendMessage, Engine::Datagram::Datagram_SendUnreliableMessage, Engine::Datagram::Datagram_CanSendMessage,
+	 Engine::Datagram::Datagram_CanSendUnreliableMessage, Engine::Datagram::Datagram_Close, Engine::Datagram::Datagram_Shutdown} };
+
+#define sfunc net_drivers[sock->driver]
+#define dfunc net_drivers[net_driverlevel]
+
+int net_driverlevel;
