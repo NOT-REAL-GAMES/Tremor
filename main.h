@@ -5,6 +5,7 @@
 
 #include <windows.h>
 #include <mmsystem.h>
+#include "wsaerror.h"
 
 #include <sys/types.h>
 #include <errno.h>
@@ -455,7 +456,7 @@ typedef struct
 } dmodel_t;
 
 #ifdef byte
-#undef byte;
+#undef byte
 #endif // byte
 
 typedef unsigned char byte;
@@ -3368,3 +3369,23 @@ net_driver_t net_drivers[]{
 #define dfunc net_drivers[net_driverlevel]
 
 int net_driverlevel;
+
+#define MAXHOSTNAMELEN 256
+#define SOCKETERRNO		 WSAGetLastError ()
+typedef u_long in_addr_t;
+#define NET_EWOULDBLOCK	 WSAEWOULDBLOCK
+#define NET_ECONNREFUSED WSAECONNREFUSED
+/* must #include "wsaerror.h" for this : */
+#define socketerror(x)	 __WSAE_StrError ((x))
+
+int q_snprintf(char* str, size_t size, const char* format, ...)
+{
+	int		ret;
+	va_list argptr;
+
+	va_start(argptr, format);
+	ret = q_vsnprintf(str, size, format, argptr);
+	va_end(argptr);
+
+	return ret;
+}
