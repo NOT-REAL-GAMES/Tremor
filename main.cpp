@@ -983,7 +983,7 @@ public:
 
 				engine->net->message.cursize = len;
 
-				MSG_BeginReading();
+				engine->msg->BeginReading();
 				control = BigLong(*((int*)engine->net->message.data));
 				MSG_ReadLong();
 				if (control == -1)
@@ -1112,7 +1112,7 @@ public:
 
 			engine->net->message.cursize = len;
 
-			MSG_BeginReading();
+			engine->msg->BeginReading();
 			control = BigLong(*((int*)engine->net->message.data));
 			MSG_ReadLong();
 			if (control == -1)
@@ -1472,7 +1472,7 @@ public:
 			engine->sz->Clear(&engine->net->message);
 			engine->sz->Write(&engine->net->message, data, length);
 
-			MSG_BeginReading();
+			engine->msg->BeginReading();
 			MSG_ReadLong();
 
 			command = MSG_ReadByte();
@@ -1924,10 +1924,10 @@ public:
 
 				engine->sz->Clear(&engine->net->message);
 				// save space for the header, filled in later
-				MSG_WriteLong(&engine->net->message, 0);
-				MSG_WriteByte(&engine->net->message, CCREQ_SERVER_INFO);
-				MSG_WriteString(&engine->net->message, "TREMOR");
-				MSG_WriteByte(&engine->net->message, NET_PROTOCOL_VERSION);
+				engine->msg->WriteLong(&engine->net->message, 0);
+				engine->msg->WriteByte(&engine->net->message, CCREQ_SERVER_INFO);
+				engine->msg->WriteString(&engine->net->message, "TREMOR");
+				engine->msg->WriteByte(&engine->net->message, NET_PROTOCOL_VERSION);
 				*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 				dfunc.Broadcast(dfunc.controlSock, engine->net->message.data, engine->net->message.cursize);
 				engine->sz->Clear(&engine->net->message);
@@ -1980,7 +1980,7 @@ public:
 				if (hostCacheCount == HOSTCACHESIZE)
 					continue;
 
-				MSG_BeginReading();
+				engine->msg->BeginReading();
 				control = BigLong(*((int*)engine->net->message.data));
 				MSG_ReadLong();
 				if (control == -1)
@@ -2294,7 +2294,7 @@ public:
 						}
 
 						engine->net->message.cursize = ret;
-						MSG_BeginReading();
+						engine->msg->BeginReading();
 
 						control = BigLong(*((int*)engine->net->message.data));
 						MSG_ReadLong();
@@ -3054,7 +3054,7 @@ public:
 			}
 
 			if (!result)
-				q_strlcpy(addresses[result++], my_ipv6_address, sizeof(addresses[0]));
+				q_strlcpy(addresses[result++], engine->net->my_ipv6_address, sizeof(addresses[0]));
 			return result;
 		}
 
@@ -7259,25 +7259,25 @@ public:
 			{"Winsock TCPIP",
 			 false,
 			 0,
-			 WINIPv4_Init,
-			 WINIPv4_Shutdown,
-			 WINIPv4_Listen,
-			 WINIPv4_GetAddresses,
-			 WINIPv4_OpenSocket,
-			 WINS_CloseSocket,
-			 WINS_Connect,
-			 WINIPv4_CheckNewConnections,
-			 WINS_Read,
-			 WINS_Write,
-			 WINIPv4_Broadcast,
-			 WINS_AddrToString,
-			 WINIPv4_StringToAddr,
-			 WINS_GetSocketAddr,
-			 WINIPv4_GetNameFromAddr,
-			 WINIPv4_GetAddrFromName,
-			 WINS_AddrCompare,
-			 WINS_GetSocketPort,
-			 WINS_SetSocketPort},
+			 Engine::WINIP::WINIPv4_Init,
+			 Engine::WINIP::WINIPv4_Shutdown,
+			 Engine::WINIP::WINIPv4_Listen,
+			 Engine::WINIP::WINIPv4_GetAddresses,
+			 Engine::WINIP::WINIPv4_OpenSocket,
+			 Engine::WINIP::WINS_CloseSocket,
+			 Engine::WINIP::WINS_Connect,
+			 Engine::WINIP::WINIPv4_CheckNewConnections,
+			 Engine::WINIP::WINS_Read,
+			 Engine::WINIP::WINS_Write,
+			 Engine::WINIP::WINIPv4_Broadcast,
+			 Engine::WINIP::WINS_AddrToString,
+			 Engine::WINIP::WINIPv4_StringToAddr,
+			 Engine::WINIP::WINS_GetSocketAddr,
+			 Engine::WINIP::WINIPv4_GetNameFromAddr,
+			 Engine::WINIP::WINIPv4_GetAddrFromName,
+			 Engine::WINIP::WINS_AddrCompare,
+			 Engine::WINIP::WINS_GetSocketPort,
+			 Engine::WINIP::WINS_SetSocketPort},
 		#ifdef IPPROTO_IPV6
 			{"Winsock IPv6",
 			 false,
@@ -7545,6 +7545,15 @@ public:
 		MSG(Engine* e) {
 			engine = e;
 			engine->msg = this;
+		}
+
+		int		 msg_readcount;
+		bool msg_badread;
+
+		void BeginReading(void)
+		{
+			msg_readcount = 0;
+			msg_badread = false;
 		}
 
 		void WriteLong(sizebuf_t* sb, int c)
