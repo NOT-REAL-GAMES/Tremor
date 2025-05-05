@@ -955,7 +955,7 @@ public:
 			return noport;
 		}
 
-		static bool		testInProgress = false;
+		bool		testInProgress = false;
 		static int			testPollCount;
 		static int			testDriver;
 		static sys_socket_t testSocket;
@@ -985,7 +985,7 @@ public:
 
 				engine->msg->BeginReading();
 				control = BigLong(*((int*)engine->net->message.data));
-				MSG_ReadLong();
+				engine->msg->ReadLong();
 				if (control == -1)
 					break;
 				if ((control & (~NETFLAG_LENGTH_MASK)) != (int)NETFLAG_CTL)
@@ -993,15 +993,15 @@ public:
 				if ((control & NETFLAG_LENGTH_MASK) != len)
 					break;
 
-				if (MSG_ReadByte() != CCREP_PLAYER_INFO)
+				if (engine->msg->ReadByte() != CCREP_PLAYER_INFO)
 					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Unexpected repsonse to Player Info request\n");
 
-				MSG_ReadByte(); /* playerNumber */
-				strcpy(name, MSG_ReadString());
-				colors = MSG_ReadLong();
-				frags = MSG_ReadLong();
-				connectTime = MSG_ReadLong();
-				strcpy(address, MSG_ReadString());
+				engine->msg->ReadByte(); /* playerNumber */
+				strcpy(name, engine->msg->ReadString());
+				colors = engine->msg->ReadLong();
+				frags = engine->msg->ReadLong();
+				connectTime = engine->msg->ReadLong();
+				strcpy(address, engine->msg->ReadString());
 
 				SDL_Log("%s\n  frags:%3i  colors:%d %d  time:%d\n  %s\n", name, frags, colors >> 4, colors & 0x0f, connectTime / 60, address);
 			}
@@ -1034,13 +1034,13 @@ public:
 			{
 				for (n = 0; n < hostCacheCount; n++)
 				{
-					if (q_strcasecmp(host, hostcache[n].name) == 0)
+					if (q_strcasecmp(host, engine->host->cache[n].name) == 0)
 					{
-						if (hostcache[n].driver != myDriverLevel)
+						if (engine->host->cache[n].driver != myDriverLevel)
 							continue;
-						engine->net->landriverlevel = hostcache[n].ldriver;
-						maxusers = hostcache[n].maxusers;
-						memcpy(&sendaddr, &hostcache[n].addr, sizeof(struct qsockaddr));
+						engine->net->landriverlevel = engine->host->cache[n].ldriver;
+						maxusers = engine->host->cache[n].maxusers;
+						memcpy(&sendaddr, &engine->host->cache[n].addr, sizeof(struct qsockaddr));
 						break;
 					}
 				}
@@ -1051,7 +1051,7 @@ public:
 
 			for (engine->net->landriverlevel = 0; engine->net->landriverlevel < engine->net->numlandrivers; engine->net->landriverlevel++)
 			{
-				if (!net_landrivers[engine->net->landriverlevel].initialized)
+				if (!engine->net->landrivers[engine->net->landriverlevel].initialized)
 					continue;
 
 				// see if we can resolve the host name
@@ -1092,7 +1092,7 @@ public:
 		static int			test2Driver;
 		static sys_socket_t test2Socket;
 
-		static void			 Test2_Poll(void*);
+		static void			 Test2_Poll(void*,Engine* engine);
 		PollProcedure test2PollProcedure = { NULL, 0.0, Test2_Poll };
 
 		void Test2_Poll(void* unused)
@@ -1114,7 +1114,7 @@ public:
 
 			engine->msg->BeginReading();
 			control = BigLong(*((int*)engine->net->message.data));
-			MSG_ReadLong();
+			engine->msg->ReadLong();
 			if (control == -1)
 				goto Error;
 			if ((control & (~NETFLAG_LENGTH_MASK)) != (int)NETFLAG_CTL)
@@ -1122,21 +1122,21 @@ public:
 			if ((control & NETFLAG_LENGTH_MASK) != len)
 				goto Error;
 
-			if (MSG_ReadByte() != CCREP_RULE_INFO)
+			if (engine->msg->ReadByte() != CCREP_RULE_INFO)
 				goto Error;
 
-			strcpy(name, MSG_ReadString());
+			strcpy(name, engine->msg->ReadString());
 			if (name[0] == 0)
 				goto Done;
-			strcpy(value, MSG_ReadString());
+			strcpy(value, engine->msg->ReadString());
 
 			SDL_Log("%-16.16s  %-16.16s\n", name, value);
 
 			engine->sz->Clear(&engine->net->message);
 			// save space for the header, filled in later
-			MSG_WriteLong(&engine->net->message, 0);
-			MSG_WriteByte(&engine->net->message, CCREQ_RULE_INFO);
-			MSG_WriteString(&engine->net->message, name);
+			engine->msg->WriteLong(&engine->net->message, 0);
+			engine->msg->WriteByte(&engine->net->message, CCREQ_RULE_INFO);
+			engine->msg->WriteString(&engine->net->message, name);
 			*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 			dfunc.Write(test2Socket, engine->net->message.data, engine->net->message.cursize, &clientaddr);
 			engine->sz->Clear(&engine->net->message);
@@ -1168,12 +1168,12 @@ public:
 			{
 				for (n = 0; n < hostCacheCount; n++)
 				{
-					if (q_strcasecmp(host, hostcache[n].name) == 0)
+					if (q_strcasecmp(host, engine->host->cache[n].name) == 0)
 					{
-						if (hostcache[n].driver != myDriverLevel)
+						if (engine->host->cache[n].driver != myDriverLevel)
 							continue;
-						engine->net->landriverlevel = hostcache[n].ldriver;
-						memcpy(&sendaddr, &hostcache[n].addr, sizeof(struct qsockaddr));
+						engine->net->landriverlevel = engine->host->cache[n].ldriver;
+						memcpy(&sendaddr, &engine->host->cache[n].addr, sizeof(struct qsockaddr));
 						break;
 					}
 				}
@@ -1184,7 +1184,7 @@ public:
 
 			for (engine->net->landriverlevel = 0; engine->net->landriverlevel < engine->net->numlandrivers; engine->net->landriverlevel++)
 			{
-				if (!net_landrivers[engine->net->landriverlevel].initialized)
+				if (!engine->net->landrivers[engine->net->landriverlevel].initialized)
 					continue;
 
 				// see if we can resolve the host name
@@ -1208,9 +1208,9 @@ public:
 
 			engine->sz->Clear(&engine->net->message);
 			// save space for the header, filled in later
-			MSG_WriteLong(&engine->net->message, 0);
-			MSG_WriteByte(&engine->net->message, CCREQ_RULE_INFO);
-			MSG_WriteString(&engine->net->message, "");
+			engine->msg->WriteLong(&engine->net->message, 0);
+			engine->msg->WriteByte(&engine->net->message, CCREQ_RULE_INFO);
+			engine->msg->WriteString(&engine->net->message, "");
 			*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 			dfunc.Write(test2Socket, engine->net->message.data, engine->net->message.cursize, &sendaddr);
 			engine->sz->Clear(&engine->net->message);
@@ -1236,12 +1236,12 @@ public:
 			num_inited = 0;
 			for (i = 0; i < engine->net->numlandrivers; i++)
 			{
-				csock = net_landrivers[i].Init();
+				csock = engine->net->landrivers[i].Init();
 				if (csock == INVALID_SOCKET)
 					continue;
-				net_landrivers[i].initialized = true;
-				net_landrivers[i].controlSock = csock;
-				net_landrivers[i].listeningSock = INVALID_SOCKET;
+				engine->net->landrivers[i].initialized = true;
+				engine->net->landrivers[i].controlSock = csock;
+				engine->net->landrivers[i].listeningSock = INVALID_SOCKET;
 				num_inited++;
 			}
 
@@ -1265,10 +1265,10 @@ public:
 			//
 			for (i = 0; i < engine->net->numlandrivers; i++)
 			{
-				if (net_landrivers[i].initialized)
+				if (engine->net->landrivers[i].initialized)
 				{
-					net_landrivers[i].Shutdown();
-					net_landrivers[i].initialized = false;
+					engine->net->landrivers[i].Shutdown();
+					engine->net->landrivers[i].initialized = false;
 				}
 			}
 		}
@@ -1294,13 +1294,13 @@ public:
 
 			for (i = 0; i < engine->net->numlandrivers; i++)
 			{
-				if (net_landrivers[i].initialized)
+				if (engine->net->landrivers[i].initialized)
 				{
-					net_landrivers[i].listeningSock = net_landrivers[i].Listen(state);
-					if (net_landrivers[i].listeningSock != INVALID_SOCKET)
+					engine->net->landrivers[i].listeningSock = engine->net->landrivers[i].Listen(state);
+					if (engine->net->landrivers[i].listeningSock != INVALID_SOCKET)
 						islistening = true;
 
-					for (s = engine->net->engine->net->activeSockets; s; s = s->next)
+					for (s = engine->net->activeSockets; s; s = s->next)
 					{
 						if (s->isvirtual)
 						{
@@ -1312,9 +1312,9 @@ public:
 			}
 			if (state && !islistening)
 			{
-				if (isDedicated)
+				if (engine->isDedicated)
 					SDL_LogError(SDL_LOG_PRIORITY_ERROR,"Unable to open any listening sockets\n");
-				Con_Warning("Unable to open any listening sockets\n");
+				SDL_Log("Unable to open any listening sockets\n");
 			}
 		}
 
@@ -1330,13 +1330,13 @@ public:
 			msg.allowoverflow = true;
 			engine->sz->Clear(&msg);
 			// save space for the header, filled in later
-			MSG_WriteLong(&msg, 0);
-			MSG_WriteByte(&msg, CCREP_RCON);
-			MSG_WriteString(&msg, text);
+			engine->msg->WriteLong(&msg, 0);
+			engine->msg->WriteByte(&msg, CCREP_RCON);
+			engine->msg->WriteString(&msg, text);
 			if (msg.overflowed)
 				return;
 			*((int*)msg.data) = BigLong(NETFLAG_CTL | (msg.cursize & NETFLAG_LENGTH_MASK));
-			net_landrivers[rcon_response_landriver].Write(rcon_response_socket, msg.data, msg.cursize, &rcon_response_address);
+			engine->net->landrivers[rcon_response_landriver].Write(rcon_response_socket, msg.data, msg.cursize, &rcon_response_address);
 		}
 
 		void _Datagram_ServerControlPacket(sys_socket_t acceptsock, struct qsockaddr* clientaddr, byte* data, unsigned int length)
@@ -1372,87 +1372,87 @@ public:
 						str = "";
 					q_strlcpy(cookie, str, sizeof(cookie));
 
-					for (i = 0; i < svs.maxclients; i++)
+					for (i = 0; i < engine->svs.maxclients; i++)
 					{
-						if (svs.clients[i].active)
+						if (engine->svs.clients[i].active)
 						{
 							numclients++;
-							if (!svs.clients[i].netconnection)
+							if (!engine->svs.clients[i].netconnection)
 								numbots++;
 						}
 					}
 
 					engine->sz->Clear(&engine->net->message);
-					MSG_WriteLong(&engine->net->message, -1);
-					MSG_WriteString(&engine->net->message, full ? "statusResponse\n" : "infoResponse\n");
+					engine->msg->WriteLong(&engine->net->message, -1);
+					engine->msg->WriteString(&engine->net->message, full ? "statusResponse\n" : "infoResponse\n");
 					engine->net->message.cursize--;
-					COM_Parse(com_protocolname.string);
+					engine->com->Parse(engine->com->protocolname.string);
 					if (*com_token) // the master server needs this. This tells the master which game we should be listed as.
 					{
-						MSG_WriteString(&engine->net->message, va("\\gamename\\%s", com_token));
+						engine->msg->WriteString(&engine->net->message, va("\\gamename\\%s", com_token));
 						engine->net->message.cursize--;
 					}
-					MSG_WriteString(&engine->net->message, "\\protocol\\3");
-					engine->net->message.cursize--; // this is stupid
-					MSG_WriteString(&engine->net->message, "\\ver\\" ENGINE_NAME_AND_VER);
+					engine->msg->WriteString(&engine->net->message, "\\protocol\\3");
+					engine->net->message.cursize--; // this is stupid // rb: yeah no kidding, that's why i'm going to remove it
+					engine->msg->WriteString(&engine->net->message, "\\ver\\" ENGINE_NAME_AND_VER);
 					engine->net->message.cursize--;
-					MSG_WriteString(&engine->net->message, va("\\nqprotocol\\%u", sv.protocol));
+					engine->msg->WriteString(&engine->net->message, va("\\nqprotocol\\%u", engine->sv.protocol));
 					engine->net->message.cursize--;
 					if (*gamedir)
 					{
-						MSG_WriteString(&engine->net->message, va("\\modname\\%s", gamedir));
+						engine->msg->WriteString(&engine->net->message, va("\\modname\\%s", gamedir));
 						engine->net->message.cursize--;
 					}
-					if (*sv.name)
+					if (*engine->sv.name)
 					{
-						MSG_WriteString(&engine->net->message, va("\\mapname\\%s", sv.name));
+						engine->msg->WriteString(&engine->net->message, va("\\mapname\\%s", engine->sv.name));
 						engine->net->message.cursize--;
 					}
 					if (*deathmatch.string)
 					{
-						MSG_WriteString(&engine->net->message, va("\\deathmatch\\%s", deathmatch.string));
+						engine->msg->WriteString(&engine->net->message, va("\\deathmatch\\%s", deathmatch.string));
 						engine->net->message.cursize--;
 					}
 					if (*teamplay.string)
 					{
-						MSG_WriteString(&engine->net->message, va("\\teamplay\\%s", teamplay.string));
+						engine->msg->WriteString(&engine->net->message, va("\\teamplay\\%s", teamplay.string));
 						engine->net->message.cursize--;
 					}
 					if (*hostname.string)
 					{
-						MSG_WriteString(&engine->net->message, va("\\hostname\\%s", hostname.string));
+						engine->msg->WriteString(&engine->net->message, va("\\hostname\\%s", hostname.string));
 						engine->net->message.cursize--;
 					}
-					MSG_WriteString(&engine->net->message, va("\\clients\\%u", numclients));
+					engine->msg->WriteString(&engine->net->message, va("\\clients\\%u", numclients));
 					engine->net->message.cursize--;
 					if (numbots)
 					{
-						MSG_WriteString(&engine->net->message, va("\\bots\\%u", numbots));
+						engine->msg->WriteString(&engine->net->message, va("\\bots\\%u", numbots));
 						engine->net->message.cursize--;
 					}
-					MSG_WriteString(&engine->net->message, va("\\sv_maxclients\\%i", svs.maxclients));
+					engine->msg->WriteString(&engine->net->message, va("\\sv_maxclients\\%i", engine->svs.maxclients));
 					engine->net->message.cursize--;
 					if (*cookie)
 					{
-						MSG_WriteString(&engine->net->message, va("\\challenge\\%s", cookie));
+						engine->msg->WriteString(&engine->net->message, va("\\challenge\\%s", cookie));
 						engine->net->message.cursize--;
 					}
 
 					if (full)
 					{
-						for (i = 0; i < svs.maxclients; i++)
+						for (i = 0; i < engine->svs.maxclients; i++)
 						{
-							if (svs.clients[i].active)
+							if (engine->svs.clients[i].active)
 							{
 								float total = 0;
 								for (j = 0; j < NUM_PING_TIMES; j++)
-									total += svs.clients[i].ping_times[j];
+									total += engine->svs.clients[i].ping_times[j];
 								total /= NUM_PING_TIMES;
 								total *= 1000; // put it in ms
 
-								MSG_WriteString(
-									&engine->net->message, va("\n%i %i %i_%i \"%s\"", svs.clients[i].old_frags, (int)total, svs.clients[i].colors & 15,
-										svs.clients[i].colors >> 4, svs.clients[i].name));
+								engine->msg->WriteString(
+									&engine->net->message, va("\n%i %i %i_%i \"%s\"", engine->svs.clients[i].old_frags, (int)total, engine->svs.clients[i].colors & 15,
+										engine->svs.clients[i].colors >> 4, engine->svs.clients[i].name));
 								engine->net->message.cursize--;
 							}
 						}
@@ -1473,25 +1473,25 @@ public:
 			engine->sz->Write(&engine->net->message, data, length);
 
 			engine->msg->BeginReading();
-			MSG_ReadLong();
+			engine->msg->ReadLong();
 
-			command = MSG_ReadByte();
+			command = engine->msg->ReadByte();
 			if (command == CCREQ_SERVER_INFO)
 			{
-				if (strcmp(MSG_ReadString(), "TREMOR") != 0)
+				if (strcmp(engine->msg->ReadString(), "TREMOR") != 0)
 					return;
 
 				engine->sz->Clear(&engine->net->message);
 				// save space for the header, filled in later
-				MSG_WriteLong(&engine->net->message, 0);
-				MSG_WriteByte(&engine->net->message, CCREP_SERVER_INFO);
+				engine->msg->WriteLong(&engine->net->message, 0);
+				engine->msg->WriteByte(&engine->net->message, CCREP_SERVER_INFO);
 				dfunc.GetSocketAddr(acceptsock, &newaddr);
-				MSG_WriteString(&engine->net->message, dfunc.AddrToString(&newaddr, false));
-				MSG_WriteString(&engine->net->message, hostname.string);
-				MSG_WriteString(&engine->net->message, sv.name);
-				MSG_WriteByte(&engine->net->message, net_activeconnections);
-				MSG_WriteByte(&engine->net->message, svs.maxclients);
-				MSG_WriteByte(&engine->net->message, NET_PROTOCOL_VERSION);
+				engine->msg->WriteString(&engine->net->message, dfunc.AddrToString(&newaddr, false));
+				engine->msg->WriteString(&engine->net->message, engine->host->name.string);
+				engine->msg->WriteString(&engine->net->message, engine->sv.name);
+				engine->msg->WriteByte(&engine->net->message, engine->net->activeconnections);
+				engine->msg->WriteByte(&engine->net->message, engine->svs.maxclients);
+				engine->msg->WriteByte(&engine->net->message, NET_PROTOCOL_VERSION);
 				*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 				dfunc.Write(acceptsock, engine->net->message.data, engine->net->message.cursize, clientaddr);
 				engine->sz->Clear(&engine->net->message);
@@ -1505,10 +1505,10 @@ public:
 				int		  clientNumber;
 				client_t* client;
 
-				playerNumber = MSG_ReadByte();
+				playerNumber = engine->msg->ReadByte();
 				activeNumber = -1;
 
-				for (clientNumber = 0, client = svs.clients; clientNumber < svs.maxclients; clientNumber++, client++)
+				for (clientNumber = 0, client = engine->svs.clients; clientNumber < engine->svs.maxclients; clientNumber++, client++)
 				{
 					if (client->active)
 					{
@@ -1518,26 +1518,26 @@ public:
 					}
 				}
 
-				if (clientNumber == svs.maxclients)
+				if (clientNumber == engine->svs.maxclients)
 					return;
 
 				engine->sz->Clear(&engine->net->message);
 				// save space for the header, filled in later
-				MSG_WriteLong(&engine->net->message, 0);
-				MSG_WriteByte(&engine->net->message, CCREP_PLAYER_INFO);
-				MSG_WriteByte(&engine->net->message, playerNumber);
-				MSG_WriteString(&engine->net->message, client->name);
-				MSG_WriteLong(&engine->net->message, client->colors);
-				MSG_WriteLong(&engine->net->message, (int)client->edict->v.frags);
+				engine->msg->WriteLong(&engine->net->message, 0);
+				engine->msg->WriteByte(&engine->net->message, CCREP_PLAYER_INFO);
+				engine->msg->WriteByte(&engine->net->message, playerNumber);
+				engine->msg->WriteString(&engine->net->message, client->name);
+				engine->msg->WriteLong(&engine->net->message, client->colors);
+				//engine->msg->WriteLong(&engine->net->message, (int)client->edict->v.frags);
 				if (!client->netconnection)
 				{
-					MSG_WriteLong(&engine->net->message, 0);
-					MSG_WriteString(&engine->net->message, "Bot");
+					engine->msg->WriteLong(&engine->net->message, 0);
+					engine->msg->WriteString(&engine->net->message, "Bot");
 				}
 				else
 				{
-					MSG_WriteLong(&engine->net->message, (int)(engine->net->time - client->netconnection->connecttime));
-					MSG_WriteString(&engine->net->message, NET_QSocketGetMaskedAddressString(client->netconnection));
+					engine->msg->WriteLong(&engine->net->message, (int)(engine->net->time - client->netconnection->connecttime));
+					engine->msg->WriteString(&engine->net->message, NET_QSocketGetMaskedAddressString(client->netconnection));
 				}
 				*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 				dfunc.Write(acceptsock, engine->net->message.data, engine->net->message.cursize, clientaddr);
@@ -1552,18 +1552,18 @@ public:
 				cvar_t* var;
 
 				// find the search start location
-				prevCvarName = MSG_ReadString();
+				prevCvarName = engine->msg->ReadString();
 				var = Cvar_FindVarAfter(prevCvarName, CVAR_SERVERINFO);
 
 				// send the response
 				engine->sz->Clear(&engine->net->message);
 				// save space for the header, filled in later
-				MSG_WriteLong(&engine->net->message, 0);
-				MSG_WriteByte(&engine->net->message, CCREP_RULE_INFO);
+				engine->msg->WriteLong(&engine->net->message, 0);
+				engine->msg->WriteByte(&engine->net->message, CCREP_RULE_INFO);
 				if (var)
 				{
-					MSG_WriteString(&engine->net->message, var->name);
-					MSG_WriteString(&engine->net->message, var->string);
+					engine->msg->WriteString(&engine->net->message, var->name);
+					engine->msg->WriteString(&engine->net->message, var->string);
 				}
 				*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 				dfunc.Write(acceptsock, engine->net->message.data, engine->net->message.cursize, clientaddr);
@@ -1574,7 +1574,7 @@ public:
 
 			if (command == CCREQ_RCON)
 			{
-				const char* password = MSG_ReadString(); // FIXME: this really needs crypto
+				const char* password = engine->msg->ReadString(); // FIXME: this really needs crypto
 				const char* response;
 
 				rcon_response_address = *clientaddr;
@@ -1586,7 +1586,7 @@ public:
 				else if (!strcmp(password, rcon_password.string))
 				{
 					Con_Redirect(Datagram_Rcon_Flush);
-					Cmd_ExecuteString(MSG_ReadString(), src_command);
+					Cmd_ExecuteString(engine->msg->ReadString(), src_command);
 					Con_Redirect(NULL);
 					return;
 				}
@@ -1604,16 +1604,16 @@ public:
 			if (command != CCREQ_CONNECT)
 				return;
 
-			if (strcmp(MSG_ReadString(), "TREMOR") != 0)
+			if (strcmp(engine->msg->ReadString(), "TREMOR") != 0)
 				return;
 
-			if (MSG_ReadByte() != NET_PROTOCOL_VERSION)
+			if (engine->msg->ReadByte() != NET_PROTOCOL_VERSION)
 			{
 				engine->sz->Clear(&engine->net->message);
 				// save space for the header, filled in later
-				MSG_WriteLong(&engine->net->message, 0);
-				MSG_WriteByte(&engine->net->message, CCREP_REJECT);
-				MSG_WriteString(&engine->net->message, "Incompatible version.\n");
+				engine->msg->WriteLong(&engine->net->message, 0);
+				engine->msg->WriteByte(&engine->net->message, CCREP_REJECT);
+				engine->msg->WriteString(&engine->net->message, "Incompatible version.\n");
 				*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 				dfunc.Write(acceptsock, engine->net->message.data, engine->net->message.cursize, clientaddr);
 				engine->sz->Clear(&engine->net->message);
@@ -1621,16 +1621,16 @@ public:
 			}
 
 			// read proquake extensions
-			mod = MSG_ReadByte();
-			if (msg_badread)
+			mod = engine->msg->ReadByte();
+			if (engine->msg->badread)
 				mod = 0;
 #if 0
-			mod_ver = MSG_ReadByte();
-			if (msg_badread) mod_ver = 0;
-			mod_flags = MSG_ReadByte();
-			if (msg_badread) mod_flags = 0;
-			mod_passwd = MSG_ReadLong();
-			if (msg_badread) mod_passwd = 0;
+			mod_ver = engine->msg->ReadByte();
+			if (engine->msg->badread) mod_ver = 0;
+			mod_flags = engine->msg->ReadByte();
+			if (engine->msg->badread) mod_flags = 0;
+			mod_passwd = engine->msg->ReadLong();
+			if (engine->msg->badread) mod_passwd = 0;
 			(void)mod_ver;
 			(void)mod_flags;
 			(void)mod_passwd;
@@ -1648,9 +1648,9 @@ public:
 				{
 					engine->sz->Clear(&engine->net->message);
 					// save space for the header, filled in later
-					MSG_WriteLong(&engine->net->message, 0);
-					MSG_WriteByte(&engine->net->message, CCREP_REJECT);
-					MSG_WriteString(&engine->net->message, "You have been banned.\n");
+					engine->msg->WriteLong(&engine->net->message, 0);
+					engine->msg->WriteByte(&engine->net->message, CCREP_REJECT);
+					engine->msg->WriteString(&engine->net->message, "You have been banned.\n");
 					*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 					dfunc.Write(acceptsock, engine->net->message.data, engine->net->message.cursize, clientaddr);
 					engine->sz->Clear(&engine->net->message);
@@ -1677,15 +1677,15 @@ public:
 						// yes, so send a duplicate reply
 						engine->sz->Clear(&engine->net->message);
 						// save space for the header, filled in later
-						MSG_WriteLong(&engine->net->message, 0);
-						MSG_WriteByte(&engine->net->message, CCREP_ACCEPT);
+						engine->msg->WriteLong(&engine->net->message, 0);
+						engine->msg->WriteByte(&engine->net->message, CCREP_ACCEPT);
 						dfunc.GetSocketAddr(s->socket, &newaddr);
-						MSG_WriteLong(&engine->net->message, dfunc.GetSocketPort(&newaddr));
+						engine->msg->WriteLong(&engine->net->message, dfunc.GetSocketPort(&newaddr));
 						if (s->proquake_angle_hack)
 						{
-							MSG_WriteByte(&engine->net->message, 1);  // proquake
-							MSG_WriteByte(&engine->net->message, 30); // ver 30 should be safe. 34 screws with our single-server-socket stuff.
-							MSG_WriteByte(&engine->net->message, 0);  // no flags
+							engine->msg->WriteByte(&engine->net->message, 1);  // proquake
+							engine->msg->WriteByte(&engine->net->message, 30); // ver 30 should be safe. 34 screws with our single-server-socket stuff.
+							engine->msg->WriteByte(&engine->net->message, 0);  // no flags
 						}
 						*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 						dfunc.Write(acceptsock, engine->net->message.data, engine->net->message.cursize, clientaddr);
@@ -1703,12 +1703,12 @@ public:
 					// FIXME: if this is an issue, it should be possible to reuse the previous connection's outgoing unreliable sequence. reliables should be less of an
 					// issue as stray ones will be ignored anyway.
 					// FIXME: needs challenges, so that other clients can't determine ip's and spoof a reconnect.
-					for (i = 0; i < svs.maxclients; i++)
+					for (i = 0; i < engine->svs.maxclients; i++)
 					{
-						if (svs.clients[i].netconnection == s)
+						if (engine->svs.clients[i].netconnection == s)
 						{
 							NET_Close(s); // close early, to avoid svc_disconnects confusing things.
-							host_client = &svs.clients[i];
+							host_client = &engine->svs.clients[i];
 							SV_DropClient(false);
 							break;
 						}
@@ -1718,10 +1718,10 @@ public:
 			}
 
 			// find a free player slot
-			for (plnum = 0; plnum < svs.maxclients; plnum++)
-				if (!svs.clients[plnum].active)
+			for (plnum = 0; plnum < engine->svs.maxclients; plnum++)
+				if (!engine->svs.clients[plnum].active)
 					break;
-			if (plnum < svs.maxclients)
+			if (plnum < engine->svs.maxclients)
 				sock = NET_NewQSocket();
 			else
 				sock = NULL; // can happen due to botclients.
@@ -1730,9 +1730,9 @@ public:
 			{
 				engine->sz->Clear(&engine->net->message);
 				// save space for the header, filled in later
-				MSG_WriteLong(&engine->net->message, 0);
-				MSG_WriteByte(&engine->net->message, CCREP_REJECT);
-				MSG_WriteString(&engine->net->message, "Server is full.\n");
+				engine->msg->WriteLong(&engine->net->message, 0);
+				engine->msg->WriteByte(&engine->net->message, CCREP_REJECT);
+				engine->msg->WriteString(&engine->net->message, "Server is full.\n");
 				*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 				dfunc.Write(acceptsock, engine->net->message.data, engine->net->message.cursize, clientaddr);
 				engine->sz->Clear(&engine->net->message);
@@ -1752,16 +1752,16 @@ public:
 			// send him back the info about the server connection he has been allocated
 			engine->sz->Clear(&engine->net->message);
 			// save space for the header, filled in later
-			MSG_WriteLong(&engine->net->message, 0);
-			MSG_WriteByte(&engine->net->message, CCREP_ACCEPT);
+			engine->msg->WriteLong(&engine->net->message, 0);
+			engine->msg->WriteByte(&engine->net->message, CCREP_ACCEPT);
 			dfunc.GetSocketAddr(sock->socket, &newaddr);
-			MSG_WriteLong(&engine->net->message, dfunc.GetSocketPort(&newaddr));
-			//	MSG_WriteString(&engine->net->message, dfunc.AddrToString(&newaddr));
+			engine->msg->WriteLong(&engine->net->message, dfunc.GetSocketPort(&newaddr));
+			//	engine->msg->WriteString(&engine->net->message, dfunc.AddrToString(&newaddr));
 			if (sock->proquake_angle_hack)
 			{
-				MSG_WriteByte(&engine->net->message, 1);  // proquake
-				MSG_WriteByte(&engine->net->message, 30); // ver 30 should be safe. 34 screws with our single-server-socket stuff.
-				MSG_WriteByte(&engine->net->message, 0);
+				engine->msg->WriteByte(&engine->net->message, 1);  // proquake
+				engine->msg->WriteByte(&engine->net->message, 30); // ver 30 should be safe. 34 screws with our single-server-socket stuff.
+				engine->msg->WriteByte(&engine->net->message, 0);
 			}
 			*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 			dfunc.Write(acceptsock, engine->net->message.data, engine->net->message.cursize, clientaddr);
@@ -1770,7 +1770,7 @@ public:
 			// spawn the client.
 			// FIXME: come up with some challenge mechanism so that we don't go to the expense of spamming serverinfos+modellists+etc until we know that its an actual
 			// connection attempt.
-			svs.clients[plnum].netconnection = sock;
+			engine->svs.clients[plnum].netconnection = sock;
 			SV_ConnectClient(plnum);
 		}
 
@@ -1794,7 +1794,7 @@ public:
 							continue;
 						for (engine->net->landriverlevel = 0; engine->net->landriverlevel < engine->net->numlandrivers; engine->net->landriverlevel++)
 						{
-							if (net_landrivers[engine->net->landriverlevel].initialized && dfunc.listeningSock != INVALID_SOCKET)
+							if (engine->net->landrivers[engine->net->landriverlevel].initialized && dfunc.listeningSock != INVALID_SOCKET)
 							{
 								if (dfunc.GetAddrFromName(net_masters[k].string, &addr) >= 0)
 								{
@@ -1821,28 +1821,28 @@ public:
 			engine->sz->Clear(&engine->net->message);
 			if (master) // assume false if you want only the protocol 15 servers.
 			{
-				MSG_WriteLong(&engine->net->message, ~0);
-				MSG_WriteString(&engine->net->message, "getinfo");
+				engine->msg->WriteLong(&engine->net->message, ~0);
+				engine->msg->WriteString(&engine->net->message, "getinfo");
 			}
 			else
 			{
 				// save space for the header, filled in later
-				MSG_WriteLong(&engine->net->message, 0);
-				MSG_WriteByte(&engine->net->message, CCREQ_SERVER_INFO);
-				MSG_WriteString(&engine->net->message, "TREMOR");
-				MSG_WriteByte(&engine->net->message, NET_PROTOCOL_VERSION);
+				engine->msg->WriteLong(&engine->net->message, 0);
+				engine->msg->WriteByte(&engine->net->message, CCREQ_SERVER_INFO);
+				engine->msg->WriteString(&engine->net->message, "TREMOR");
+				engine->msg->WriteByte(&engine->net->message, NET_PROTOCOL_VERSION);
 				*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 			}
 			dfunc.Write(dfunc.controlSock, engine->net->message.data, engine->net->message.cursize, addr);
 			engine->sz->Clear(&engine->net->message);
 		}
-		static struct
+		static struct hostlist_s
 		{
 			int				 driver;
 			bool		 requery;
 			bool		 master;
 			struct qsockaddr addr;
-		}		   *hostlist;
+		} 		   *hostlist;
 		size_t		hostlist_count;
 		size_t		hostlist_max;
 		void _Datagram_AddPossibleHost(struct qsockaddr* addr, bool master)
@@ -1858,7 +1858,7 @@ public:
 			if (hostlist_count == hostlist_max)
 			{
 				hostlist_max = hostlist_count + 16;
-				hostlist = Mem_Realloc(hostlist, sizeof(*hostlist) * hostlist_max);
+				hostlist = (Engine::Datagram::hostlist_s*)Mem_Realloc(hostlist, sizeof(*hostlist) * hostlist_max);
 			}
 			hostlist[hostlist_count].addr = *addr;
 			hostlist[hostlist_count].requery = true;
@@ -1943,10 +1943,10 @@ public:
 							continue;
 						if (dfunc.GetAddrFromName(net_masters[m].string, &masteraddr) >= 0)
 						{
-							const char* prot = com_protocolname.string;
+							const char* prot = engine->com->protocolname.string;
 							while (*prot)
 							{ // send a request for each protocol
-								prot = COM_Parse(prot);
+								prot = engine->com->Parse(prot);
 								if (!prot)
 									break;
 								if (*com_token)
@@ -1982,65 +1982,65 @@ public:
 
 				engine->msg->BeginReading();
 				control = BigLong(*((int*)engine->net->message.data));
-				MSG_ReadLong();
+				engine->msg->ReadLong();
 				if (control == -1)
 				{
-					if (msg_readcount + 19 <= engine->net->message.cursize && !strncmp((char*)engine->net->message.data + msg_readcount, "getserversResponse", 18))
+					if (engine->msg->readcount + 19 <= engine->net->message.cursize && !strncmp((char*)engine->net->message.data + engine->msg->readcount, "getserversResponse", 18))
 					{
 						struct qsockaddr addr;
 						int				 j;
-						msg_readcount += 18;
+						engine->msg->readcount += 18;
 						for (;;)
 						{
-							switch (MSG_ReadByte())
+							switch (engine->msg->ReadByte())
 							{
 							case '\\':
 								memset(&addr, 0, sizeof(addr));
 								addr.qsa_family = AF_INET;
 								for (j = 0; j < 4; j++)
-									((byte*)&((struct sockaddr_in*)&addr)->sin_addr)[j] = MSG_ReadByte();
-								((byte*)&((struct sockaddr_in*)&addr)->sin_port)[0] = MSG_ReadByte();
-								((byte*)&((struct sockaddr_in*)&addr)->sin_port)[1] = MSG_ReadByte();
+									((byte*)&((struct sockaddr_in*)&addr)->sin_addr)[j] = engine->msg->ReadByte();
+								((byte*)&((struct sockaddr_in*)&addr)->sin_port)[0] = engine->msg->ReadByte();
+								((byte*)&((struct sockaddr_in*)&addr)->sin_port)[1] = engine->msg->ReadByte();
 								if (!((struct sockaddr_in*)&addr)->sin_port)
-									msg_badread = true;
+									engine->msg->badread = true;
 								break;
 							case '/':
 								memset(&addr, 0, sizeof(addr));
 								addr.qsa_family = AF_INET6;
 								for (j = 0; j < 16; j++)
-									((byte*)&((struct sockaddr_in6*)&addr)->sin6_addr)[j] = MSG_ReadByte();
-								((byte*)&((struct sockaddr_in6*)&addr)->sin6_port)[0] = MSG_ReadByte();
-								((byte*)&((struct sockaddr_in6*)&addr)->sin6_port)[1] = MSG_ReadByte();
+									((byte*)&((struct sockaddr_in6*)&addr)->sin6_addr)[j] = engine->msg->ReadByte();
+								((byte*)&((struct sockaddr_in6*)&addr)->sin6_port)[0] = engine->msg->ReadByte();
+								((byte*)&((struct sockaddr_in6*)&addr)->sin6_port)[1] = engine->msg->ReadByte();
 								if (!((struct sockaddr_in6*)&addr)->sin6_port)
-									msg_badread = true;
+									engine->msg->badread = true;
 								break;
 							default:
 								memset(&addr, 0, sizeof(addr));
-								msg_badread = true;
+								engine->msg->badread = true;
 								break;
 							}
-							if (msg_badread)
+							if (engine->msg->badread)
 								break;
-							_Datagram_AddPossibleHost(&addr, true);
+							engine->datagram->_Datagram_AddPossibleHost(&addr, true);
 							sentsomething = true;
 						}
 					}
-					else if (msg_readcount + 13 <= engine->net->message.cursize && !strncmp((char*)engine->net->message.data + msg_readcount, "infoResponse\n", 13))
+					else if (engine->msg->readcount + 13 <= engine->net->message.cursize && !strncmp((char*)engine->net->message.data + engine->msg->readcount, "infoResponse\n", 13))
 					{ // response from a dpp7 server (or possibly 15, no idea really)
 						char		tmp[1024];
-						const char* info = MSG_ReadString() + 13;
+						const char* info = engine->msg->ReadString() + 13;
 
 						// search the cache for this server
 						for (n = 0; n < hostCacheCount; n++)
 						{
-							if (dfunc.AddrCompare(&readaddr, &hostcache[n].addr) == 0)
+							if (dfunc.AddrCompare(&readaddr, &engine->host->cache[n].addr) == 0)
 								break;
 						}
 
 						// is it already there?
 						if (n < hostCacheCount)
 						{
-							if (*hostcache[n].cname)
+							if (*engine->host->cache[n].cname)
 								continue;
 						}
 						else
@@ -2048,48 +2048,48 @@ public:
 							// add it
 							hostCacheCount++;
 						}
-						Info_ReadKey(info, "hostname", hostcache[n].name, sizeof(hostcache[n].name));
-						if (!*hostcache[n].name)
-							q_strlcpy(hostcache[n].name, "UNNAMED", sizeof(hostcache[n].name));
-						Info_ReadKey(info, "mapname", hostcache[n].map, sizeof(hostcache[n].map));
-						Info_ReadKey(info, "modname", hostcache[n].gamedir, sizeof(hostcache[n].gamedir));
+						engine->datagram->Info_ReadKey(info, "hostname", engine->host->cache[n].name, sizeof(engine->host->cache[n].name));
+						if (!*engine->host->cache[n].name)
+							q_strlcpy(engine->host->cache[n].name, "UNNAMED", sizeof(engine->host->cache[n].name));
+						engine->datagram->Info_ReadKey(info, "mapname", engine->host->cache[n].map, sizeof(engine->host->cache[n].map));
+						engine->datagram->Info_ReadKey(info, "modname", engine->host->cache[n].gamedir, sizeof(engine->host->cache[n].gamedir));
 
-						Info_ReadKey(info, "clients", tmp, sizeof(tmp));
-						hostcache[n].users = atoi(tmp);
-						Info_ReadKey(info, "sv_maxclients", tmp, sizeof(tmp));
-						hostcache[n].maxusers = atoi(tmp);
-						Info_ReadKey(info, "protocol", tmp, sizeof(tmp));
+						engine->datagram->Info_ReadKey(info, "clients", tmp, sizeof(tmp));
+						engine->host->cache[n].users = atoi(tmp);
+						engine->datagram->Info_ReadKey(info, "sv_maxclients", tmp, sizeof(tmp));
+						engine->host->cache[n].maxusers = atoi(tmp);
+						engine->datagram->Info_ReadKey(info, "protocol", tmp, sizeof(tmp));
 						if (atoi(tmp) != NET_PROTOCOL_VERSION)
 						{
-							strcpy(hostcache[n].cname, hostcache[n].name);
-							strcpy(hostcache[n].name, "*");
-							strcat(hostcache[n].name, hostcache[n].cname);
+							strcpy(engine->host->cache[n].cname, engine->host->cache[n].name);
+							strcpy(engine->host->cache[n].name, "*");
+							strcat(engine->host->cache[n].name, engine->host->cache[n].cname);
 						}
-						memcpy(&hostcache[n].addr, &readaddr, sizeof(struct qsockaddr));
-						hostcache[n].driver = net_driverlevel;
-						hostcache[n].ldriver = engine->net->landriverlevel;
-						q_strlcpy(hostcache[n].cname, dfunc.AddrToString(&readaddr, false), sizeof(hostcache[n].cname));
+						memcpy(&engine->host->cache[n].addr, &readaddr, sizeof(struct qsockaddr));
+						engine->host->cache[n].driver = net_driverlevel;
+						engine->host->cache[n].ldriver = engine->net->landriverlevel;
+						q_strlcpy(engine->host->cache[n].cname, dfunc.AddrToString(&readaddr, false), sizeof(engine->host->cache[n].cname));
 
 						// check for a name conflict
 						for (i = 0; i < hostCacheCount; i++)
 						{
 							if (i == n)
 								continue;
-							if (q_strcasecmp(hostcache[n].cname, hostcache[i].cname) == 0)
+							if (q_strcasecmp(engine->host->cache[n].cname, engine->host->cache[i].cname) == 0)
 							{ // this is a dupe.
 								hostCacheCount--;
 								break;
 							}
-							if (q_strcasecmp(hostcache[n].name, hostcache[i].name) == 0)
+							if (q_strcasecmp(engine->host->cache[n].name, engine->host->cache[i].name) == 0)
 							{
-								i = strlen(hostcache[n].name);
-								if (i < 15 && hostcache[n].name[i - 1] > '8')
+								i = strlen(engine->host->cache[n].name);
+								if (i < 15 && engine->host->cache[n].name[i - 1] > '8')
 								{
-									hostcache[n].name[i] = '0';
-									hostcache[n].name[i + 1] = 0;
+									engine->host->cache[n].name[i] = '0';
+									engine->host->cache[n].name[i + 1] = 0;
 								}
 								else
-									hostcache[n].name[i - 1]++;
+									engine->host->cache[n].name[i - 1]++;
 
 								i = (size_t)-1;
 							}
@@ -2102,11 +2102,11 @@ public:
 				if ((control & NETFLAG_LENGTH_MASK) != ret)
 					continue;
 
-				if (MSG_ReadByte() != CCREP_SERVER_INFO)
+				if (engine->msg->ReadByte() != CCREP_SERVER_INFO)
 					continue;
 
-				MSG_ReadString();
-				// dfunc.GetAddrFromName(MSG_ReadString(), &peeraddr);
+				engine->msg->ReadString();
+				// dfunc.GetAddrFromName(engine->msg->ReadString(), &peeraddr);
 				/*if (dfunc.AddrCompare(&readaddr, &peeraddr) != 0)
 				{
 					char read[NET_NAMELEN];
@@ -2119,14 +2119,14 @@ public:
 				// search the cache for this server
 				for (n = 0; n < hostCacheCount; n++)
 				{
-					if (dfunc.AddrCompare(&readaddr, &hostcache[n].addr) == 0)
+					if (dfunc.AddrCompare(&readaddr, &engine->host->cache[n].addr) == 0)
 						break;
 				}
 
 				// is it already there?
 				if (n < hostCacheCount)
 				{
-					if (*hostcache[n].cname)
+					if (*engine->host->cache[n].cname)
 						continue;
 				}
 				else
@@ -2134,44 +2134,44 @@ public:
 					// add it
 					hostCacheCount++;
 				}
-				q_strlcpy(hostcache[n].name, MSG_ReadString(), sizeof(hostcache[n].name));
-				if (!*hostcache[n].name)
-					q_strlcpy(hostcache[n].name, "UNNAMED", sizeof(hostcache[n].name));
-				q_strlcpy(hostcache[n].map, MSG_ReadString(), sizeof(hostcache[n].map));
-				hostcache[n].users = MSG_ReadByte();
-				hostcache[n].maxusers = MSG_ReadByte();
-				if (MSG_ReadByte() != NET_PROTOCOL_VERSION)
+				q_strlcpy(engine->host->cache[n].name, engine->msg->ReadString(), sizeof(engine->host->cache[n].name));
+				if (!*engine->host->cache[n].name)
+					q_strlcpy(engine->host->cache[n].name, "UNNAMED", sizeof(engine->host->cache[n].name));
+				q_strlcpy(engine->host->cache[n].map, engine->msg->ReadString(), sizeof(engine->host->cache[n].map));
+				engine->host->cache[n].users = engine->msg->ReadByte();
+				engine->host->cache[n].maxusers = engine->msg->ReadByte();
+				if (engine->msg->ReadByte() != NET_PROTOCOL_VERSION)
 				{
-					strcpy(hostcache[n].cname, hostcache[n].name);
-					hostcache[n].cname[14] = 0;
-					strcpy(hostcache[n].name, "*");
-					strcat(hostcache[n].name, hostcache[n].cname);
+					strcpy(engine->host->cache[n].cname, engine->host->cache[n].name);
+					engine->host->cache[n].cname[14] = 0;
+					strcpy(engine->host->cache[n].name, "*");
+					strcat(engine->host->cache[n].name, engine->host->cache[n].cname);
 				}
-				memcpy(&hostcache[n].addr, &readaddr, sizeof(struct qsockaddr));
-				hostcache[n].driver = net_driverlevel;
-				hostcache[n].ldriver = engine->net->landriverlevel;
-				q_strlcpy(hostcache[n].cname, dfunc.AddrToString(&readaddr, false), sizeof(hostcache[n].cname));
+				memcpy(&engine->host->cache[n].addr, &readaddr, sizeof(struct qsockaddr));
+				engine->host->cache[n].driver = net_driverlevel;
+				engine->host->cache[n].ldriver = engine->net->landriverlevel;
+				q_strlcpy(engine->host->cache[n].cname, dfunc.AddrToString(&readaddr, false), sizeof(engine->host->cache[n].cname));
 
 				// check for a name conflict
 				for (i = 0; i < hostCacheCount; i++)
 				{
 					if (i == n)
 						continue;
-					if (q_strcasecmp(hostcache[n].cname, hostcache[i].cname) == 0)
+					if (q_strcasecmp(engine->host->cache[n].cname, engine->host->cache[i].cname) == 0)
 					{ // this is a dupe.
 						hostCacheCount--;
 						break;
 					}
-					if (q_strcasecmp(hostcache[n].name, hostcache[i].name) == 0)
+					if (q_strcasecmp(engine->host->cache[n].name, engine->host->cache[i].name) == 0)
 					{
-						i = strlen(hostcache[n].name);
-						if (i < 15 && hostcache[n].name[i - 1] > '8')
+						i = strlen(engine->host->cache[n].name);
+						if (i < 15 && engine->host->cache[n].name[i - 1] > '8')
 						{
-							hostcache[n].name[i] = '0';
-							hostcache[n].name[i + 1] = 0;
+							engine->host->cache[n].name[i] = '0';
+							engine->host->cache[n].name[i + 1] = 0;
 						}
 						else
-							hostcache[n].name[i - 1]++;
+							engine->host->cache[n].name[i - 1]++;
 
 						i = (size_t)-1;
 					}
@@ -2204,7 +2204,7 @@ public:
 			{
 				if (hostCacheCount == HOSTCACHESIZE)
 					break;
-				if (net_landrivers[engine->net->landriverlevel].initialized)
+				if (engine->net->landrivers[engine->net->landriverlevel].initialized)
 					ret |= _Datagram_SearchForHosts(xmit, engine);
 			}
 			return ret;
@@ -2246,18 +2246,18 @@ public:
 			{
 				engine->sz->Clear(&engine->net->message);
 				// save space for the header, filled in later
-				MSG_WriteLong(&engine->net->message, 0);
-				MSG_WriteByte(&engine->net->message, CCREQ_CONNECT);
-				MSG_WriteString(&engine->net->message, "TREMOR");
-				MSG_WriteByte(&engine->net->message, NET_PROTOCOL_VERSION);
+				engine->msg->WriteLong(&engine->net->message, 0);
+				engine->msg->WriteByte(&engine->net->message, CCREQ_CONNECT);
+				engine->msg->WriteString(&engine->net->message, "TREMOR");
+				engine->msg->WriteByte(&engine->net->message, NET_PROTOCOL_VERSION);
 				if (sock->proquake_angle_hack)
 				{ /*Spike -- proquake compat. if both engines claim to be using mod==1 then 16bit client->server angles can be used. server->client angles remain
 					 16bit*/
 					Con_DWarning("Attempting to use ProQuake angle hack\n");
-					MSG_WriteByte(&engine->net->message, 1);  /*'mod', 1=proquake*/
-					MSG_WriteByte(&engine->net->message, 34); /*'mod' version*/
-					MSG_WriteByte(&engine->net->message, 0);  /*flags*/
-					MSG_WriteLong(&engine->net->message, 0);  // strtoul(password.string, NULL, 0)); /*password*/
+					engine->msg->WriteByte(&engine->net->message, 1);  /*'mod', 1=proquake*/
+					engine->msg->WriteByte(&engine->net->message, 34); /*'mod' version*/
+					engine->msg->WriteByte(&engine->net->message, 0);  /*flags*/
+					engine->msg->WriteLong(&engine->net->message, 0);  // strtoul(password.string, NULL, 0)); /*password*/
 				}
 				*((int*)engine->net->message.data) = BigLong(NETFLAG_CTL | (engine->net->message.cursize & NETFLAG_LENGTH_MASK));
 				dfunc.Write(newsock, engine->net->message.data, engine->net->message.cursize, serveraddr);
@@ -2282,7 +2282,7 @@ public:
 							SDL_Log("wrong reply address\n");
 							SDL_Log("Expected: %s | %s\n", dfunc.AddrToString(serveraddr, false), StrAddr(serveraddr));
 							SDL_Log("Received: %s | %s\n", dfunc.AddrToString(&readaddr, false), StrAddr(&readaddr));
-							SCR_UpdateScreen(false);
+							//SCR_UpdateScreen(false);
 							ret = 0;
 							continue;
 						}
@@ -2297,10 +2297,10 @@ public:
 						engine->msg->BeginReading();
 
 						control = BigLong(*((int*)engine->net->message.data));
-						MSG_ReadLong();
+						engine->msg->ReadLong();
 						if (control == -1)
 						{
-							const char* s = MSG_ReadString();
+							const char* s = engine->msg->ReadString();
 							if (!strncmp(s, "challenge ", 10))
 							{ // either a q2 or dp server...
 								char buf[1024];
@@ -2317,7 +2317,7 @@ public:
 							}
 							/*else if (!strcmp(s, "reject"))
 							{
-								reason = MSG_ReadString();
+								reason = engine->msg->ReadString();
 								SDL_Log("%s\n", reason);
 								q_strlcpy(m_return_reason, reason, sizeof(m_return_reason));
 								goto ErrorReturn;
@@ -2363,10 +2363,10 @@ public:
 				goto ErrorReturn;
 			}
 
-			ret = MSG_ReadByte();
+			ret = engine->msg->ReadByte();
 			if (ret == CCREP_REJECT)
 			{
-				reason = MSG_ReadString();
+				reason = engine->msg->ReadString();
 				SDL_Log("%s\n", reason);
 				q_strlcpy(m_return_reason, reason, sizeof(m_return_reason));
 				goto ErrorReturn;
@@ -2376,7 +2376,7 @@ public:
 			{
 				int port;
 				memcpy(&sock->addr, serveraddr, sizeof(struct qsockaddr));
-				port = MSG_ReadLong();
+				port = engine->msg->ReadLong();
 				if (port) // spike --- don't change the remote port if the server doesn't want us to. this allows servers to use port forwarding with less issues,
 					// assuming the server uses the same port for all clients.
 					dfunc.SetSocketPort(&sock->addr, port);
@@ -2391,9 +2391,9 @@ public:
 
 			if (sock->proquake_angle_hack)
 			{
-				byte mod = (msg_readcount < engine->net->message.cursize) ? MSG_ReadByte() : 0;
-				byte ver = (msg_readcount < engine->net->message.cursize) ? MSG_ReadByte() : 0;
-				byte flags = (msg_readcount < engine->net->message.cursize) ? MSG_ReadByte() : 0;
+				byte mod = (engine->msg->readcount < engine->net->message.cursize) ? engine->msg->ReadByte() : 0;
+				byte ver = (engine->msg->readcount < engine->net->message.cursize) ? engine->msg->ReadByte() : 0;
+				byte flags = (engine->msg->readcount < engine->net->message.cursize) ? engine->msg->ReadByte() : 0;
 				(void)ver;
 
 				if (mod == 1 /*MOD_PROQUAKE*/)
@@ -2478,7 +2478,7 @@ public:
 			host = Strip_Port(host);
 			for (engine->net->landriverlevel = 0; engine->net->landriverlevel < engine->net->numlandrivers; engine->net->landriverlevel++)
 			{
-				if (net_landrivers[engine->net->landriverlevel].initialized)
+				if (engine->net->landrivers[engine->net->landriverlevel].initialized)
 				{
 					// see if we can resolve the host name
 					// Spike -- moved name resolution to here to avoid extraneous 'could not resolves' when using other address families
@@ -2639,7 +2639,7 @@ public:
 			broadcastaddrv4.sin_port = htons((unsigned short)net_hostport);
 
 			SDL_Log("IPv4 UDP Initialized\n");
-			ipv4Available = true;
+			engine->net->ipv4Available = true;
 
 			return netv4_controlsocket;
 		}
@@ -2702,7 +2702,7 @@ public:
 			if (bind(newsocket, (struct sockaddr*)&address, sizeof(address)) == 0)
 				return newsocket;
 
-			if (ipv4Available)
+			if (engine->net->ipv4Available)
 			{
 				err = SOCKETERRNO;
 				SDL_Log("Unable to bind to %s (%s)\n", WINS_AddrToString((struct qsockaddr*)&address, false), socketerror(err));
@@ -3069,7 +3069,7 @@ public:
 			if (name[0] >= '0' && name[0] <= '9')
 				return PartialIPAddress(name, addr);
 
-			colon = strrchr(name, ':');
+			colon = (char*)strrchr(name, ':');
 			if (colon)
 			{
 				char dupe[MAXHOSTNAMELEN];
@@ -6365,7 +6365,101 @@ public:
 		searchpath_t* searchpaths;
 		searchpath_t* base_searchpaths;
 
+		cvar_t protocolname = { "engine->com->protocolname", "Tremor" };
 
+		const char* ParseEx(const char* data, cpe_mode mode)
+		{
+			int c;
+			int len;
+
+			len = 0;
+			com_token[0] = 0;
+
+			if (!data)
+				return NULL;
+
+			// skip whitespace
+		skipwhite:
+			while ((c = *data) <= ' ')
+			{
+				if (c == 0)
+					return NULL; // end of file
+				data++;
+			}
+
+			// skip // comments
+			if (c == '/' && data[1] == '/')
+			{
+				while (*data && *data != '\n')
+					data++;
+				goto skipwhite;
+			}
+
+			// skip /*..*/ comments
+			if (c == '/' && data[1] == '*')
+			{
+				data += 2;
+				while (*data && !(*data == '*' && data[1] == '/'))
+					data++;
+				if (*data)
+					data += 2;
+				goto skipwhite;
+			}
+
+			// handle quoted strings specially
+			if (c == '\"')
+			{
+				data++;
+				while (1)
+				{
+					if ((c = *data) != 0)
+						++data;
+					if (c == '\"' || !c)
+					{
+						com_token[len] = 0;
+						return data;
+					}
+					if (len < countof(com_token) - 1)
+						com_token[len++] = c;
+					else if (mode == CPE_NOTRUNC)
+						return NULL;
+				}
+			}
+
+			// parse single characters
+			if (c == '{' || c == '}' || c == '(' || c == ')' || c == '\'' || c == ':')
+			{
+				if (len < countof(com_token) - 1)
+					com_token[len++] = c;
+				else if (mode == CPE_NOTRUNC)
+					return NULL;
+				com_token[len] = 0;
+				return data + 1;
+			}
+
+			// parse a regular word
+			do
+			{
+				if (len < countof(com_token) - 1)
+					com_token[len++] = c;
+				else if (mode == CPE_NOTRUNC)
+					return NULL;
+				data++;
+				c = *data;
+				/* commented out the check for ':' so that ip:port works */
+				if (c == '{' || c == '}' || c == '(' || c == ')' || c == '\'' /* || c == ':' */)
+					break;
+			} while (c > 32);
+
+			com_token[len] = 0;
+			return data;
+		}
+
+
+		const char* Parse(const char* data)
+		{
+			return ParseEx(data, CPE_NOTRUNC);
+		}
 
 		COM(Engine* e) {
 			engine = e;
@@ -7227,14 +7321,14 @@ public:
 					continue;
 
 				engine->msg->WriteByte(&client->message, svc_updatename);
-				engine->msg->WriteByte(&client->message, host_client - svs.clients);
+				engine->msg->WriteByte(&client->message, host_client - engine->svs.clients);
 				engine->msg->WriteString(&client->message, "");
 				engine->msg->WriteByte(&client->message, svc_updatecolors);
-				engine->msg->WriteByte(&client->message, host_client - svs.clients);
+				engine->msg->WriteByte(&client->message, host_client - engine->svs.clients);
 				engine->msg->WriteByte(&client->message, 0);
 
 				engine->msg->WriteByte(&client->message, svc_updatefrags);
-				engine->msg->WriteByte(&client->message, host_client - svs.clients);
+				engine->msg->WriteByte(&client->message, host_client - engine->svs.clients);
 				engine->msg->WriteShort(&client->message, 0);
 			}
 		}
@@ -7547,13 +7641,72 @@ public:
 			engine->msg = this;
 		}
 
-		int		 msg_readcount;
-		bool msg_badread;
+		int		 readcount;
+		bool	badread;
 
 		void BeginReading(void)
 		{
-			msg_readcount = 0;
-			msg_badread = false;
+			engine->msg->readcount = 0;
+			engine->msg->badread = false;
+		}
+
+		int ReadLong(void)
+		{
+			uint32_t c;
+
+			if (engine->msg->readcount + 4 > engine->net->message.cursize)
+			{
+				engine->msg->badread = true;
+				return -1;
+			}
+
+			c = (uint32_t)engine->net->message.data[engine->msg->readcount] + ((uint32_t)(engine->net->message.data[engine->msg->readcount + 1]) << 8) +
+				((uint32_t)(engine->net->message.data[engine->msg->readcount + 2]) << 16) + ((uint32_t)(engine->net->message.data[engine->msg->readcount + 3]) << 24);
+
+			engine->msg->readcount += 4;
+
+			return c;
+		}
+
+
+
+		const char* ReadString(void)
+		{
+			static char string[2048];
+			int			c;
+			size_t		l;
+
+			l = 0;
+			do
+			{
+				c = ReadByte();
+				if (c == -1 || c == 0)
+					break;
+				string[l] = c;
+				l++;
+			} while (l < sizeof(string) - 1);
+
+			string[l] = 0;
+
+			return string;
+		}
+
+
+
+		int ReadByte(void)
+		{
+			int c;
+
+			if (engine->msg->readcount + 1 > engine->net->message.cursize)
+			{
+				engine->msg->badread = true;
+				return -1;
+			}
+
+			c = (unsigned char)engine->net->message.data[engine->msg->readcount];
+			engine->msg->readcount++;
+
+			return c;
 		}
 
 		void WriteLong(sizebuf_t* sb, int c)
@@ -7596,7 +7749,7 @@ public:
 
 #ifdef PARANOID
 			if (c < 0 || c > 255)
-				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"MSG_WriteByte: range error");
+				SDL_LogError(SDL_LOG_PRIORITY_ERROR,"engine->msg->WriteByte: range error");
 #endif
 
 			buf = (byte*)engine->sz->GetSpace(sb, 1);

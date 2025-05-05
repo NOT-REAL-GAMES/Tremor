@@ -35,6 +35,27 @@
 #define MAX_DEMOS	  8
 #define MAX_DEMONAME  16
 
+#define QS_STRINGIFY_(x) #x
+#define QS_STRINGIFY(x)	 QS_STRINGIFY_ (x)
+
+#define TREMOR_VERSION_MAJOR 0
+#define TREMOR_VERSION_MINOR 0
+#define TREMOR_VER_PATCH	  1
+
+#define TREMOR_VERSION 0.0
+
+
+#define TREMOR_VER_STRING	  QS_STRINGIFY (TREMOR_VERSION) "." QS_STRINGIFY (TREMOR_VER_PATCH) TREMOR_VER_SUFFIX
+#define ENGINE_NAME_AND_VER \
+	QS_STRINGIFY ("Tremor"               \
+	" " TREMOR_VER_STRING)
+
+typedef enum
+{
+	CPE_NOTRUNC,	// return parse error in case of overflow
+	CPE_ALLOWTRUNC, // truncate com_token in case of overflow
+} cpe_mode;
+
 #define CSHIFT_CONTENTS 0
 #define CSHIFT_DAMAGE	1
 #define CSHIFT_BONUS	2
@@ -3405,3 +3426,23 @@ int q_snprintf(char* str, size_t size, const char* format, ...)
 
 int net_hostport;
 int DEFAULTnet_hostport = 26000;
+
+int (WSAAPI* qgetaddrinfo) (const char* nodename, const char* servname, const struct addrinfo* hints, struct addrinfo** res);
+void (WSAAPI* qfreeaddrinfo) (const struct addrinfo* ai);
+
+THREAD_LOCAL char com_token[1024];
+
+enum m_state_e m_return_state;
+bool	   m_return_onerror;
+char		   m_return_reason[32];
+
+static char* StrAddr(struct qsockaddr* addr)
+{
+	static char buf[34];
+	byte* p = (byte*)addr;
+	int			n;
+
+	for (n = 0; n < 16; n++)
+		q_snprintf(buf + n * 2, sizeof(buf) - (n * 2), "%02x", *p++);
+	return buf;
+}
