@@ -3475,3 +3475,22 @@ enum m_state_e
 };
 
 enum m_state_e m_state;
+
+#define MAX_ALIAS_NAME 32
+
+typedef void (*xcommand_t) (void);
+typedef struct cmd_function_s
+{
+	struct cmd_function_s* next;
+	const char* name;
+	xcommand_t			   function;
+	cmd_source_t		   srctype;
+	bool			   dynamic;
+} cmd_function_t;
+
+typedef struct cmdalias_s
+{
+	struct cmdalias_s* next;
+	char			   name[MAX_ALIAS_NAME];
+	char* value;
+} cmdalias_t;
