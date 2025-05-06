@@ -3026,7 +3026,7 @@ typedef struct _PollProcedure
 {
 	struct _PollProcedure* next;
 	double				   nextTime;
-	void (*procedure) (void*, Engine* engine);
+	void (*procedure) (void*);
 	void* arg;
 } PollProcedure;
 
@@ -3298,25 +3298,25 @@ int q_strcasecmp(const char* s1, const char* s2)
 
 typedef char qhostaddr_t[NET_NAMELEN];
 
-typedef struct
-{
-	const char* name;
-	bool	initialized;
-	int (*Init) (Engine* engine);
-	void (*Listen) (bool state, Engine* engine);
-	int (*QueryAddresses) (qhostaddr_t* addresses, int maxaddresses, Engine* engine);
-	bool(*SearchForHosts) (bool xmit, Engine* engine);
-	qsocket_t* (*Connect) (const char* host, Engine* engine);
-	qsocket_t* (*CheckNewConnections) (Engine* engine);
-	qsocket_t* (*QGetAnyMessage) (Engine* engine);
-	int (*QGetMessage) (qsocket_t* sock, Engine* engine);
-	int (*QSendMessage) (qsocket_t* sock, sizebuf_t* data, Engine* engine);
-	int (*SendUnreliableMessage) (qsocket_t* sock, sizebuf_t* data, Engine* engine);
-	bool(*CanSendMessage) (qsocket_t* sock, Engine* engine);
-	bool(*CanSendUnreliableMessage) (qsocket_t* sock, Engine* engine);
-	void (*Close) (qsocket_t* sock, Engine* engine);
-	void (*Shutdown) (Engine* engine);
-} net_driver_t;
+//typedef struct
+//{
+//	const char* name;
+//	bool	initialized;
+//	int (*Init) (Engine* engine);
+//	void (*Listen) (bool state, Engine* engine);
+//	int (*QueryAddresses) (qhostaddr_t* addresses, int maxaddresses, Engine* engine);
+//	bool(*SearchForHosts) (bool xmit, Engine* engine);
+//	qsocket_t* (*Connect) (const char* host, Engine* engine);
+//	qsocket_t* (*CheckNewConnections) (Engine* engine);
+//	qsocket_t* (*QGetAnyMessage) (Engine* engine);
+//	int (*QGetMessage) (qsocket_t* sock, Engine* engine);
+//	int (*QSendMessage) (qsocket_t* sock, sizebuf_t* data, Engine* engine);
+//	int (*SendUnreliableMessage) (qsocket_t* sock, sizebuf_t* data, Engine* engine);
+//	bool(*CanSendMessage) (qsocket_t* sock, Engine* engine);
+//	bool(*CanSendUnreliableMessage) (qsocket_t* sock, Engine* engine);
+//	void (*Close) (qsocket_t* sock, Engine* engine);
+//	void (*Shutdown) (Engine* engine);
+//} net_driver_t;
 
 typedef struct net_landriver_s
 {
@@ -3378,14 +3378,14 @@ static struct
 	byte		 data[MAX_DATAGRAM];
 } packetBuffer;
 
-net_driver_t net_drivers[]{
-	{"Loopback", false, Engine::Loop::Loop_Init, Engine::Loop::Loop_Listen, Loop_QueryAddresses, Engine::Loop::Loop_SearchForHosts, Engine::Loop::Loop_Connect, Engine::Loop::Loop_CheckNewConnections, Engine::Loop::Loop_GetAnyMessage,
-	 Engine::Loop::Loop_GetMessage, Engine::Loop::Loop_SendMessage, Engine::Loop::Loop_SendUnreliableMessage, Engine::Loop::Loop_CanSendMessage, Engine::Loop::Loop_CanSendUnreliableMessage, Engine::Loop::Loop_Close, Engine::Loop::Loop_Shutdown},
-
-	{"Datagram", false, Engine::Datagram::Datagram_Init, Engine::Datagram::Datagram_Listen, Engine::Datagram::Datagram_QueryAddresses, Engine::Datagram::Datagram_SearchForHosts, Engine::Datagram::Datagram_Connect, Engine::Datagram::Datagram_CheckNewConnections,
-	 Engine::Datagram::Datagram_GetAnyMessage, Engine::Datagram::Datagram_GetMessage, Engine::Datagram::Datagram_SendMessage, Engine::Datagram::Datagram_SendUnreliableMessage, Engine::Datagram::Datagram_CanSendMessage,
-	 Engine::Datagram::Datagram_CanSendUnreliableMessage, Engine::Datagram::Datagram_Close, Engine::Datagram::Datagram_Shutdown} };
-
+//net_driver_t net_drivers[]{
+//	{"Loopback", false, Engine::Loop::Loop_Init, Engine::Loop::Loop_Listen, Loop_QueryAddresses, Engine::Loop::Loop_SearchForHosts, Engine::Loop::Loop_Connect, Engine::Loop::Loop_CheckNewConnections, Engine::Loop::Loop_GetAnyMessage,
+//	 Engine::Loop::Loop_GetMessage, Engine::Loop::Loop_SendMessage, Engine::Loop::Loop_SendUnreliableMessage, Engine::Loop::Loop_CanSendMessage, Engine::Loop::Loop_CanSendUnreliableMessage, Engine::Loop::Loop_Close, Engine::Loop::Loop_Shutdown},
+//
+//	{"Datagram", false, Engine::Datagram::Datagram_Init, Engine::Datagram::Datagram_Listen, Engine::Datagram::Datagram_QueryAddresses, Engine::Datagram::Datagram_SearchForHosts, Engine::Datagram::Datagram_Connect, Engine::Datagram::Datagram_CheckNewConnections,
+//	 Engine::Datagram::Datagram_GetAnyMessage, Engine::Datagram::Datagram_GetMessage, Engine::Datagram::Datagram_SendMessage, Engine::Datagram::Datagram_SendUnreliableMessage, Engine::Datagram::Datagram_CanSendMessage,
+//	 Engine::Datagram::Datagram_CanSendUnreliableMessage, Engine::Datagram::Datagram_Close, Engine::Datagram::Datagram_Shutdown} };
+//
 #define sfunc net_drivers[sock->driver]
 #define dfunc net_drivers[net_driverlevel]
 
@@ -3446,3 +3446,32 @@ static char* StrAddr(struct qsockaddr* addr)
 		q_snprintf(buf + n * 2, sizeof(buf) - (n * 2), "%02x", *p++);
 	return buf;
 }
+
+#define MAX_ARGS 80
+
+enum m_state_e
+{
+	m_none,
+	m_main,
+	m_singleplayer,
+	m_load,
+	m_save,
+	m_multiplayer,
+	m_setup,
+	m_net,
+	m_options,
+	m_game,
+	m_sound,
+	m_video,
+	m_graphics,
+	m_keys,
+	m_help,
+	m_quit,
+	m_lanconfig,
+	m_mpgameoptions,
+	m_search,
+	m_slist,
+	m_mods,
+};
+
+enum m_state_e m_state;

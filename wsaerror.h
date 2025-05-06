@@ -6,6 +6,8 @@
  * http://www.sockets.com/err_lst1.htm
  */
 
+#include "SDL2/SDL.h"
+
 #ifndef __wsaerr_static
 #define __wsaerr_static static
 #endif /* static */
@@ -146,7 +148,7 @@ __wsaerr_static const char *__WSAE_StrError (int err)
 	default:
 	{
 		static char _err_unknown[64];
-		q_snprintf (_err_unknown, sizeof (_err_unknown), "Unknown WSAE error (%d)", err);
+		SDL_Log (_err_unknown, sizeof (_err_unknown), "Unknown WSAE error (%d)", err);
 		return _err_unknown;
 	}
 	}
