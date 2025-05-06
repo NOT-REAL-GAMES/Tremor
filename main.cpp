@@ -32,7 +32,378 @@
 #include "main.h"
 
 
+#include <algorithm>
+#include <cstring>
+#include <stdexcept>
 
+namespace vkQuake {
+	namespace Net {
+
+		// NetAddress implementation
+		NetAddress::NetAddress(std::string_view address, uint16_t port) : port_(port) {
+			// Parse the address string
+			if (address.empty() || address == "localhost") {
+				*this = Loopback(port);
+				return;
+			}
+
+			// Check if this is an IPv4 address in a.b.c.d format
+			struct sockaddr_in sa;
+			if (inet_pton(AF_INET, address.data(), &(sa.sin_addr)) == 1) {
+				// It's a valid IPv4 address
+				is_ipv6_ = false;
+				std::memcpy(address_.data(), &sa.sin_addr, 4);
+			}
+			else {
+				*this = FromHostname(address, port);
+			}
+		}
+
+		NetAddress NetAddress::FromIPv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d, uint16_t port) {
+			NetAddress addr;
+			addr.address_[0] = a;
+			addr.address_[1] = b;
+			addr.address_[2] = c;
+			addr.address_[3] = d;
+			addr.port_ = port;
+			addr.is_ipv6_ = false;
+			return addr;
+		}
+
+		NetAddress NetAddress::FromHostname(std::string_view hostname, uint16_t port) {
+			NetAddress addr;
+			addr.port_ = port;
+
+			struct addrinfo hints {}, * res = nullptr;
+			std::memset(&hints, 0, sizeof(hints));
+			hints.ai_family = AF_UNSPEC;  // Allow IPv4 or IPv6
+			hints.ai_socktype = SOCK_DGRAM;
+
+			// Convert string_view to C-style string for getaddrinfo
+			std::string temp(hostname);
+			int status = getaddrinfo(temp.c_str(), nullptr, &hints, &res);
+
+			if (status != 0) {
+				// Failed to resolve hostname, return loopback as fallback
+				return Loopback(port);
+			}
+
+			if (res->ai_family == AF_INET) {
+				// IPv4 address
+				struct sockaddr_in* ipv4 = reinterpret_cast<struct sockaddr_in*>(res->ai_addr);
+				std::memcpy(addr.address_.data(), &ipv4->sin_addr, 4);
+				addr.is_ipv6_ = false;
+			}
+			else if (res->ai_family == AF_INET6) {
+				// IPv6 address
+				struct sockaddr_in6* ipv6 = reinterpret_cast<struct sockaddr_in6*>(res->ai_addr);
+				std::memcpy(addr.address_.data(), &ipv6->sin6_addr, 16);
+				addr.is_ipv6_ = true;
+			}
+
+			freeaddrinfo(res);
+			return addr;
+		}
+
+		NetAddress NetAddress::Loopback(uint16_t port) {
+			NetAddress addr;
+			addr.address_[0] = 127;
+			addr.address_[1] = 0;
+			addr.address_[2] = 0;
+			addr.address_[3] = 1;
+			addr.port_ = port;
+			addr.is_ipv6_ = false;
+			return addr;
+		}
+
+		bool NetAddress::operator==(const NetAddress& other) const noexcept {
+			if (is_ipv6_ != other.is_ipv6_) {
+				return false;
+			}
+
+			size_t size = is_ipv6_ ? 16 : 4;
+			return (port_ == other.port_) &&
+				(std::memcmp(address_.data(), other.address_.data(), size) == 0);
+		}
+
+		bool NetAddress::operator!=(const NetAddress& other) const noexcept {
+			return !(*this == other);
+		}
+
+		std::string NetAddress::ToString() const {
+			if (is_ipv6_) {
+				// IPv6 formatting
+				char addrStr[INET6_ADDRSTRLEN];
+				inet_ntop(AF_INET6, address_.data(), addrStr, INET6_ADDRSTRLEN);
+				return std::string(addrStr) + ":" + std::to_string(port_);
+			}
+			else {
+				// IPv4 formatting
+				return std::to_string(address_[0]) + "." +
+					std::to_string(address_[1]) + "." +
+					std::to_string(address_[2]) + "." +
+					std::to_string(address_[3]) + ":" +
+					std::to_string(port_);
+			}
+		}
+
+		// MessageBuffer implementation
+		MessageBuffer::MessageBuffer() : MessageBuffer(MAX_MSGLEN) {}
+
+		MessageBuffer::MessageBuffer(size_t initialSize)
+			: buffer_(initialSize), readPos_(0), writePos_(0) {
+		}
+
+		int8_t MessageBuffer::ReadByte() {
+			if (!CanRead(sizeof(int8_t))) {
+				throw std::runtime_error("Buffer underflow when reading byte");
+			}
+
+			int8_t value = static_cast<int8_t>(buffer_[readPos_]);
+			readPos_ += sizeof(int8_t);
+			return value;
+		}
+
+		int16_t MessageBuffer::ReadShort() {
+			if (!CanRead(sizeof(int16_t))) {
+				throw std::runtime_error("Buffer underflow when reading short");
+			}
+
+			int16_t value;
+			std::memcpy(&value, buffer_.data() + readPos_, sizeof(int16_t));
+			readPos_ += sizeof(int16_t);
+			return ntohs(value);  // Convert from network byte order
+		}
+
+		int32_t MessageBuffer::ReadLong() {
+			if (!CanRead(sizeof(int32_t))) {
+				throw std::runtime_error("Buffer underflow when reading long");
+			}
+
+			int32_t value;
+			std::memcpy(&value, buffer_.data() + readPos_, sizeof(int32_t));
+			readPos_ += sizeof(int32_t);
+			return ntohl(value);  // Convert from network byte order
+		}
+
+		float MessageBuffer::ReadFloat() {
+			if (!CanRead(sizeof(float))) {
+				throw std::runtime_error("Buffer underflow when reading float");
+			}
+
+			// Quake stores floats as a 32-bit integer, so we need to convert
+			int32_t intValue = ReadLong();
+			float value;
+			std::memcpy(&value, &intValue, sizeof(float));
+			return value;
+		}
+
+		std::string MessageBuffer::ReadString() {
+			std::string result;
+			char c;
+
+			while (readPos_ < writePos_ && (c = static_cast<char>(buffer_[readPos_++])) != '\0') {
+				result.push_back(c);
+			}
+
+			return result;
+		}
+
+		std::string MessageBuffer::ReadStringLine() {
+			std::string result;
+			char c;
+
+			while (readPos_ < writePos_ &&
+				(c = static_cast<char>(buffer_[readPos_++])) != '\n' &&
+				c != '\0') {
+				result.push_back(c);
+			}
+
+			return result;
+		}
+
+		void MessageBuffer::WriteByte(int8_t value) {
+			EnsureCapacity(writePos_ + sizeof(int8_t));
+			buffer_[writePos_] = static_cast<uint8_t>(value);
+			writePos_ += sizeof(int8_t);
+		}
+
+		void MessageBuffer::WriteShort(int16_t value) {
+			EnsureCapacity(writePos_ + sizeof(int16_t));
+			int16_t netValue = htons(value);  // Convert to network byte order
+			std::memcpy(buffer_.data() + writePos_, &netValue, sizeof(int16_t));
+			writePos_ += sizeof(int16_t);
+		}
+
+		void MessageBuffer::WriteLong(int32_t value) {
+			EnsureCapacity(writePos_ + sizeof(int32_t));
+			int32_t netValue = htonl(value);  // Convert to network byte order
+			std::memcpy(buffer_.data() + writePos_, &netValue, sizeof(int32_t));
+			writePos_ += sizeof(int32_t);
+		}
+
+		void MessageBuffer::WriteFloat(float value) {
+			// Quake stores floats as a 32-bit integer
+			int32_t intValue;
+			std::memcpy(&intValue, &value, sizeof(float));
+			WriteLong(intValue);
+		}
+
+		void MessageBuffer::WriteString(std::string_view str) {
+			EnsureCapacity(writePos_ + str.size() + 1);  // +1 for null terminator
+
+			// Copy string data
+			std::memcpy(buffer_.data() + writePos_, str.data(), str.size());
+			writePos_ += str.size();
+
+			// Add null terminator
+			buffer_[writePos_] = 0;
+			writePos_ += 1;
+		}
+
+		void MessageBuffer::WriteData(std::span<const uint8_t> data) {
+			EnsureCapacity(writePos_ + data.size());
+			std::memcpy(buffer_.data() + writePos_, data.data(), data.size());
+			writePos_ += data.size();
+		}
+
+		void MessageBuffer::Clear() {
+			readPos_ = 0;
+			writePos_ = 0;
+		}
+
+		void MessageBuffer::EnsureCapacity(size_t requiredSize) {
+			if (requiredSize > buffer_.size()) {
+				// Double the buffer size until it's big enough
+				size_t newSize = buffer_.size();
+				while (newSize < requiredSize) {
+					newSize *= 2;
+				}
+
+				// Cap at maximum message size
+				newSize = std::min(newSize, static_cast<size_t>(MAX_MSGLEN));
+
+				if (requiredSize > newSize) {
+					throw std::runtime_error("Message would exceed maximum size");
+				}
+
+				buffer_.resize(newSize);
+			}
+		}
+
+		// NetworkMessage implementation
+		NetworkMessage::NetworkMessage(MessageHeader header) : header_(header) {}
+
+		// QuakeProtocolHandler implementation
+		QuakeProtocolHandler::QuakeProtocolHandler() : protocolVersion_(PROTOCOL_VERSION), outgoingSequence_(0) {}
+
+		std::optional<NetworkMessage> QuakeProtocolHandler::ProcessIncoming(
+			std::span<const uint8_t> data, const NetAddress& sender) {
+
+			// Validate minimum packet size
+			if (data.size() < 8) {  // Minimum header size
+				return std::nullopt;
+			}
+
+			// Extract header from the packet
+			MessageHeader header = ExtractHeader(data);
+
+			// Create a message with the header
+			NetworkMessage message(header);
+
+			// Copy message data (skip the header)
+			size_t headerSize = 8;  // Size of basic header
+			if (header.reliability == ReliabilityType::Reliable) {
+				headerSize += 4;  // Additional sequence fields
+			}
+
+			if (data.size() > headerSize) {
+				message.GetBuffer().WriteData(data.subspan(headerSize));
+			}
+
+			return message;
+		}
+
+		std::vector<uint8_t> QuakeProtocolHandler::PrepareOutgoing(
+			const NetworkMessage& msg, const NetAddress& recipient) {
+
+			// Initialize buffer with enough capacity
+			std::vector<uint8_t> buffer;
+			buffer.reserve(msg.GetSize() + 16);  // Message size + header size
+
+			// Get a copy of the header to modify
+			MessageHeader header = msg.GetHeader();
+
+			// Set sequence number for reliable messages
+			if (header.reliability == ReliabilityType::Reliable) {
+				header.sequence = ++outgoingSequence_;
+			}
+
+			// Encode the header into the buffer
+			EncodeHeader(buffer, header);
+
+			// Append message data
+			auto messageData = msg.GetBuffer().GetData();
+			buffer.insert(buffer.end(), messageData.begin(), messageData.end());
+
+			return buffer;
+		}
+
+		MessageHeader QuakeProtocolHandler::ExtractHeader(std::span<const uint8_t> data) {
+			MessageHeader header;
+
+			// First byte is packet type
+			header.type = static_cast<PacketType>(data[0]);
+
+			// Second byte is reliability
+			header.reliability = static_cast<ReliabilityType>(data[1]);
+
+			// Next two bytes are size
+			uint16_t size;
+			std::memcpy(&size, data.data() + 2, sizeof(uint16_t));
+			header.size = ntohs(size);
+
+			// For reliable packets, extract sequence and ack
+			if (header.reliability == ReliabilityType::Reliable && data.size() >= 12) {
+				uint32_t sequence, ack;
+				std::memcpy(&sequence, data.data() + 4, sizeof(uint32_t));
+				std::memcpy(&ack, data.data() + 8, sizeof(uint32_t));
+				header.sequence = ntohl(sequence);
+				header.ack = ntohl(ack);
+			}
+
+			return header;
+		}
+
+		void QuakeProtocolHandler::EncodeHeader(std::vector<uint8_t>& buffer, const MessageHeader& header) {
+			// Reserve space for the header
+			size_t headerSize = (header.reliability == ReliabilityType::Reliable) ? 12 : 4;
+			buffer.resize(headerSize);
+
+			// Packet type
+			buffer[0] = static_cast<uint8_t>(header.type);
+
+			// Reliability
+			buffer[1] = static_cast<uint8_t>(header.reliability);
+
+			// Size (in network byte order)
+			uint16_t netSize = htons(header.size);
+			std::memcpy(buffer.data() + 2, &netSize, sizeof(uint16_t));
+
+			// For reliable packets, add sequence and ack
+			if (header.reliability == ReliabilityType::Reliable) {
+				// Sequence (in network byte order)
+				uint32_t netSequence = htonl(header.sequence);
+				std::memcpy(buffer.data() + 4, &netSequence, sizeof(uint32_t));
+
+				// Ack (in network byte order)
+				uint32_t netAck = htonl(header.ack);
+				std::memcpy(buffer.data() + 8, &netAck, sizeof(uint32_t));
+			}
+		}
+
+	} // namespace Net
+} // namespace vkQuake
 
 class Engine {
 public:
@@ -274,7 +645,7 @@ public:
 			ANNOTATE_HAPPENS_BEFORE(task);
 			if (Atomic_DecrementUInt32(&task->remaining_dependencies) == 1)
 			{
-				const int num_task_workers = (task->task_type == TASK_TYPE_INDEXED) ? min(task->indexed_limit, num_workers) : 1;
+				const int num_task_workers = (task->task_type == TASK_TYPE_INDEXED) ? std::min(task->indexed_limit, num_workers) : 1;
 				Atomic_StoreUInt32(&task->remaining_workers, num_task_workers);
 				for (int i = 0; i < num_task_workers; ++i)
 				{

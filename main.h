@@ -70,8 +70,8 @@ typedef enum
 #define MAX_PARTICLETYPES 2048
 #define MAX_LIGHTSTYLES	  64
 
-#define MAX_MSGLEN	 64000 // max length of a reliable message //ericw -- was 32000
-#define MAX_DATAGRAM 64000 // max length of unreliable message //johnfitz -- was 1024
+//#define MAX_MSGLEN	 64000 // max length of a reliable message //ericw -- was 32000
+//#define MAX_DATAGRAM 64000 // max length of unreliable message //johnfitz -- was 1024
 
 #define MAX_QPATH 2048
 
@@ -2768,19 +2768,19 @@ typedef struct
 	server_state_t	 state; // some actions are only valid during load
 
 	sizebuf_t datagram;
-	byte	  datagram_buf[MAX_DATAGRAM];
+	byte	  datagram_buf[64000];
 
 	sizebuf_t reliable_datagram; // copied to all clients at end of frame
-	byte	  reliable_datagram_buf[MAX_DATAGRAM];
+	byte	  reliable_datagram_buf[64000];
 
 	sizebuf_t signon;
-	byte	  signon_buf[MAX_MSGLEN - 2]; // johnfitz -- was 8192, now uses MAX_MSGLEN
+	byte	  signon_buf[64000 - 2]; // johnfitz -- was 8192, now uses MAX_MSGLEN
 
 	unsigned protocol; // johnfitz
 	unsigned protocolflags;
 
 	sizebuf_t multicast; // selectively copied to clients by the multicast builtin
-	byte	  multicast_buf[MAX_DATAGRAM];
+	byte	  multicast_buf[64000];
 
 	const char* particle_precache[MAX_PARTICLETYPES]; // NULL terminated
 
@@ -2877,7 +2877,7 @@ typedef struct client_s
 
 	sizebuf_t message; // can be added to at any time,
 	// copied and clear once per frame
-	byte	  msgbuf[MAX_MSGLEN];
+	byte	  msgbuf[64000];
 	edict_t* edict;	// EDICT_NUM(clientnum+1)
 	char	  name[32]; // for printing to other people
 	int		  colors;
@@ -2892,7 +2892,7 @@ typedef struct client_s
 	int old_frags;
 
 	sizebuf_t datagram;
-	byte	  datagram_buf[MAX_DATAGRAM];
+	byte	  datagram_buf[64000];
 
 	unsigned int limit_entities;   // vanilla is 600
 	unsigned int limit_unreliable; // max allowed size for unreliables
@@ -3375,7 +3375,7 @@ static struct
 {
 	unsigned int length;
 	unsigned int sequence;
-	byte		 data[MAX_DATAGRAM];
+	byte		 data[64000];
 } packetBuffer;
 
 //net_driver_t net_drivers[]{
@@ -3494,3 +3494,188 @@ typedef struct cmdalias_s
 	char			   name[MAX_ALIAS_NAME];
 	char* value;
 } cmdalias_t;
+
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
+
+namespace vkQuake {
+	namespace Net {
+
+		// Network constants
+		constexpr int MAX_MSGLEN = 64000;
+		constexpr int MAX_DATAGRAM = 64000;
+
+		// Protocol version
+		constexpr int PROTOCOL_VERSION = 666;
+
+		// Packet types
+		enum class PacketType : uint8_t {
+			Ping = 0,
+			Ack = 1,
+			Nack = 2,
+			Data = 3,
+			Disconnect = 4,
+			Connect = 5
+		};
+
+		// Message reliability types
+		enum class ReliabilityType : uint8_t {
+			Unreliable = 0,
+			Reliable = 1
+		};
+
+		// Network address
+		class NetAddress {
+		public:
+			NetAddress() = default;
+			explicit NetAddress(std::string_view address, uint16_t port = 0);
+
+			// Factory methods for common address types
+			static NetAddress FromIPv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d, uint16_t port);
+			static NetAddress FromHostname(std::string_view hostname, uint16_t port);
+			static NetAddress Loopback(uint16_t port = 26000);
+
+			// Comparison operators
+			bool operator==(const NetAddress& other) const noexcept;
+			bool operator!=(const NetAddress& other) const noexcept;
+
+			// Getters
+			std::string ToString() const;
+			uint16_t GetPort() const noexcept { return port_; }
+
+			// Setters
+			void SetPort(uint16_t port) noexcept { port_ = port; }
+
+		private:
+			std::array<uint8_t, 16> address_{};  // Support for both IPv4 and IPv6
+			uint16_t port_{ 0 };
+			bool is_ipv6_{ false };
+		};
+
+		// Message buffer with read/write capabilities
+		class MessageBuffer {
+		public:
+			MessageBuffer();
+			explicit MessageBuffer(size_t initialSize);
+
+			// Reading methods
+			int8_t   ReadByte();
+			int16_t  ReadShort();
+			int32_t  ReadLong();
+			float    ReadFloat();
+			std::string ReadString();
+			std::string ReadStringLine();
+
+			// Writing methods
+			void WriteByte(int8_t value);
+			void WriteShort(int16_t value);
+			void WriteLong(int32_t value);
+			void WriteFloat(float value);
+			void WriteString(std::string_view str);
+			void WriteData(std::span<const uint8_t> data);
+
+			// Buffer management
+			void Clear();
+			size_t GetReadPosition() const noexcept { return readPos_; }
+			size_t GetWritePosition() const noexcept { return writePos_; }
+			size_t GetRemainingBytes() const noexcept { return writePos_ - readPos_; }
+			size_t GetCapacity() const noexcept { return buffer_.size(); }
+
+			std::span<const uint8_t> GetData() const { return { buffer_.data(), writePos_ }; }
+			std::span<uint8_t> GetData() { return { buffer_.data(), writePos_ }; }
+
+			bool CanRead(size_t bytes) const noexcept { return (readPos_ + bytes) <= writePos_; }
+
+		private:
+			std::vector<uint8_t> buffer_;
+			size_t readPos_{ 0 };
+			size_t writePos_{ 0 };
+
+			void EnsureCapacity(size_t requiredSize);
+		};
+
+		// Network message header
+		struct MessageHeader {
+			uint32_t sequence{ 0 };      // Sequence number
+			uint32_t ack{ 0 };           // Acknowledged sequence number
+			uint16_t size{ 0 };          // Message size
+			ReliabilityType reliability{ ReliabilityType::Unreliable };
+			PacketType type{ PacketType::Data };
+		};
+
+		// Network message
+		class NetworkMessage {
+		public:
+			NetworkMessage() = default;
+			explicit NetworkMessage(MessageHeader header);
+
+			// Set/get the message header
+			void SetHeader(const MessageHeader& header) { header_ = header; }
+			const MessageHeader& GetHeader() const noexcept { return header_; }
+
+			// Access the message buffer
+			MessageBuffer& GetBuffer() noexcept { return buffer_; }
+			const MessageBuffer& GetBuffer() const noexcept { return buffer_; }
+
+			// Convenience methods
+			size_t GetSize() const noexcept { return buffer_.GetWritePosition(); }
+			bool IsReliable() const noexcept { return header_.reliability == ReliabilityType::Reliable; }
+			uint32_t GetSequence() const noexcept { return header_.sequence; }
+
+		private:
+			MessageHeader header_;
+			MessageBuffer buffer_;
+		};
+
+		// Protocol handler base class
+		class ProtocolHandler {
+		public:
+			virtual ~ProtocolHandler() = default;
+
+			// Process incoming data
+			virtual std::optional<NetworkMessage> ProcessIncoming(std::span<const uint8_t> data,
+				const NetAddress& sender) = 0;
+
+			// Prepare outgoing data
+			virtual std::vector<uint8_t> PrepareOutgoing(const NetworkMessage& msg,
+				const NetAddress& recipient) = 0;
+		};
+
+		// Implementation of Quake protocol
+		class QuakeProtocolHandler : public ProtocolHandler {
+		public:
+			QuakeProtocolHandler();
+			~QuakeProtocolHandler() override = default;
+
+			std::optional<NetworkMessage> ProcessIncoming(std::span<const uint8_t> data,
+				const NetAddress& sender) override;
+
+			std::vector<uint8_t> PrepareOutgoing(const NetworkMessage& msg,
+				const NetAddress& recipient) override;
+
+			// Protocol-specific methods
+			void SetProtocolVersion(int version) { protocolVersion_ = version; }
+			int GetProtocolVersion() const noexcept { return protocolVersion_; }
+
+		private:
+			int protocolVersion_{ PROTOCOL_VERSION };
+			uint32_t outgoingSequence_{ 0 };
+
+			// Helper methods for packet processing
+			MessageHeader ExtractHeader(std::span<const uint8_t> data);
+			void EncodeHeader(std::vector<uint8_t>& buffer, const MessageHeader& header);
+		};
+
+	} // namespace Net
+} // namespace vkQuake
+
+#undef min
