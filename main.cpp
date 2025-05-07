@@ -36,7 +36,7 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace vkQuake {
+namespace Tremor {
 	namespace Net {
 
 		// NetAddress implementation
@@ -403,7 +403,7 @@ namespace vkQuake {
 		}
 
 	} // namespace Net
-} // namespace vkQuake
+} // namespace Tremor
 
 class Engine {
 public:

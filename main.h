@@ -3507,7 +3507,7 @@ typedef struct cmdalias_s
 #include <variant>
 #include <vector>
 
-namespace vkQuake {
+namespace Tremor {
 	namespace Net {
 
 		// Network constants
