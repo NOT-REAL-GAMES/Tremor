@@ -29,6 +29,8 @@
 // The Tremor project is not affiliated with or endorsed by id Software.
 // idTech 2's dependencies on Quake will be gradually phased out of the Tremor project. 
 
+
+#if 0
 #include "main.h"
 
 
@@ -4045,128 +4047,6 @@ public:
 
 
 	};
-	class BufferManager {
-	public:
-		// Constructor that accepts dependency injection
-		explicit BufferManager(std::function<void(std::string_view)> error_handler)
-			: error_handler_(std::move(error_handler)) {
-		}
-
-		template<std::integral T>
-		void writeInteger(Buffer& buffer, T value) {
-			constexpr size_t size = sizeof(T);
-			auto space = getSpace<std::byte>(buffer, size);
-
-			// Write in little-endian format
-			for (size_t i = 0; i < size; ++i) {
-				space[i] = std::byte((value >> (i * 8)) & 0xFF);
-			}
-		}
-
-		void writeString(Buffer& buffer, StringLike auto const& str) {
-			// Convert to string_view for unified handling
-			std::string_view sv(str);
-
-			// Get space for string plus null terminator
-			auto space = getSpace<char>(buffer, sv.length() + 1);
-
-			// Copy string data
-			std::copy(sv.begin(), sv.end(), space.begin());
-
-			// Add null terminator
-			space[sv.length()] = '\0';
-		}
-
-		// Variation for length-prefixed strings (common in network protocols)
-		void writeLengthPrefixedString(Buffer& buffer, StringLike auto const& str) {
-			std::string_view sv(str);
-
-			// First write the length as a 16-bit value
-			writeInteger<uint16_t>(buffer, static_cast<uint16_t>(sv.length()));
-
-			// Then write the string data (without null terminator)
-			if (!sv.empty()) {
-				auto space = getSpace<char>(buffer, sv.length());
-				std::copy(sv.begin(), sv.end(), space.begin());
-			}
-		}
-
-		// Quake-style string writing (max length of 255)
-		void writeQuakeString(Buffer& buffer, StringLike auto const& str) {
-			std::string_view sv(str);
-
-			// In Quake, strings are prefixed with a byte length
-			size_t length = std::min(sv.length(), static_cast<size_t>(255));
-
-			// Write the length byte
-			writeInteger<uint8_t>(buffer, static_cast<uint8_t>(length));
-
-			// Write the string data
-			if (length > 0) {
-				auto space = getSpace<char>(buffer, length);
-				std::copy(sv.begin(), sv.begin() + length, space.begin());
-			}
-		}
-
-		// Clear a buffer
-		void clear(Buffer& buffer) {
-			buffer.cursize = 0;
-			buffer.overflowed = false;
-		}
-
-		// Type-safe template for getting buffer space
-		template<typename T>
-		std::span<T> getSpace(Buffer& buffer, size_t count) {
-			const size_t byteSize = count * sizeof(T);
-
-			if (buffer.cursize + byteSize > buffer.maxsize) {
-				if (!buffer.allowoverflow) {
-					error_handler_("Buffer overflow without allowoverflow set");
-					throw BufferOverflowException("Buffer overflow");
-				}
-
-				if (byteSize > buffer.maxsize) {
-					std::string message = std::format("Requested size {} exceeds total buffer size {}",
-						byteSize, buffer.maxsize);
-					error_handler_(message);
-					throw BufferOverflowException(message);
-				}
-
-				std::cout << "Buffer overflow detected - resetting buffer\n";
-				clear(buffer);
-				buffer.overflowed = true;
-			}
-
-			T* data = reinterpret_cast<T*>(buffer.data + buffer.cursize);
-			buffer.cursize += byteSize;
-
-			return std::span<T>(data, count);
-		}
-
-		// Type-safe write method
-		template<typename T>
-		void write(Buffer& buffer, std::span<const T> data) {
-			auto space = getSpace<T>(buffer, data.size());
-			std::copy(data.begin(), data.end(), space.begin());
-		}
-
-		// Alternative form for raw data
-		void writeBytes(Buffer& buffer, std::span<const std::byte> data) {
-			auto space = getSpace<std::byte>(buffer, data.size());
-			std::copy(data.begin(), data.end(), space.begin());
-		}
-
-	private:
-		std::function<void(std::string_view)> error_handler_;
-	};
-
-	// Modern buffer structure
-
-	// Custom exception
-	class BufferOverflowException : public std::runtime_error {
-		using std::runtime_error::runtime_error;
-	};
-	
 	class Host {
 	public:
 		cvar_t name = { "hostname", "UNNAMED", CVAR_SERVERINFO };
@@ -4521,6 +4401,53 @@ public:
 
 
 		std::vector<net_landriver_t> landrivers {
+			
+		#ifdef IPPROTO_IPV6
+			{"Winsock IPv6",
+			 false,
+			 0,
+			 WINIPv6_Init,
+			 WINIPv6_Shutdown,
+			 WINIPv6_Listen,
+			 WINIPv6_GetAddresses,
+			 WINIPv6_OpenSocket,
+			 WINS_CloseSocket,
+			 WINS_Connect,
+			 WINIPv6_CheckNewConnections,
+			 WINS_Read,
+			 WINS_Write,
+			 WINIPv6_Broadcast,
+			 WINS_AddrToString,
+			 WINIPv6_StringToAddr,
+			 WINS_GetSocketAddr,
+			 WINIPv6_GetNameFromAddr,
+			 WINIPv6_GetAddrFromName,
+			 WINS_AddrCompare,
+			 WINS_GetSocketPort,
+			 WINS_SetSocketPort},
+		#endif
+			/*{"Winsock IPX", // OUTDATED GARBAGE
+			 false,
+			 0,
+			 WIPX_Init,
+			 WIPX_Shutdown,
+			 WIPX_Listen,
+			 WIPX_GetAddresses,
+			 WIPX_OpenSocket,
+			 WIPX_CloseSocket,
+			 WIPX_Connect,
+			 WIPX_CheckNewConnections,
+			 WIPX_Read,
+			 WIPX_Write,
+			 WIPX_Broadcast,
+			 WIPX_AddrToString,
+			 WIPX_StringToAddr,
+			 WIPX_GetSocketAddr,
+			 WIPX_GetNameFromAddr,
+			 WIPX_GetAddrFromName,
+			 WIPX_AddrCompare,
+			 WIPX_GetSocketPort,
+			 WIPX_SetSocketPort}*/ 
 		
 		};
 
@@ -5004,3 +4931,4 @@ int main(int argc, char* argv[]) {
 
 	return 0;
 }
+#endif

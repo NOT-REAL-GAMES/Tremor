@@ -2426,6 +2426,21 @@ typedef struct
 	float percent; // 0-256
 } cshift_t;
 
+// Modern buffer structure
+struct Buffer {
+	std::byte* data;       // Could also use std::vector<std::byte>
+	size_t maxsize;
+	size_t cursize{ 0 };
+	bool allowoverflow{ false };
+	bool overflowed{ false };
+};
+
+// String writing with automatic type handling
+template<typename T>
+concept StringLike = requires(T t) {
+	{ std::string_view(t) } -> std::convertible_to<std::string_view>;
+};
+
 class client_static_t
 {
 public:
