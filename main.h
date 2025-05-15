@@ -3,6 +3,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+#define USING_VULKAN
+
 #include <windows.h>
 #include <mmsystem.h>
 #include "wsaerror.h"
@@ -20,6 +22,9 @@
 #include <string>
 #include <vector>
 
+#include <optional>
+#include <chrono>
+
 #include <random>
 
 #include <winsock2.h>
@@ -32,5 +37,22 @@
 #include <cstring>
 #include <stdexcept>
 
+#include <glm/glm.hpp>
+
+#include <string_view>
+#include <unordered_map>
+#include <cctype>
+#include <charconv>
+#include <functional>
+#include <array>
+
+#include <cstdio>
+#include <memory>
+#include <fstream>
+#include <filesystem>
+#include <system_error>
+#include <unordered_set>
 
 #define GAMENAME "tremor" // directory to look in by default
+
+#undef SearchPath

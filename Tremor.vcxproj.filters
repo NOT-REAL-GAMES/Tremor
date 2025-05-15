@@ -21,12 +21,30 @@
     <ClCompile Include="oldmain.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="mem.h">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="res.h">
+      <Filter>Header Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="main.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="wsaerror.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="handle.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="RenderBackend.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="vk.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="RenderBackendBase.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
