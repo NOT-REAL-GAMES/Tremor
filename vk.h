@@ -34,7 +34,333 @@ void chainStructure(void** ppNext, T& structure) {
     ppNext = &structure.pNext;
 }
 
-namespace tremor::gfx {
+namespace tremor::gfx { 
+
+    // Instance RAII wrapper
+    class InstanceResource {
+    private:
+        VkInstance m_handle = VK_NULL_HANDLE;
+
+    public:
+        InstanceResource() = default;
+
+        explicit InstanceResource(VkInstance handle) : m_handle(handle) {}
+
+        ~InstanceResource() {
+        }
+
+        // Disable copying
+        InstanceResource(const InstanceResource&) = delete;
+        InstanceResource& operator=(const InstanceResource&) = delete;
+
+        // Enable moving
+        InstanceResource(InstanceResource&& other) noexcept
+            : m_handle(other.m_handle) {
+            other.m_handle = VK_NULL_HANDLE;
+        }
+
+        InstanceResource& operator=(InstanceResource&& other) noexcept {
+            if (this != &other) {
+                cleanup();
+                m_handle = other.m_handle;
+                other.m_handle = VK_NULL_HANDLE;
+            }
+            return *this;
+        }
+
+        // Accessors
+        VkInstance& handle() { return m_handle; }
+        const VkInstance& handle() const { return m_handle; }
+        operator VkInstance() const { return m_handle; }
+
+        // Check if valid
+        operator bool() const { return m_handle != VK_NULL_HANDLE; }
+
+        // Release ownership without destroying
+        VkInstance release() {
+            VkInstance temp = m_handle;
+            m_handle = VK_NULL_HANDLE;
+            return temp;
+        }
+
+        // Reset with a new handle
+        void reset(VkInstance newHandle = VK_NULL_HANDLE) {
+            cleanup();
+            m_handle = newHandle;
+        }
+
+    private:
+        void cleanup() {
+            if (m_handle != VK_NULL_HANDLE) {
+                vkDestroyInstance(m_handle, nullptr);
+                m_handle = VK_NULL_HANDLE;
+            }
+        }
+    };
+
+    // Surface RAII wrapper
+    class SurfaceResource {
+    private:
+        VkInstance m_instance = VK_NULL_HANDLE;
+        VkSurfaceKHR m_handle = VK_NULL_HANDLE;
+
+    public:
+        SurfaceResource() = default;
+
+        SurfaceResource(VkInstance instance, VkSurfaceKHR handle = VK_NULL_HANDLE)
+            : m_instance(instance), m_handle(handle) {
+        }
+
+        ~SurfaceResource() {
+            cleanup();
+        }
+
+        // Disable copying
+        SurfaceResource(const SurfaceResource&) = delete;
+        SurfaceResource& operator=(const SurfaceResource&) = delete;
+
+        // Enable moving
+        SurfaceResource(SurfaceResource&& other) noexcept
+            : m_instance(other.m_instance), m_handle(other.m_handle) {
+            other.m_handle = VK_NULL_HANDLE;
+        }
+
+        SurfaceResource& operator=(SurfaceResource&& other) noexcept {
+            if (this != &other) {
+                cleanup();
+                m_instance = other.m_instance;
+                m_handle = other.m_handle;
+                other.m_handle = VK_NULL_HANDLE;
+            }
+            return *this;
+        }
+
+        // Accessors
+        VkSurfaceKHR& handle() { return m_handle; }
+        const VkSurfaceKHR& handle() const { return m_handle; }
+        operator VkSurfaceKHR() const { return m_handle; }
+
+        // Check if valid
+        operator bool() const { return m_handle != VK_NULL_HANDLE; }
+
+        // Release ownership without destroying
+        VkSurfaceKHR release() {
+            VkSurfaceKHR temp = m_handle;
+            m_handle = VK_NULL_HANDLE;
+            return temp;
+        }
+
+        // Reset with a new handle
+        void reset(VkSurfaceKHR newHandle = VK_NULL_HANDLE) {
+            cleanup();
+            m_handle = newHandle;
+        }
+
+        // Update the instance (needed if instance changes)
+        void setInstance(VkInstance instance) {
+            m_instance = instance;
+        }
+
+    private:
+        void cleanup() {
+            if (m_handle != VK_NULL_HANDLE && m_instance != VK_NULL_HANDLE) {
+                vkDestroySurfaceKHR(m_instance, m_handle, nullptr);
+                m_handle = VK_NULL_HANDLE;
+            }
+        }
+    };
+
+    // Debug utils messenger wrapper (for debug builds)
+    class DebugMessengerResource {
+    private:
+        VkInstance m_instance = VK_NULL_HANDLE;
+        VkDebugUtilsMessengerEXT m_handle = VK_NULL_HANDLE;
+
+    public:
+        DebugMessengerResource() = default;
+
+        DebugMessengerResource(VkInstance instance, VkDebugUtilsMessengerEXT handle = VK_NULL_HANDLE)
+            : m_instance(instance), m_handle(handle) {
+        }
+
+        ~DebugMessengerResource() {
+            cleanup();
+        }
+
+        // Disable copying
+        DebugMessengerResource(const DebugMessengerResource&) = delete;
+        DebugMessengerResource& operator=(const DebugMessengerResource&) = delete;
+
+        // Enable moving
+        DebugMessengerResource(DebugMessengerResource&& other) noexcept
+            : m_instance(other.m_instance), m_handle(other.m_handle) {
+            other.m_handle = VK_NULL_HANDLE;
+        }
+
+        DebugMessengerResource& operator=(DebugMessengerResource&& other) noexcept {
+            if (this != &other) {
+                cleanup();
+                m_instance = other.m_instance;
+                m_handle = other.m_handle;
+                other.m_handle = VK_NULL_HANDLE;
+            }
+            return *this;
+        }
+
+        // Accessors
+        VkDebugUtilsMessengerEXT& handle() { return m_handle; }
+        const VkDebugUtilsMessengerEXT& handle() const { return m_handle; }
+        operator VkDebugUtilsMessengerEXT() const { return m_handle; }
+
+        // Check if valid
+        operator bool() const { return m_handle != VK_NULL_HANDLE; }
+
+    private:
+        void cleanup() {
+            if (m_handle != VK_NULL_HANDLE && m_instance != VK_NULL_HANDLE) {
+                // Using the function pointer directly since this is an extension function
+                auto vkDestroyDebugUtilsMessengerEXT =
+                    (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+                        m_instance, "vkDestroyDebugUtilsMessengerEXT");
+
+                if (vkDestroyDebugUtilsMessengerEXT) {
+                    vkDestroyDebugUtilsMessengerEXT(m_instance, m_handle, nullptr);
+                }
+
+                m_handle = VK_NULL_HANDLE;
+            }
+        }
+    };
+
+    // Example resource manager using these RAII resources
+    class VulkanResourceManager {
+    private:
+        VkDevice m_device;
+        VkPhysicalDevice m_physicalDevice;
+        VkPhysicalDeviceMemoryProperties m_memProperties;
+
+        std::unordered_map<uint32_t, std::unique_ptr<VulkanTexture>> m_textures;
+        std::atomic<uint32_t> m_nextTextureId{ 1 };
+
+    public:
+        VulkanResourceManager(VkDevice device, VkPhysicalDevice physicalDevice)
+            : m_device(device), m_physicalDevice(physicalDevice) {
+
+            vkGetPhysicalDeviceMemoryProperties(physicalDevice, &m_memProperties);
+        }
+
+        // Find memory type helper
+        uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+            for (uint32_t i = 0; i < m_memProperties.memoryTypeCount; i++) {
+                if ((typeFilter & (1 << i)) &&
+                    (m_memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                    return i;
+                }
+            }
+            throw std::runtime_error("Failed to find suitable memory type");
+        }
+
+        // Example texture creation method
+        TextureHandle createTexture(const TextureDesc& desc) {
+            auto texture = std::make_unique<VulkanTexture>(m_device);
+            texture->width = desc.width;
+            texture->height = desc.height;
+            texture->mipLevels = desc.mipLevels;
+            texture->format = (desc.format);
+
+            // Create image
+            VkImageCreateInfo imageInfo{};
+            imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            imageInfo.imageType = VK_IMAGE_TYPE_2D;
+            imageInfo.extent = { desc.width, desc.height, 1 };
+            imageInfo.mipLevels = desc.mipLevels;
+            imageInfo.arrayLayers = 1;
+            imageInfo.format = convertFormat(texture->format);
+            imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+            if (vkCreateImage(m_device, &imageInfo, nullptr, &texture->image.handle()) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create image");
+            }
+
+            // Allocate memory
+            VkMemoryRequirements memRequirements;
+            vkGetImageMemoryRequirements(m_device, texture->image, &memRequirements);
+
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memRequirements.size;
+            allocInfo.memoryTypeIndex = findMemoryType(
+                memRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
+
+            if (vkAllocateMemory(m_device, &allocInfo, nullptr, &texture->memory.handle()) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to allocate image memory");
+            }
+
+            // Bind memory to image
+            vkBindImageMemory(m_device, texture->image, texture->memory, 0);
+
+            // Create image view
+            VkImageViewCreateInfo viewInfo{};
+            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewInfo.image = texture->image;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = convertFormat(texture->format);
+            viewInfo.components = {
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY
+            };
+            viewInfo.subresourceRange = {
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0, desc.mipLevels,
+                0, 1
+            };
+
+            if (vkCreateImageView(m_device, &viewInfo, nullptr, &texture->view.handle()) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create image view");
+            }
+
+            // Create sampler
+            VkSamplerCreateInfo samplerInfo{};
+            samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            samplerInfo.magFilter = VK_FILTER_LINEAR;
+            samplerInfo.minFilter = VK_FILTER_LINEAR;
+            samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+            samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerInfo.mipLodBias = 0.0f;
+            samplerInfo.anisotropyEnable = VK_TRUE;
+            samplerInfo.maxAnisotropy = 16.0f;
+            samplerInfo.minLod = 0.0f;
+            samplerInfo.maxLod = static_cast<float>(desc.mipLevels);
+
+            if (vkCreateSampler(m_device, &samplerInfo, nullptr, &texture->sampler.handle()) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create sampler");
+            }
+
+            // Register texture and return handle
+            TextureHandle handle; handle.fromId(m_nextTextureId++);
+            m_textures[handle.id] = std::move(texture);
+            return handle;
+        }
+
+        VulkanTexture* getTexture(TextureHandle handle) {
+            auto it = m_textures.find(handle.id);
+            return it != m_textures.end() ? it->second.get() : nullptr;
+        }
+
+        void destroyTexture(TextureHandle handle) {
+            m_textures.erase(handle.id);
+        }
+    };
 
     class VulkanDevice {
     public:
@@ -66,7 +392,12 @@ namespace tremor::gfx {
             const DevicePreferences& preferences = {});
 
         // Destructor - automatically cleans up Vulkan resources
-        ~VulkanDevice();
+        ~VulkanDevice() {
+            if (m_device != VK_NULL_HANDLE) {
+                vkDestroyDevice(m_device, nullptr);
+                m_device = VK_NULL_HANDLE;
+            }
+        }
 
         // Delete copy operations to prevent double-free
         VulkanDevice(const VulkanDevice&) = delete;
@@ -154,7 +485,6 @@ namespace tremor::gfx {
             VkColorSpaceKHR preferredColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
         };
 
-        SwapChain(const VulkanDevice& device);
 
         // Constructor takes a device, surface, and creation info
         SwapChain(const VulkanDevice& device, VkSurfaceKHR surface, const CreateInfo& createInfo) : m_device(device), m_surface(surface) {
@@ -207,7 +537,7 @@ namespace tremor::gfx {
         VkSurfaceKHR m_surface;
 
         // Swap chain objects
-        VkSwapchainKHR m_swapChain = VK_NULL_HANDLE;
+        SwapchainResource m_swapChain;
         std::vector<VkImage> m_images;
         std::vector<VkImageView> m_imageViews;
 
@@ -249,7 +579,7 @@ namespace tremor::gfx {
     SwapChain::SwapChain(SwapChain&& other) noexcept
         : m_device(other.m_device),
         m_surface(other.m_surface),
-        m_swapChain(other.m_swapChain),
+        m_swapChain(std::move(other.m_swapChain)),  // Use std::move here!
         m_images(std::move(other.m_images)),
         m_imageViews(std::move(other.m_imageViews)),
         m_imageFormat(other.m_imageFormat),
@@ -258,10 +588,9 @@ namespace tremor::gfx {
         m_vsync(other.m_vsync),
         m_hdr(other.m_hdr) {
 
-        // Invalidate the other swap chain
-        other.m_swapChain = VK_NULL_HANDLE;
+        // No need to reset m_swapChain since the move constructor of VulkanResource already handles that
+        // But you might still want to clear these vectors if they're not already handled
         other.m_images.clear();
-        other.m_imageViews.clear();
     }
 
     SwapChain& SwapChain::operator=(SwapChain&& other) noexcept {
@@ -270,7 +599,7 @@ namespace tremor::gfx {
             cleanup();
 
             // Move resources from other
-            m_swapChain = other.m_swapChain;
+            m_swapChain = std::move(other.m_swapChain);
             m_images = std::move(other.m_images);
             m_imageViews = std::move(other.m_imageViews);
             m_imageFormat = other.m_imageFormat;
@@ -322,7 +651,7 @@ namespace tremor::gfx {
         presentInfo.pWaitSemaphores = waitSemaphore ? &waitSemaphore : nullptr;
 
         presentInfo.swapchainCount = 1;
-        presentInfo.pSwapchains = &m_swapChain;
+        presentInfo.pSwapchains = &m_swapChain.handle();
         presentInfo.pImageIndices = &imageIndex;
         presentInfo.pResults = nullptr;
 
@@ -361,35 +690,35 @@ namespace tremor::gfx {
         }
 
         // Create swap chain
-        VkSwapchainCreateInfoKHR sccreateInfo{};
-        sccreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-        sccreateInfo.surface = m_surface;
-        sccreateInfo.minImageCount = imageCount;
-        sccreateInfo.imageFormat = surfaceFormat.format;
-        sccreateInfo.imageColorSpace = surfaceFormat.colorSpace;
-        sccreateInfo.imageExtent = extent;
-        sccreateInfo.imageArrayLayers = 1;
-        sccreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        VkSwapchainCreateInfoKHR swapchainInfo{};
+        swapchainInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        swapchainInfo.surface = m_surface;
+        swapchainInfo.minImageCount = imageCount;
+        swapchainInfo.imageFormat = surfaceFormat.format;
+        swapchainInfo.imageColorSpace = surfaceFormat.colorSpace;
+        swapchainInfo.imageExtent = extent;
+        swapchainInfo.imageArrayLayers = 1;
+        swapchainInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
         // Add transfer usage for screenshots if needed
-        sccreateInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        swapchainInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
         // Handle queue families
-        sccreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        sccreateInfo.queueFamilyIndexCount = 0;
-        sccreateInfo.pQueueFamilyIndices = nullptr;
+        swapchainInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        swapchainInfo.queueFamilyIndexCount = 0;
+        swapchainInfo.pQueueFamilyIndices = nullptr;
 
-        sccreateInfo.preTransform = capabilities.currentTransform;
-        sccreateInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        sccreateInfo.presentMode = presentMode;
-        sccreateInfo.clipped = VK_TRUE;
-        sccreateInfo.oldSwapchain = VK_NULL_HANDLE;
+        swapchainInfo.preTransform = capabilities.currentTransform;
+        swapchainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        swapchainInfo.presentMode = presentMode;
+        swapchainInfo.clipped = VK_TRUE;
+        swapchainInfo.oldSwapchain = VK_NULL_HANDLE;
 
         // Check for HDR support if requested
         m_hdr = createInfo.hdr && (surfaceFormat.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
 
         // Create the swap chain
-        if (vkCreateSwapchainKHR(m_device.device(), &sccreateInfo, nullptr, &m_swapChain) != VK_SUCCESS) {
+        if (vkCreateSwapchainKHR(m_device.device(), &swapchainInfo, nullptr, &m_swapChain.handle()) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create swap chain");
         }
 
@@ -436,16 +765,11 @@ namespace tremor::gfx {
 
     void SwapChain::cleanup() {
         // Destroy image views
-        for (auto imageView : m_imageViews) {
-            vkDestroyImageView(m_device.device(), imageView, nullptr);
-        }
+        
         m_imageViews.clear();
 
         // Destroy swap chain
-        if (m_swapChain != VK_NULL_HANDLE) {
-            vkDestroySwapchainKHR(m_device.device(), m_swapChain, nullptr);
-            m_swapChain = VK_NULL_HANDLE;
-        }
+		m_swapChain.reset();
 
         // Images are owned by the swap chain and destroyed with it
         m_images.clear();
@@ -602,13 +926,6 @@ namespace tremor::gfx {
 
         // Log device information
         logDeviceInfo();
-    }
-
-    VulkanDevice::~VulkanDevice() {
-        if (m_device != VK_NULL_HANDLE) {
-            vkDestroyDevice(m_device, nullptr);
-            m_device = VK_NULL_HANDLE;
-        }
     }
 
     void VulkanDevice::selectPhysicalDevice(const DevicePreferences& preferences) {
@@ -1055,16 +1372,22 @@ namespace tremor::gfx {
     class VulkanBackend : public RenderBackend {
     public:
 
+		SwapChain::CreateInfo ci{};
+
+        std::unique_ptr<VulkanDevice> vkDevice;
+        std::unique_ptr<SwapChain> vkSwapchain;
+
+        InstanceResource instance;
+        SurfaceResource surface;
+
         SDL_Window* w;
 
 #if _DEBUG
         VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
 #endif
 
-        VulkanBackend() {
-            
-        };
-        ~VulkanBackend() override {};
+		VulkanBackend() = default;
+        ~VulkanBackend() override = default;
 
         bool initialize(SDL_Window* window) override {
         
@@ -1091,7 +1414,7 @@ namespace tremor::gfx {
             // 5. Return a handle to the texture
 
             // Simplified implementation for example
-            VulkanTexture* texture = new VulkanTexture();
+            VulkanTexture* texture = new VulkanTexture(device);
 
             // Image creation
             VkImageCreateInfo imageInfo{};
@@ -1109,7 +1432,7 @@ namespace tremor::gfx {
             imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 
-            if (vkCreateImage(device, &imageInfo, nullptr, &texture->image) != VK_SUCCESS) {
+            if (vkCreateImage(device, &imageInfo, nullptr, &texture->image.handle()) != VK_SUCCESS) {
                 delete texture;
                 return {};
             }
@@ -1124,8 +1447,6 @@ namespace tremor::gfx {
 
     private:
         // Vulkan instance and devices
-        VkInstance instance = VK_NULL_HANDLE;
-        VkSurfaceKHR surface = VK_NULL_HANDLE;
         VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
         VkDevice device = VK_NULL_HANDLE;
 
@@ -1342,11 +1663,16 @@ namespace tremor::gfx {
 #endif
 
             // Create the instance
-            err = vkCreateInstance(&createInfo, nullptr, &instance);
+            VkInstance inst;
+            err = vkCreateInstance(&createInfo, nullptr, &inst);
             if (err != VK_SUCCESS) {
                 Logger::get().error("Failed to create Vulkan instance: {}", (int)err);
                 return false;
             }
+
+            instance.reset(inst);
+
+            volkLoadInstance(instance);
 
             Logger::get().info("Vulkan instance created successfully");
 
@@ -1369,11 +1695,13 @@ namespace tremor::gfx {
                 }
             }
 #endif
-
-            if (!SDL_Vulkan_CreateSurface(w, instance, &surface)) {
+            VkSurfaceKHR surf;
+            if (!SDL_Vulkan_CreateSurface(w, instance, &surf)) {
                 Logger::get().error("Failed to create Vulkan surface : {}", (int)err);
                 return false;
             }
+
+			surface = SurfaceResource(instance,surf);
 
             Logger::get().info("Vulkan surface created successfully");
 
@@ -1403,26 +1731,31 @@ namespace tremor::gfx {
         
 
         bool createDeviceAndSwapChain() {
-            auto ci = SwapChain::CreateInfo();
 
-            auto pref = VulkanDevice::DevicePreferences();
-            pref.preferDiscreteGPU = true;
-            pref.requireMeshShaders = true;
-            pref.requireRayQuery = true;
-            pref.requireSparseBinding = true;
+            VulkanDevice::DevicePreferences prefs;
+            prefs.preferDiscreteGPU = true;
+            prefs.requireMeshShaders = false;  // Set based on your requirements
+            prefs.requireRayQuery = false;     // Set based on your requirements
+            prefs.requireSparseBinding = false; // Set based on your requirements
 
-            auto dev = VulkanDevice(instance, surface, pref);
-            auto sc = SwapChain(dev, surface, ci);
+            // Create device
+            vkDevice = std::make_unique<VulkanDevice>(instance, surface, prefs);
 
-            physicalDevice = dev.physicalDevice();
-            m_colorFormat = dev.colorFormat();
-            m_depthFormat = dev.depthFormat();
-            m_deviceProperties = dev.properties();
-            m_memoryProperties = dev.memoryProperties();
-            graphicsQueue = dev.graphicsQueue();
+            // Create swap chain
+            SwapChain::CreateInfo swapChainInfo;
+            int width, height;
+            SDL_GetWindowSize(w, &width, &height);
+            swapChainInfo.width = static_cast<uint32_t>(width);
+            swapChainInfo.height = static_cast<uint32_t>(height);
 
+            vkSwapchain = std::make_unique<SwapChain>(*vkDevice, surface, swapChainInfo);
 
-            device = dev.device();
+            // Cache common device properties for convenience
+            physicalDevice = vkDevice->physicalDevice();
+            device = vkDevice->device();
+            graphicsQueue = vkDevice->graphicsQueue();
+            m_colorFormat = vkDevice->colorFormat();
+            m_depthFormat = vkDevice->depthFormat();
 
             return true;
         }

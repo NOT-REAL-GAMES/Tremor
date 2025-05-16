@@ -172,6 +172,155 @@ namespace tremor::gfx {
 
 } // namespace tremor::gfx
 
+#if defined(USING_VULKAN)
+ // Template for RAII Vulkan objects with type-based specialization
+template<typename T>
+class VulkanResource {
+private:
+    VkDevice m_device = VK_NULL_HANDLE;
+    T m_handle = VK_NULL_HANDLE;
+
+public:
+    VulkanResource() = default;
+
+    VulkanResource(VkDevice device, T handle = VK_NULL_HANDLE)
+        : m_device(device), m_handle(handle) {
+    }
+
+    ~VulkanResource() {
+        cleanup();
+    }
+
+    // Disable copying
+    VulkanResource(const VulkanResource&) = delete;
+    VulkanResource& operator=(const VulkanResource&) = delete;
+
+    // Enable moving
+    VulkanResource(VulkanResource&& other) noexcept
+        : m_device(other.m_device), m_handle(other.m_handle) {
+        other.m_handle = VK_NULL_HANDLE;
+    }
+
+    VulkanResource& operator=(VulkanResource&& other) noexcept {
+        if (this != &other) {
+            cleanup();
+            m_device = other.m_device;
+            m_handle = other.m_handle;
+            other.m_handle = VK_NULL_HANDLE;
+        }
+        return *this;
+    }
+
+    // Accessors
+    T& handle() { return m_handle; }
+    const T& handle() const { return m_handle; }
+    operator T() const { return m_handle; }
+
+    // Check if valid
+    operator bool() const { return m_handle != VK_NULL_HANDLE; }
+
+    // Release ownership without destroying
+    T release() {
+        T temp = m_handle;
+        m_handle = VK_NULL_HANDLE;
+        return temp;
+    }
+
+    // Reset with a new handle
+    void reset(T newHandle = VK_NULL_HANDLE) {
+        cleanup();
+        m_handle = newHandle;
+    }
+
+private:
+    void cleanup() {
+        if (m_handle != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
+            destroy(m_device, m_handle);
+        }
+        m_handle = VK_NULL_HANDLE;
+    }
+
+    static void destroy(VkDevice device, T handle);
+};
+
+// Specializations for each Vulkan type
+template<> inline void VulkanResource<VkImage>::destroy(VkDevice device, VkImage handle) {
+    vkDestroyImage(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkImageView>::destroy(VkDevice device, VkImageView handle) {
+    vkDestroyImageView(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkBuffer>::destroy(VkDevice device, VkBuffer handle) {
+    vkDestroyBuffer(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkDeviceMemory>::destroy(VkDevice device, VkDeviceMemory handle) {
+    vkFreeMemory(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkPipeline>::destroy(VkDevice device, VkPipeline handle) {
+    vkDestroyPipeline(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkShaderModule>::destroy(VkDevice device, VkShaderModule handle) {
+    vkDestroyShaderModule(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkDescriptorSetLayout>::destroy(VkDevice device, VkDescriptorSetLayout handle) {
+    vkDestroyDescriptorSetLayout(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkPipelineLayout>::destroy(VkDevice device, VkPipelineLayout handle) {
+    vkDestroyPipelineLayout(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkSampler>::destroy(VkDevice device, VkSampler handle) {
+    vkDestroySampler(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkSwapchainKHR>::destroy(VkDevice device, VkSwapchainKHR handle) {
+    vkDestroySwapchainKHR(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkCommandPool>::destroy(VkDevice device, VkCommandPool handle) {
+    vkDestroyCommandPool(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkFence>::destroy(VkDevice device, VkFence handle) {
+    vkDestroyFence(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkSemaphore>::destroy(VkDevice device, VkSemaphore handle) {
+    vkDestroySemaphore(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkFramebuffer>::destroy(VkDevice device, VkFramebuffer handle) {
+    vkDestroyFramebuffer(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkRenderPass>::destroy(VkDevice device, VkRenderPass handle) {
+    vkDestroyRenderPass(device, handle, nullptr);
+}
+
+// Type aliases for convenience
+using ImageResource = VulkanResource<VkImage>;
+using ImageViewResource = VulkanResource<VkImageView>;
+using BufferResource = VulkanResource<VkBuffer>;
+using DeviceMemoryResource = VulkanResource<VkDeviceMemory>;
+using PipelineResource = VulkanResource<VkPipeline>;
+using ShaderModuleResource = VulkanResource<VkShaderModule>;
+using DescriptorSetLayoutResource = VulkanResource<VkDescriptorSetLayout>;
+using PipelineLayoutResource = VulkanResource<VkPipelineLayout>;
+using SamplerResource = VulkanResource<VkSampler>;
+using SwapchainResource = VulkanResource<VkSwapchainKHR>;
+using CommandPoolResource = VulkanResource<VkCommandPool>;
+using FenceResource = VulkanResource<VkFence>;
+using SemaphoreResource = VulkanResource<VkSemaphore>;
+using FramebufferResource = VulkanResource<VkFramebuffer>;
+using RenderPassResource = VulkanResource<VkRenderPass>;
+#endif
 
 namespace tremor::gfx {
 
@@ -244,18 +393,6 @@ namespace tremor::gfx {
     // Specializations for different backend implementations
     class VulkanTexture : public Texture {
     public:
-        ~VulkanTexture() override {
-            // Clean up Vulkan resources
-            if (image != VK_NULL_HANDLE) {
-                vkDestroyImage(device, image, nullptr);
-            }
-            if (imageView != VK_NULL_HANDLE) {
-                vkDestroyImageView(device, imageView, nullptr);
-            }
-            if (memory != VK_NULL_HANDLE) {
-                vkFreeMemory(device, memory, nullptr);
-            }
-        }
 
         uint32_t getWidth() const override { return width; }
         uint32_t getHeight() const override { return height; }
@@ -263,17 +400,23 @@ namespace tremor::gfx {
 
         // Vulkan-specific accessors
         VkImage getImage() const { return image; }
-        VkImageView getImageView() const { return imageView; }
+        VkImageView getImageView() const { return view; }
 
-    private:
-        VkDevice device = VK_NULL_HANDLE;
-        VkImage image = VK_NULL_HANDLE;
-        VkImageView imageView = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
+        ImageResource image;
+        ImageViewResource view;
+        DeviceMemoryResource memory;
+        SamplerResource sampler;
+
+        TextureFormat format = TextureFormat::Unknown;
         uint32_t width = 0;
         uint32_t height = 0;
-        TextureFormat format = TextureFormat::Unknown;
+        uint32_t mipLevels = 1;
 
+        explicit VulkanTexture(VkDevice device)
+            : image(device), view(device), memory(device), sampler(device) {
+        }
+
+        
         // Allow backend to create this resource
         friend class VulkanBackend;
     };
