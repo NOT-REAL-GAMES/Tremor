@@ -49,7 +49,15 @@ public:
 	SDL_Window* window;
 
 	Engine() {
-		auto rb = tremor::gfx::RenderBackend::create(window);
+		auto logger = Logger::create({
+			.enableConsole = true,
+			.enableFileOutput = true,
+			.logFilePath = "tremor_engine.log",
+			.minLevel = Logger::Level::Debug,
+			.showSourceLocation = true
+			});
+
+		auto rb = tremor::gfx::RenderBackend::create(window,logger);
 	}
 
 	bool Loop() {

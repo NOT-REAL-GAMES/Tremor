@@ -27,6 +27,9 @@
     <ClCompile Include="res.h">
       <Filter>Header Files</Filter>
     </ClCompile>
+    <ClCompile Include="volk.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="main.h">
@@ -45,6 +48,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="RenderBackendBase.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="volk.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

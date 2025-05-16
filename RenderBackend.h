@@ -7,7 +7,7 @@
 
 namespace tremor::gfx {
 
-    inline std::unique_ptr<RenderBackend> RenderBackend::create(SDL_Window* window) {
+    inline std::unique_ptr<RenderBackend> RenderBackend::create(SDL_Window* window, std::shared_ptr<Logger> logger) {
         std::unique_ptr<RenderBackend> backend;
 
         #if defined(USING_VULKAN)
@@ -20,7 +20,7 @@ namespace tremor::gfx {
             #error "No graphics backend defined"
         #endif
 
-        if (!backend->initialize(window)) {
+        if (!backend->initialize(window, logger)) {
             return nullptr; // Initialization failed
         }
 

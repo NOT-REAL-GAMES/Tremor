@@ -154,6 +154,7 @@
     <ClCompile Include="mem.h" />
     <ClCompile Include="oldmain.cpp" />
     <ClCompile Include="res.h" />
+    <ClCompile Include="volk.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="handle.h" />
@@ -161,6 +162,7 @@
     <ClInclude Include="RenderBackend.h" />
     <ClInclude Include="RenderBackendBase.h" />
     <ClInclude Include="vk.h" />
+    <ClInclude Include="volk.h" />
     <ClInclude Include="wsaerror.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
