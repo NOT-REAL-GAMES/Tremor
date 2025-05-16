@@ -57,7 +57,7 @@ namespace tremor::gfx {
     class VulkanDevice {
     public:
         // Structure for tracking physical device capabilities
-        struct DeviceCapabilities {
+        struct VulkanDeviceCapabilities {
             bool dedicatedAllocation = false;
             bool fullScreenExclusive = false;
             bool rayQuery = false;
@@ -81,8 +81,7 @@ namespace tremor::gfx {
 
         // Constructor
         VulkanDevice(VkInstance instance, VkSurfaceKHR surface,
-            const DevicePreferences& preferences = {},
-            std::shared_ptr<Logger> logger = nullptr);
+            const DevicePreferences& preferences = {});
 
         // Destructor - automatically cleans up Vulkan resources
         ~VulkanDevice();
@@ -102,7 +101,7 @@ namespace tremor::gfx {
         uint32_t graphicsQueueFamily() const { return m_graphicsQueueFamily; }
 
         // Get device capabilities and properties
-        const DeviceCapabilities& capabilities() const { return m_capabilities; }
+        const VulkanDeviceCapabilities& capabilities() const { return m_capabilities; }
         const VkPhysicalDeviceProperties& properties() const { return m_deviceProperties; }
         const VkPhysicalDeviceMemoryProperties& memoryProperties() const { return m_memoryProperties; }
 
@@ -135,13 +134,10 @@ namespace tremor::gfx {
         VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
 
         // Capabilities
-        DeviceCapabilities m_capabilities{};
+        VulkanDeviceCapabilities m_capabilities{};
 
         // The surface we're rendering to
         VkSurfaceKHR m_surface = VK_NULL_HANDLE;
-
-        // Logger
-        std::shared_ptr<Logger> m_logger;
 
         // Initialization helpers
         void selectPhysicalDevice(const DevicePreferences& preferences);
@@ -173,9 +169,8 @@ namespace tremor::gfx {
     // Implementation
 
     VulkanDevice::VulkanDevice(VkInstance instance, VkSurfaceKHR surface,
-        const DevicePreferences& preferences,
-        std::shared_ptr<Logger> logger)
-        : m_instance(instance), m_surface(surface), m_logger(logger) {
+        const DevicePreferences& preferences)
+        : m_instance(instance), m_surface(surface) {
 
         // Initialize Volk
         VkResult volkResult = volkInitialize();
@@ -565,7 +560,7 @@ namespace tremor::gfx {
     }
 
     void VulkanDevice::logDeviceInfo() const {
-        if (!m_logger) return;
+        //if (!m_logger) return;
 
         // Log device information
         std::string vendorName;
@@ -579,14 +574,14 @@ namespace tremor::gfx {
         }
 
         // Log basic device info
-        m_logger->info("Selected GPU: {} ({})", m_deviceProperties.deviceName, vendorName);
-        m_logger->info("Driver version: {}.{}.{}",
+        Logger::get().info("Selected GPU: {} ({})", m_deviceProperties.deviceName, vendorName);
+        Logger::get().info("Driver version: {}.{}.{}",
             VK_VERSION_MAJOR(m_deviceProperties.driverVersion),
             VK_VERSION_MINOR(m_deviceProperties.driverVersion),
             VK_VERSION_PATCH(m_deviceProperties.driverVersion));
 
         // Log color and depth formats
-        m_logger->info("Color format: {}", m_colorFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ?
+        Logger::get().info("Color format: {}", m_colorFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ?
             "A2B10G10R10 (10-bit)" : "R8G8B8A8 (8-bit)");
 
         std::string depthFormatStr;
@@ -596,16 +591,16 @@ namespace tremor::gfx {
         case VK_FORMAT_D16_UNORM_S8_UINT: depthFormatStr = "D16_S8 (16-bit)"; break;
         default: depthFormatStr = "Unknown";
         }
-        m_logger->info("Depth format: {}", depthFormatStr);
+        Logger::get().info("Depth format: {}", depthFormatStr);
 
         // Log capabilities
-        m_logger->info("Device capabilities:");
-        m_logger->info("  - Ray Query: {}", m_capabilities.rayQuery ? "Yes" : "No");
-        m_logger->info("  - Mesh Shaders: {}", m_capabilities.meshShaders ? "Yes" : "No");
-        m_logger->info("  - Bresenham Line Rasterization: {}", m_capabilities.bresenhamLineRasterization ? "Yes" : "No");
-        m_logger->info("  - Sparse Binding (MegaTextures): {}", m_capabilities.sparseBinding ? "Yes" : "No");
-        m_logger->info("  - Dynamic Rendering: {}", m_capabilities.dynamicRendering ? "Yes" : "No");
-        m_logger->info("  - Buffer Device Address: {}", m_capabilities.bufferDeviceAddress ? "Yes" : "No");
+        Logger::get().info("Device capabilities:");
+        Logger::get().info("  - Ray Query: {}", m_capabilities.rayQuery ? "Yes" : "No");
+        Logger::get().info("  - Mesh Shaders: {}", m_capabilities.meshShaders ? "Yes" : "No");
+        Logger::get().info("  - Bresenham Line Rasterization: {}", m_capabilities.bresenhamLineRasterization ? "Yes" : "No");
+        Logger::get().info("  - Sparse Binding (MegaTextures): {}", m_capabilities.sparseBinding ? "Yes" : "No");
+        Logger::get().info("  - Dynamic Rendering: {}", m_capabilities.dynamicRendering ? "Yes" : "No");
+        Logger::get().info("  - Buffer Device Address: {}", m_capabilities.bufferDeviceAddress ? "Yes" : "No");
     }
 
     std::optional<uint32_t> VulkanDevice::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const {
@@ -664,14 +659,14 @@ namespace tremor::gfx {
         };
         ~VulkanBackend() override {};
 
-        bool initialize(SDL_Window* window, std::shared_ptr<Logger> logger) override {
+        bool initialize(SDL_Window* window) override {
         
-            window = SDL_CreateWindow("Tremor Engine", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_VULKAN);
+            window = SDL_CreateWindow("Tremor", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_VULKAN);
 
             w = window;
 
             createInstance();
-            createDevice(logger);
+            createDevice();
 
             return true;
         };
@@ -757,9 +752,6 @@ namespace tremor::gfx {
 
         bool enableValidation = false;
 
-        VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
-        VkDevice m_device = VK_NULL_HANDLE;
-        VkQueue m_queue = VK_NULL_HANDLE;
         uint32_t m_gfxQueueFamilyIndex = 0;
 
         // Format information
@@ -808,14 +800,14 @@ namespace tremor::gfx {
             // Get SDL Vulkan extensions
             unsigned int sdlExtensionCount = 0;
             if (!SDL_Vulkan_GetInstanceExtensions(window, &sdlExtensionCount, nullptr)) {
-                std::cerr << "SDL_Vulkan_GetInstanceExtensions failed: " << SDL_GetError() << std::endl;
+                Logger::get().error( "SDL_Vulkan_GetInstanceExtensions failed: {}", SDL_GetError());
                 return false;
             }
 
             // Allocate space for extensions (SDL + additional ones)
             auto instanceExtensions = tremor::mem::ScopedAlloc<const char*>(sdlExtensionCount + 5);
             if (!SDL_Vulkan_GetInstanceExtensions(window, &sdlExtensionCount, instanceExtensions.get())) {
-                std::cerr << "SDL_Vulkan_GetInstanceExtensions failed: " << SDL_GetError() << std::endl;
+                Logger::get().error("SDL_Vulkan_GetInstanceExtensions failed: {}", SDL_GetError());
                 return false;
             }
 
@@ -826,7 +818,7 @@ namespace tremor::gfx {
             uint32_t availableExtensionCount = 0;
             err = vkEnumerateInstanceExtensionProperties(nullptr, &availableExtensionCount, nullptr);
             if (err != VK_SUCCESS) {
-                std::cerr << "Failed to query instance extension count" << std::endl;
+                Logger::get().error("Failed to query instance extension count");
                 return false;
             }
 
@@ -839,7 +831,7 @@ namespace tremor::gfx {
 
                 err = vkEnumerateInstanceExtensionProperties(nullptr, &availableExtensionCount, extensionProps.get());
                 if (err != VK_SUCCESS) {
-                    std::cerr << "Failed to enumerate instance extensions" << std::endl;
+                    Logger::get().error("Failed to enumerate instance extensions" );
                     return false;
                 }
 
@@ -882,9 +874,9 @@ namespace tremor::gfx {
             vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
 
             // Print available layers
-            std::cout << "Available Vulkan layers:" << std::endl;
+            Logger::get().info("Available Vulkan layers:");
             for (const auto& layer : availableLayers) {
-                std::cout << "  " << layer.layerName << std::endl;
+                Logger::get().info("  {}", layer.layerName);
 
                 // Check if it's the validation layer
                 if (strcmp("VK_LAYER_KHRONOS_validation", layer.layerName) == 0) {
@@ -893,11 +885,11 @@ namespace tremor::gfx {
             }
 
             if (!enableValidation) {
-                std::cout << "Validation layer not found. Continuing without validation." << std::endl;
-                std::cout << "To enable validation, use vkconfig from the Vulkan SDK." << std::endl;
+                Logger::get().warning("Validation layer not found. Continuing without validation.");
+                Logger::get().warning("To enable validation, use vkconfig from the Vulkan SDK.");
             }
             else {
-                std::cout << "Validation layer found and enabled." << std::endl;
+                Logger::get().info("Validation layer found and enabled.");
             }
 #else
             enableValidation = false;
@@ -946,11 +938,11 @@ namespace tremor::gfx {
             // Create the instance
             err = vkCreateInstance(&createInfo, nullptr, &instance);
             if (err != VK_SUCCESS) {
-                std::cerr << "Failed to create Vulkan instance: " << err << std::endl;
+                Logger::get().error("Failed to create Vulkan instance: {}", (int)err);
                 return false;
             }
 
-            std::cout << "Vulkan instance created successfully" << std::endl;
+            Logger::get().info("Vulkan instance created successfully");
 
             // Load instance-level functions
             volkLoadInstance(instance);
@@ -966,18 +958,18 @@ namespace tremor::gfx {
                 );
 
                 if (err != VK_SUCCESS) {
-                    std::cerr << "Failed to set up debug messenger: " << err << std::endl;
+                    Logger::get().error("Failed to set up debug messenger: {}", (int)err);
                     // Continue anyway, this is not fatal
                 }
             }
 #endif
 
             if (!SDL_Vulkan_CreateSurface(w, instance, &surface)) {
-                std::cerr << "Failed to create Vulkan surface: " << err << std::endl;
+                Logger::get().error("Failed to create Vulkan surface : {}", (int)err);
                 return false;
             }
 
-            std::cout << "Vulkan surface created successfully" << std::endl;
+            Logger::get().info("Vulkan surface created successfully");
 
             return true;
         }
@@ -1002,19 +994,24 @@ namespace tremor::gfx {
             return VK_FALSE;
         }
 #endif
-        bool createDevice(std::shared_ptr<Logger> logger) {
+        bool createDevice() {
             auto pref = VulkanDevice::DevicePreferences();
             pref.preferDiscreteGPU = true;
             pref.requireMeshShaders = true;
             pref.requireRayQuery = true;
             pref.requireSparseBinding = true;
-            auto dev = VulkanDevice(instance, surface, pref, logger);
+            auto dev = VulkanDevice(instance, surface, pref);
+            physicalDevice = dev.physicalDevice();
+            m_colorFormat = dev.colorFormat();
+            m_depthFormat = dev.depthFormat();
+            m_deviceProperties = dev.properties();
+            m_memoryProperties = dev.memoryProperties();
+            graphicsQueue = dev.graphicsQueue();
+            
+            
             device = dev.device();
             return true;
         }
-        bool setupDebugMessenger();
-        bool createSurface();
-        bool pickPhysicalDevice();
         bool createLogicalDevice();
         bool createSwapChain();
         bool createImageViews();
