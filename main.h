@@ -11,7 +11,6 @@
 
 #include <windows.h>
 #include <mmsystem.h>
-#include "wsaerror.h"
 
 #include <sys/types.h>
 #include <errno.h>

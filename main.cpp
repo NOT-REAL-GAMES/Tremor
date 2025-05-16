@@ -56,7 +56,7 @@ public:
 			.minLevel = Logger::Level::Debug,
 			.showSourceLocation = true
 		});
-
+		window = SDL_CreateWindow("Tremor", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_VULKAN);
 		auto rb = tremor::gfx::RenderBackend::create(window);
 	}
 

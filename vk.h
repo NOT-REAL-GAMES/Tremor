@@ -36,24 +36,6 @@ void chainStructure(void** ppNext, T& structure) {
 
 namespace tremor::gfx {
 
-    // Vulkan-specific device selection helper
-    struct QueueFamilyIndices {
-        std::optional<uint32_t> graphicsFamily;
-        std::optional<uint32_t> presentFamily;
-
-        bool isComplete() const {
-            return graphicsFamily.has_value() && presentFamily.has_value();
-        }
-    };
-
-    // Vulkan-specific swap chain information
-    struct SwapChainSupportDetails {
-        VkSurfaceCapabilitiesKHR capabilities;
-        std::vector<VkSurfaceFormatKHR> formats;
-        std::vector<VkPresentModeKHR> presentModes;
-    };
-
-    // Class for managing Vulkan device and related resources
     class VulkanDevice {
     public:
         // Structure for tracking physical device capabilities
@@ -158,6 +140,431 @@ namespace tremor::gfx {
         static VkStructureType getStructureType();
     };
 
+
+
+    class SwapChain {
+    public:
+        struct CreateInfo {
+            uint32_t width = 0;
+            uint32_t height = 0;
+            bool vsync = true;
+            bool hdr = false;
+            uint32_t imageCount = 2;  // Double buffering by default
+            VkFormat preferredFormat = VK_FORMAT_B8G8R8A8_UNORM;
+            VkColorSpaceKHR preferredColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        };
+
+        SwapChain(const VulkanDevice& device);
+
+        // Constructor takes a device, surface, and creation info
+        SwapChain(const VulkanDevice& device, VkSurfaceKHR surface, const CreateInfo& createInfo) : m_device(device), m_surface(surface) {
+            // Get logger from device if available
+            // (This assumes VulkanDevice has a getLogger method - add if needed)
+            // m_logger = device.getLogger();
+
+            createSwapChain(createInfo);
+            createImageViews();
+
+                Logger::get().info("Swap chain created: {}x{}, {} images, format: {}, {}",
+                    (int)m_extent.width, (int)m_extent.height, (int)m_images.size(),
+                    (int)m_imageFormat, m_vsync ? "VSync" : "No VSync");
+            
+        }
+
+        // Destructor to clean up Vulkan resources
+        ~SwapChain();
+
+        // No copying
+        SwapChain(const SwapChain&) = delete;
+        SwapChain& operator=(const SwapChain&) = delete;
+
+        // Moving is allowed
+        SwapChain(SwapChain&& other) noexcept;
+        SwapChain& operator=(SwapChain&& other) noexcept;
+
+        // Recreate the swap chain (e.g., on window resize)
+        void recreate(uint32_t width, uint32_t height);
+
+        // Get the next image index for rendering
+        VkResult acquireNextImage(uint64_t timeout, VkSemaphore signalSemaphore, VkFence fence, uint32_t& outImageIndex);
+
+        // Present the current image
+        VkResult present(uint32_t imageIndex, VkSemaphore waitSemaphore);
+
+        // Getters
+        VkSwapchainKHR handle() const { return m_swapChain; }
+        VkFormat imageFormat() const { return m_imageFormat; }
+        VkExtent2D extent() const { return m_extent; }
+        const std::vector<VkImage>& images() const { return m_images; }
+        const std::vector<VkImageView>& imageViews() const { return m_imageViews; }
+        uint32_t imageCount() const { return static_cast<uint32_t>(m_images.size()); }
+        bool isVSync() const { return m_vsync; }
+        bool isHDR() const { return m_hdr; }
+
+    private:
+        // References to external objects
+        const VulkanDevice& m_device;
+        VkSurfaceKHR m_surface;
+
+        // Swap chain objects
+        VkSwapchainKHR m_swapChain = VK_NULL_HANDLE;
+        std::vector<VkImage> m_images;
+        std::vector<VkImageView> m_imageViews;
+
+        // Properties
+        VkFormat m_imageFormat;
+        VkColorSpaceKHR m_colorSpace;
+        VkExtent2D m_extent;
+        bool m_vsync = true;
+        bool m_hdr = false;
+
+        // Internal helpers
+        void createSwapChain(const CreateInfo& createInfo);
+        void cleanup();
+        void createImageViews();
+
+        // Choose swap chain properties
+        VkSurfaceFormatKHR chooseSwapSurfaceFormat(
+            const std::vector<VkSurfaceFormatKHR>& availableFormats,
+            VkFormat preferredFormat,
+            VkColorSpaceKHR preferredColorSpace);
+
+        VkPresentModeKHR chooseSwapPresentMode(
+            const std::vector<VkPresentModeKHR>& availablePresentModes,
+            bool vsync);
+
+        VkExtent2D chooseSwapExtent(
+            const VkSurfaceCapabilitiesKHR& capabilities,
+            uint32_t width,
+            uint32_t height);
+    };
+
+    // Implementation
+
+    SwapChain::~SwapChain() {
+        cleanup();
+    }
+    
+
+    SwapChain::SwapChain(SwapChain&& other) noexcept
+        : m_device(other.m_device),
+        m_surface(other.m_surface),
+        m_swapChain(other.m_swapChain),
+        m_images(std::move(other.m_images)),
+        m_imageViews(std::move(other.m_imageViews)),
+        m_imageFormat(other.m_imageFormat),
+        m_colorSpace(other.m_colorSpace),
+        m_extent(other.m_extent),
+        m_vsync(other.m_vsync),
+        m_hdr(other.m_hdr) {
+
+        // Invalidate the other swap chain
+        other.m_swapChain = VK_NULL_HANDLE;
+        other.m_images.clear();
+        other.m_imageViews.clear();
+    }
+
+    SwapChain& SwapChain::operator=(SwapChain&& other) noexcept {
+        if (this != &other) {
+            // Clean up existing resources
+            cleanup();
+
+            // Move resources from other
+            m_swapChain = other.m_swapChain;
+            m_images = std::move(other.m_images);
+            m_imageViews = std::move(other.m_imageViews);
+            m_imageFormat = other.m_imageFormat;
+            m_colorSpace = other.m_colorSpace;
+            m_extent = other.m_extent;
+            m_vsync = other.m_vsync;
+            m_hdr = other.m_hdr;
+
+            // Invalidate the other swap chain
+            other.m_swapChain = VK_NULL_HANDLE;
+            other.m_images.clear();
+            other.m_imageViews.clear();
+        }
+
+        return *this;
+    }
+
+    void SwapChain::recreate(uint32_t width, uint32_t height) {
+        // Save current settings
+        CreateInfo createInfo{};
+        createInfo.width = width;
+        createInfo.height = height;
+        createInfo.vsync = m_vsync;
+        createInfo.hdr = m_hdr;
+        createInfo.imageCount = static_cast<uint32_t>(m_images.size());
+        createInfo.preferredFormat = m_imageFormat;
+        createInfo.preferredColorSpace = m_colorSpace;
+
+        // Clean up existing swap chain
+        cleanup();
+
+        // Create new swap chain
+        createSwapChain(createInfo);
+        createImageViews();
+
+        Logger::get().info("Swap chain recreated: {}x{}", m_extent.width, m_extent.height);
+        
+    }
+
+    VkResult SwapChain::acquireNextImage(uint64_t timeout, VkSemaphore signalSemaphore, VkFence fence, uint32_t& outImageIndex) {
+        return vkAcquireNextImageKHR(m_device.device(), m_swapChain, timeout, signalSemaphore, fence, &outImageIndex);
+    }
+
+    VkResult SwapChain::present(uint32_t imageIndex, VkSemaphore waitSemaphore) {
+        VkPresentInfoKHR presentInfo{};
+        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+
+        presentInfo.waitSemaphoreCount = waitSemaphore ? 1 : 0;
+        presentInfo.pWaitSemaphores = waitSemaphore ? &waitSemaphore : nullptr;
+
+        presentInfo.swapchainCount = 1;
+        presentInfo.pSwapchains = &m_swapChain;
+        presentInfo.pImageIndices = &imageIndex;
+        presentInfo.pResults = nullptr;
+
+        return vkQueuePresentKHR(m_device.graphicsQueue(), &presentInfo);
+    }
+
+    void SwapChain::createSwapChain(const CreateInfo& createInfo) {
+        // Query surface capabilities
+        VkSurfaceCapabilitiesKHR capabilities;
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_device.physicalDevice(), m_surface, &capabilities);
+
+        // Query supported formats
+        uint32_t formatCount;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(m_device.physicalDevice(), m_surface, &formatCount, nullptr);
+        std::vector<VkSurfaceFormatKHR> formats(formatCount);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(m_device.physicalDevice(), m_surface, &formatCount, formats.data());
+
+        // Query supported present modes
+        uint32_t presentModeCount;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(m_device.physicalDevice(), m_surface, &presentModeCount, nullptr);
+        std::vector<VkPresentModeKHR> presentModes(presentModeCount);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(m_device.physicalDevice(), m_surface, &presentModeCount, presentModes.data());
+
+        // Choose format, present mode, and extent
+        VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(formats, createInfo.preferredFormat, createInfo.preferredColorSpace);
+        VkPresentModeKHR presentMode = chooseSwapPresentMode(presentModes, createInfo.vsync);
+        VkExtent2D extent = chooseSwapExtent(capabilities, createInfo.width, createInfo.height);
+
+        // Determine image count
+        uint32_t imageCount = createInfo.imageCount;
+        if (capabilities.maxImageCount > 0 && imageCount > capabilities.maxImageCount) {
+            imageCount = capabilities.maxImageCount;
+        }
+        if (imageCount < capabilities.minImageCount) {
+            imageCount = capabilities.minImageCount;
+        }
+
+        // Create swap chain
+        VkSwapchainCreateInfoKHR sccreateInfo{};
+        sccreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        sccreateInfo.surface = m_surface;
+        sccreateInfo.minImageCount = imageCount;
+        sccreateInfo.imageFormat = surfaceFormat.format;
+        sccreateInfo.imageColorSpace = surfaceFormat.colorSpace;
+        sccreateInfo.imageExtent = extent;
+        sccreateInfo.imageArrayLayers = 1;
+        sccreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+
+        // Add transfer usage for screenshots if needed
+        sccreateInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+
+        // Handle queue families
+        sccreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        sccreateInfo.queueFamilyIndexCount = 0;
+        sccreateInfo.pQueueFamilyIndices = nullptr;
+
+        sccreateInfo.preTransform = capabilities.currentTransform;
+        sccreateInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        sccreateInfo.presentMode = presentMode;
+        sccreateInfo.clipped = VK_TRUE;
+        sccreateInfo.oldSwapchain = VK_NULL_HANDLE;
+
+        // Check for HDR support if requested
+        m_hdr = createInfo.hdr && (surfaceFormat.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+
+        // Create the swap chain
+        if (vkCreateSwapchainKHR(m_device.device(), &sccreateInfo, nullptr, &m_swapChain) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create swap chain");
+        }
+
+        // Get swap chain images
+        vkGetSwapchainImagesKHR(m_device.device(), m_swapChain, &imageCount, nullptr);
+        m_images.resize(imageCount);
+        vkGetSwapchainImagesKHR(m_device.device(), m_swapChain, &imageCount, m_images.data());
+
+        // Store format and extent
+        m_imageFormat = surfaceFormat.format;
+        m_colorSpace = surfaceFormat.colorSpace;
+        m_extent = extent;
+        m_vsync = (presentMode == VK_PRESENT_MODE_FIFO_KHR || presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR);
+    }
+
+    void SwapChain::createImageViews() {
+        m_imageViews.resize(m_images.size());
+
+        for (size_t i = 0; i < m_images.size(); i++) {
+            VkImageViewCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            createInfo.image = m_images[i];
+            createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            createInfo.format = m_imageFormat;
+
+            // Default color mapping
+            createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+            createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+
+            // Only using color aspect
+            createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            createInfo.subresourceRange.baseMipLevel = 0;
+            createInfo.subresourceRange.levelCount = 1;
+            createInfo.subresourceRange.baseArrayLayer = 0;
+            createInfo.subresourceRange.layerCount = 1;
+
+            if (vkCreateImageView(m_device.device(), &createInfo, nullptr, &m_imageViews[i]) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create image view");
+            }
+        }
+    }
+
+    void SwapChain::cleanup() {
+        // Destroy image views
+        for (auto imageView : m_imageViews) {
+            vkDestroyImageView(m_device.device(), imageView, nullptr);
+        }
+        m_imageViews.clear();
+
+        // Destroy swap chain
+        if (m_swapChain != VK_NULL_HANDLE) {
+            vkDestroySwapchainKHR(m_device.device(), m_swapChain, nullptr);
+            m_swapChain = VK_NULL_HANDLE;
+        }
+
+        // Images are owned by the swap chain and destroyed with it
+        m_images.clear();
+    }
+
+    VkSurfaceFormatKHR SwapChain::chooseSwapSurfaceFormat(
+        const std::vector<VkSurfaceFormatKHR>& availableFormats,
+        VkFormat preferredFormat,
+        VkColorSpaceKHR preferredColorSpace) {
+
+        // First check for preferred format and color space
+        for (const auto& availableFormat : availableFormats) {
+            if (availableFormat.format == preferredFormat &&
+                availableFormat.colorSpace == preferredColorSpace) {
+                return availableFormat;
+            }
+        }
+
+        // Check for HDR formats (for HDR displays)
+        if (m_hdr) {
+            const std::array<VkFormat, 3> hdrFormats = {
+                VK_FORMAT_R16G16B16A16_SFLOAT,
+                VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+                VK_FORMAT_R10X6G10X6B10X6A10X6_UNORM_4PACK16
+            };
+
+            for (auto hdrFormat : hdrFormats) {
+                for (const auto& availableFormat : availableFormats) {
+                    if (availableFormat.format == hdrFormat &&
+                        availableFormat.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                        return availableFormat;
+                    }
+                }
+            }
+        }
+
+        // Standard 8-bit formats
+        for (const auto& availableFormat : availableFormats) {
+            if (availableFormat.format == VK_FORMAT_B8G8R8A8_UNORM ||
+                availableFormat.format == VK_FORMAT_R8G8B8A8_UNORM) {
+                return availableFormat;
+            }
+        }
+
+        // Fallback to first available format
+        return availableFormats[0];
+    }
+
+    VkPresentModeKHR SwapChain::chooseSwapPresentMode(
+        const std::vector<VkPresentModeKHR>& availablePresentModes,
+        bool vsync) {
+
+        if (vsync) {
+            // FIFO is guaranteed to be available and provides proper vsync
+            return VK_PRESENT_MODE_FIFO_KHR;
+        }
+        else {
+            // Try to find immediate mode for no vsync
+            for (const auto& mode : availablePresentModes) {
+                if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+                    return mode;
+                }
+            }
+
+            // Try mailbox for triple buffering
+            for (const auto& mode : availablePresentModes) {
+                if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
+                    return mode;
+                }
+            }
+
+            // Fallback to FIFO which is guaranteed to be available
+            return VK_PRESENT_MODE_FIFO_KHR;
+        }
+    }
+
+    VkExtent2D SwapChain::chooseSwapExtent(
+        const VkSurfaceCapabilitiesKHR& capabilities,
+        uint32_t width,
+        uint32_t height) {
+
+        if (capabilities.currentExtent.width != UINT32_MAX) {
+            // Surface size is fixed
+            return capabilities.currentExtent;
+        }
+        else {
+            // Surface size can vary, clamp to allowed range
+            VkExtent2D actualExtent = { width, height };
+
+            actualExtent.width = std::clamp(actualExtent.width,
+                capabilities.minImageExtent.width,
+                capabilities.maxImageExtent.width);
+
+            actualExtent.height = std::clamp(actualExtent.height,
+                capabilities.minImageExtent.height,
+                capabilities.maxImageExtent.height);
+
+            return actualExtent;
+        }
+    }
+
+    // Vulkan-specific device selection helper
+    struct QueueFamilyIndices {
+        std::optional<uint32_t> graphicsFamily;
+        std::optional<uint32_t> presentFamily;
+
+        bool isComplete() const {
+            return graphicsFamily.has_value() && presentFamily.has_value();
+        }
+    };
+
+    // Vulkan-specific swap chain information
+    struct SwapChainSupportDetails {
+        VkSurfaceCapabilitiesKHR capabilities;
+        std::vector<VkSurfaceFormatKHR> formats;
+        std::vector<VkPresentModeKHR> presentModes;
+    };
+
+    // Class for managing Vulkan device and related resources
     // Template specializations for structure types
     template<> inline VkStructureType VulkanDevice::getStructureType<VkDeviceCreateInfo>() { return VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO; }
     template<> inline VkStructureType VulkanDevice::getStructureType<VkPhysicalDeviceFeatures2>() { return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2; }
@@ -661,12 +1068,11 @@ namespace tremor::gfx {
 
         bool initialize(SDL_Window* window) override {
         
-            window = SDL_CreateWindow("Tremor", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_VULKAN);
 
             w = window;
 
             createInstance();
-            createDevice();
+            createDeviceAndSwapChain();
 
             return true;
         };
@@ -994,26 +1400,32 @@ namespace tremor::gfx {
             return VK_FALSE;
         }
 #endif
-        bool createDevice() {
+        
+
+        bool createDeviceAndSwapChain() {
+            auto ci = SwapChain::CreateInfo();
+
             auto pref = VulkanDevice::DevicePreferences();
             pref.preferDiscreteGPU = true;
             pref.requireMeshShaders = true;
             pref.requireRayQuery = true;
             pref.requireSparseBinding = true;
+
             auto dev = VulkanDevice(instance, surface, pref);
+            auto sc = SwapChain(dev, surface, ci);
+
             physicalDevice = dev.physicalDevice();
             m_colorFormat = dev.colorFormat();
             m_depthFormat = dev.depthFormat();
             m_deviceProperties = dev.properties();
             m_memoryProperties = dev.memoryProperties();
             graphicsQueue = dev.graphicsQueue();
-            
-            
+
+
             device = dev.device();
+
             return true;
         }
-        bool createLogicalDevice();
-        bool createSwapChain();
         bool createImageViews();
         bool createRenderPass();
         bool createGraphicsPipeline();
