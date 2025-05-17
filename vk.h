@@ -3229,11 +3229,6 @@ private:
             createSyncObjects();
             createTriangle();
 
-            beginFrame();
-
-            endFrame();
-
-
             return true;
         };
         void shutdown() override {};

@@ -48,6 +48,8 @@ public:
 
 	SDL_Window* window;
 
+	std::unique_ptr<tremor::gfx::RenderBackend> rb;
+
 	Engine() {
 		Logger::create({
 			.enableConsole = true,
@@ -57,7 +59,7 @@ public:
 			.showSourceLocation = true
 		});
 		window = SDL_CreateWindow("Tremor", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_VULKAN);
-		auto rb = tremor::gfx::RenderBackend::create(window);
+		rb = tremor::gfx::RenderBackend::create(window);
 	}
 
 	bool Loop() {
@@ -71,6 +73,12 @@ public:
 					return false;
 				}
 			}
+
+			rb.get()->beginFrame();
+
+
+			rb.get()->endFrame();
+
 			SDL_Delay(4); // Simulate a frame delay
 			return true;
 		#endif
