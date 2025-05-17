@@ -35,9 +35,321 @@ void chainStructure(void** ppNext, T& structure) {
     ppNext = &structure.pNext;
 }
 
+// Helper function to copy buffer data
+void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
+    VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+    try {
+        // Create command buffer for transfer
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandPool = commandPool;
+        allocInfo.commandBufferCount = 1;
 
+        VkCommandBuffer commandBuffer;
+        VkResult result = vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+        if (result != VK_SUCCESS) {
+            Logger::get().error("Failed to allocate transfer command buffer: {}", (int)result);
+            return;
+        }
 
+        // Begin recording
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        if (result != VK_SUCCESS) {
+            Logger::get().error("Failed to begin command buffer: {}", (int)result);
+            vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+            return;
+        }
+
+        // Copy from source to destination
+        VkBufferCopy copyRegion{};
+        copyRegion.srcOffset = 0;
+        copyRegion.dstOffset = 0;
+        copyRegion.size = size;
+        vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+        // End recording
+        result = vkEndCommandBuffer(commandBuffer);
+        if (result != VK_SUCCESS) {
+            Logger::get().error("Failed to end command buffer: {}", (int)result);
+            vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+            return;
+        }
+
+        // Submit and wait
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        result = vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+        if (result != VK_SUCCESS) {
+            Logger::get().error("Failed to submit transfer command buffer: {}", (int)result);
+            vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+            return;
+        }
+
+        // Wait for the transfer to complete
+        result = vkQueueWaitIdle(queue);
+        if (result != VK_SUCCESS) {
+            Logger::get().error("Failed to wait for queue idle: {}", (int)result);
+        }
+
+        // Free the temporary command buffer
+        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+
+        Logger::get().info("Buffer copy completed successfully: {} bytes", size);
+    }
+    catch (const std::exception& e) {
+        Logger::get().error("Exception during buffer copy: {}", e.what());
+    }
+}
 namespace tremor::gfx { 
+
+    // Basic Vertex structure with position and color
+    struct Vertex {
+        float position[3];  // XYZ position
+        float color[3];     // RGB color
+
+        static VkVertexInputBindingDescription getBindingDescription() {
+            VkVertexInputBindingDescription bindingDescription{};
+            bindingDescription.binding = 0;
+            bindingDescription.stride = sizeof(Vertex);
+            bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+            return bindingDescription;
+        }
+
+        static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
+            std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+
+            // Position attribute
+            attributeDescriptions[0].binding = 0;
+            attributeDescriptions[0].location = 0;
+            attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+            attributeDescriptions[0].offset = offsetof(Vertex, position);
+
+            // Color attribute
+            attributeDescriptions[1].binding = 0;
+            attributeDescriptions[1].location = 1;
+            attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+            attributeDescriptions[1].offset = offsetof(Vertex, color);
+
+            return attributeDescriptions;
+        }
+    };
+
+    // Generic Buffer class that can be used for both vertex and index buffers
+    class Buffer {
+    public:
+        Buffer() = default;
+
+        Buffer(VkDevice device, VkPhysicalDevice physicalDevice,
+            VkDeviceSize size, VkBufferUsageFlags usage,
+            VkMemoryPropertyFlags memoryProps)
+            : m_device(device), m_size(size) {
+
+            // Create buffer
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = size;
+            bufferInfo.usage = usage;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+            VkBuffer bufferHandle = VK_NULL_HANDLE;
+            if (vkCreateBuffer(device, &bufferInfo, nullptr, &bufferHandle) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create buffer");
+            }
+            m_buffer = BufferResource(device, bufferHandle);
+
+            // Get memory requirements
+            VkMemoryRequirements memRequirements;
+            vkGetBufferMemoryRequirements(device, m_buffer, &memRequirements);
+
+            // Allocate memory
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memRequirements.size;
+            allocInfo.memoryTypeIndex = findMemoryType(
+                physicalDevice, memRequirements.memoryTypeBits, memoryProps);
+
+            VkDeviceMemory memoryHandle = VK_NULL_HANDLE;
+            if (vkAllocateMemory(device, &allocInfo, nullptr, &memoryHandle) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to allocate buffer memory");
+            }
+            m_memory = DeviceMemoryResource(device, memoryHandle);
+
+            // Bind memory to buffer
+            vkBindBufferMemory(device, m_buffer, m_memory, 0);
+        }
+
+        // Map memory and update buffer data
+        void update(const void* data, VkDeviceSize size, VkDeviceSize offset = 0) {
+            if (!m_memory) {
+                Logger::get().error("Attempting to update buffer with invalid memory");
+                return;
+            }
+
+            if (size > m_size) {
+                Logger::get().error("Buffer update size ({}) exceeds buffer size ({})", size, m_size);
+                return;
+            }
+
+            void* mappedData = nullptr;
+            VkResult result = vkMapMemory(m_device, m_memory, offset, size, 0, &mappedData);
+
+            if (result != VK_SUCCESS) {
+                Logger::get().error("Failed to map buffer memory: {}", (int)result);
+                return;
+            }
+
+            memcpy(mappedData, data, static_cast<size_t>(size));
+            vkUnmapMemory(m_device, m_memory);
+        }
+
+
+        // Accessors
+        VkBuffer getBuffer() const { return m_buffer; }
+        VkDeviceSize getSize() const { return m_size; }
+
+    private:
+        VkDevice m_device = VK_NULL_HANDLE;
+        BufferResource m_buffer;
+        DeviceMemoryResource m_memory;
+        VkDeviceSize m_size = 0;
+
+        // Helper function to find memory type
+        uint32_t findMemoryType(VkPhysicalDevice physicalDevice,
+            uint32_t typeFilter,
+            VkMemoryPropertyFlags properties) {
+            VkPhysicalDeviceMemoryProperties memProperties;
+            vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+
+            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+                if ((typeFilter & (1 << i)) &&
+                    (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                    return i;
+                }
+            }
+
+            throw std::runtime_error("Failed to find suitable memory type");
+        }
+    };
+
+    // Vertex Buffer Class
+    class VertexBuffer {
+    public:
+        VertexBuffer() = default;
+
+        template<typename T>
+        VertexBuffer(VkDevice device, VkPhysicalDevice physicalDevice,
+            VkCommandPool commandPool, VkQueue queue,
+            const std::vector<T>& vertices)
+            : m_vertexCount(static_cast<uint32_t>(vertices.size())),
+            m_stride(sizeof(T)) {
+
+            VkDeviceSize bufferSize = vertices.size() * sizeof(T);
+
+            // Create staging buffer (host visible)
+            Buffer stagingBuffer(
+                device, physicalDevice, bufferSize,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            // Copy data to staging buffer
+            stagingBuffer.update(vertices.data(), bufferSize);
+
+            // Create vertex buffer (device local)
+            m_buffer = std::make_unique<Buffer>(
+                device, physicalDevice, bufferSize,
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
+
+            // Copy from staging buffer to vertex buffer
+            copyBuffer(device, commandPool, queue,
+                stagingBuffer.getBuffer(), m_buffer->getBuffer(), bufferSize);
+        }
+
+        // Bind vertex buffer to command buffer
+        void bind(VkCommandBuffer cmdBuffer, uint32_t binding = 0) const {
+            if (m_buffer) {
+                VkBuffer vertexBuffers[] = { m_buffer->getBuffer() };
+                VkDeviceSize offsets[] = { 0 };
+                vkCmdBindVertexBuffers(cmdBuffer, binding, 1, vertexBuffers, offsets);
+            }
+        }
+
+        // Getters
+        uint32_t getVertexCount() const { return m_vertexCount; }
+        uint32_t getStride() const { return m_stride; }
+
+    private:
+        std::unique_ptr<Buffer> m_buffer;
+        uint32_t m_vertexCount = 0;
+        uint32_t m_stride = 0;
+    };
+
+    // Index Buffer Class
+    class IndexBuffer {
+    public:
+        IndexBuffer() = default;
+
+        template<typename T>
+        IndexBuffer(VkDevice device, VkPhysicalDevice physicalDevice,
+            VkCommandPool commandPool, VkQueue queue,
+            const std::vector<T>& indices)
+            : m_indexCount(static_cast<uint32_t>(indices.size())) {
+
+            static_assert(std::is_same_v<T, uint16_t> || std::is_same_v<T, uint32_t>,
+                "Index type must be uint16_t or uint32_t");
+
+            m_indexType = sizeof(T) == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+
+            VkDeviceSize bufferSize = indices.size() * sizeof(T);
+
+            // Create staging buffer (host visible)
+            Buffer stagingBuffer(
+                device, physicalDevice, bufferSize,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            // Copy data to staging buffer
+            stagingBuffer.update(indices.data(), bufferSize);
+
+            // Create index buffer (device local)
+            m_buffer = std::make_unique<Buffer>(
+                device, physicalDevice, bufferSize,
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
+
+            // Copy from staging buffer to index buffer
+            copyBuffer(device, commandPool, queue,
+                stagingBuffer.getBuffer(), m_buffer->getBuffer(), bufferSize);
+        }
+
+        // Bind index buffer to command buffer
+        void bind(VkCommandBuffer cmdBuffer) const {
+            if (m_buffer) {
+                vkCmdBindIndexBuffer(cmdBuffer, m_buffer->getBuffer(), 0, m_indexType);
+            }
+        }
+
+        // Getters
+        uint32_t getIndexCount() const { return m_indexCount; }
+        VkIndexType getIndexType() const { return m_indexType; }
+
+    private:
+        std::unique_ptr<Buffer> m_buffer;
+        uint32_t m_indexCount = 0;
+        VkIndexType m_indexType = VK_INDEX_TYPE_UINT32;
+    };
 
     // Helper function to infer shader type from filename
     inline ShaderType inferShaderTypeFromFilename(const std::string& filename) {
@@ -2337,8 +2649,139 @@ namespace tremor::gfx {
             return true;
         }
 
+        class VertexBufferSimple {
+        public:
+            VertexBufferSimple(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, size_t vertexCount)
+                : m_device(device), m_buffer(buffer), m_memory(memory), m_vertexCount(vertexCount) {
+            }
+
+            ~VertexBufferSimple() {
+                if (m_buffer != VK_NULL_HANDLE) {
+                    vkDestroyBuffer(m_device, m_buffer, nullptr);
+                    m_buffer = VK_NULL_HANDLE;
+                }
+
+                if (m_memory != VK_NULL_HANDLE) {
+                    vkFreeMemory(m_device, m_memory, nullptr);
+                    m_memory = VK_NULL_HANDLE;
+                }
+            }
+
+            // Bind the vertex buffer
+            void bind(VkCommandBuffer cmdBuffer) const {
+                VkDeviceSize offsets[] = { 0 };
+                vkCmdBindVertexBuffers(cmdBuffer, 0, 1, &m_buffer, offsets);
+            }
+
+            // Get vertex count
+            uint32_t getVertexCount() const { return static_cast<uint32_t>(m_vertexCount); }
+
+        private:
+            VkDevice m_device;
+            VkBuffer m_buffer = VK_NULL_HANDLE;
+            VkDeviceMemory m_memory = VK_NULL_HANDLE;
+            size_t m_vertexCount = 0;
+        };
 
 
+        bool createTriangle() {
+            try {
+                // Create command pool for transfers if needed
+                if (!m_transferCommandPool) {
+                    VkCommandPoolCreateInfo poolInfo{};
+                    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+                    poolInfo.queueFamilyIndex = vkDevice->graphicsQueueFamily();
+                    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+
+                    VkCommandPool cmdPool;
+                    if (vkCreateCommandPool(device, &poolInfo, nullptr, &cmdPool) != VK_SUCCESS) {
+                        Logger::get().error("Failed to create transfer command pool");
+                        return false;
+                    }
+                    m_transferCommandPool = CommandPoolResource(device, cmdPool);
+                    Logger::get().info("Transfer command pool created");
+                }
+
+                // Create a single, host-visible triangle (no staging buffer) for simplicity
+                // Define vertices for a colored triangle
+                std::vector<Vertex> vertices = {
+                    {{0.0f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},   // Bottom - red
+                    {{-0.5f, 0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}},   // Top left - blue
+                    {{0.5f, 0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}}     // Top right - green
+                };
+
+                // Create vertex buffer with HOST_VISIBLE memory
+                VkDeviceSize vertexBufferSize = sizeof(vertices[0]) * vertices.size();
+
+                // Create buffer
+                VkBufferCreateInfo bufferInfo{};
+                bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bufferInfo.size = vertexBufferSize;
+                bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+                bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+                VkBuffer vertexBufferHandle;
+                if (vkCreateBuffer(device, &bufferInfo, nullptr, &vertexBufferHandle) != VK_SUCCESS) {
+                    Logger::get().error("Failed to create vertex buffer");
+                    return false;
+                }
+
+                // Get memory requirements
+                VkMemoryRequirements memRequirements;
+                vkGetBufferMemoryRequirements(device, vertexBufferHandle, &memRequirements);
+
+                // Find suitable memory type
+                uint32_t memoryTypeIndex = res->findMemoryType(
+                    memRequirements.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                );
+
+                // Allocate memory
+                VkMemoryAllocateInfo allocInfo{};
+                allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                allocInfo.allocationSize = memRequirements.size;
+                allocInfo.memoryTypeIndex = memoryTypeIndex;
+
+                VkDeviceMemory vertexBufferMemory;
+                if (vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS) {
+                    vkDestroyBuffer(device, vertexBufferHandle, nullptr);
+                    Logger::get().error("Failed to allocate vertex buffer memory");
+                    return false;
+                }
+
+                // Bind memory to buffer
+                if (vkBindBufferMemory(device, vertexBufferHandle, vertexBufferMemory, 0) != VK_SUCCESS) {
+                    vkFreeMemory(device, vertexBufferMemory, nullptr);
+                    vkDestroyBuffer(device, vertexBufferHandle, nullptr);
+                    Logger::get().error("Failed to bind buffer memory");
+                    return false;
+                }
+
+                // Map and copy the vertex data
+                void* data;
+                if (vkMapMemory(device, vertexBufferMemory, 0, vertexBufferSize, 0, &data) != VK_SUCCESS) {
+                    vkFreeMemory(device, vertexBufferMemory, nullptr);
+                    vkDestroyBuffer(device, vertexBufferHandle, nullptr);
+                    Logger::get().error("Failed to map memory");
+                    return false;
+                }
+
+                memcpy(data, vertices.data(), (size_t)vertexBufferSize);
+                vkUnmapMemory(device, vertexBufferMemory);
+
+                // Store in member variables
+                m_vertexBuffer = std::make_unique<VertexBufferSimple>(device, vertexBufferHandle, vertexBufferMemory, vertices.size());
+                Logger::get().info("Vertex buffer created successfully with {} vertices", vertices.size());
+
+                return true;
+            }
+            catch (const std::exception& e) {
+                Logger::get().error("Exception in createTriangle: {}", e.what());
+                return false;
+            }
+        }
+
+        // Add a simple vertex buffer class
         bool createFramebuffers() {
             // Get swapchain image count
             const auto& swapchainImages = vkSwapchain.get()->imageViews();
@@ -2385,6 +2828,12 @@ namespace tremor::gfx {
         std::vector<SemaphoreResource> m_imageAvailableSemaphores;
         std::vector<SemaphoreResource> m_renderFinishedSemaphores;
         std::vector<FenceResource> m_inFlightFences;
+
+        std::unique_ptr<VertexBufferSimple> m_vertexBuffer;
+        std::unique_ptr<IndexBuffer> m_indexBuffer;
+
+        // Add a command pool for transfer operations
+        CommandPoolResource m_transferCommandPool;
 
 
         void createRenderPass() {
@@ -2602,7 +3051,7 @@ namespace tremor::gfx {
                 colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
                 colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
                 colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-                colorAttachment.clearValue.color = { {1.0f, 0.0f, 0.3125f, 1.0f} };  // Dark blue
+                colorAttachment.clearValue.color = { {1.0f, 0.0f, 0.4125f, 1.0f} };  // Dark blue
 
                 // Add to the renderingInfo
                 renderingInfo.colorAttachments.push_back(colorAttachment);
@@ -2649,6 +3098,43 @@ namespace tremor::gfx {
 
                 // Store the current image index for use in endFrame
                 m_currentImageIndex = imageIndex;
+            }
+
+            // Bind the pipeline
+            vkCmdBindPipeline(m_commandBuffers[currentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, *m_graphicsPipeline);
+
+            // Set viewport and scissor
+            VkViewport viewport{};
+            viewport.x = 0.0f;
+            viewport.y = 0.0f;
+            viewport.width = static_cast<float>(vkSwapchain->extent().width);
+            viewport.height = static_cast<float>(vkSwapchain->extent().height);
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+            vkCmdSetViewport(m_commandBuffers[currentFrame], 0, 1, &viewport);
+
+            VkRect2D scissor{};
+            scissor.offset = { 0, 0 };
+            scissor.extent = vkSwapchain->extent();
+            vkCmdSetScissor(m_commandBuffers[currentFrame], 0, 1, &scissor);
+
+            // Draw triangle if buffers are available
+            if (m_vertexBuffer) {
+                try {
+                    // Bind the vertex buffer
+                    Logger::get().info("Binding vertex buffer with {} vertices", m_vertexBuffer->getVertexCount());
+                    m_vertexBuffer->bind(m_commandBuffers[currentFrame]);
+
+                    // Draw without indices
+                    Logger::get().info("Drawing {} vertices", m_vertexBuffer->getVertexCount());
+                    vkCmdDraw(m_commandBuffers[currentFrame], m_vertexBuffer->getVertexCount(), 1, 0, 0);
+                }
+                catch (const std::exception& e) {
+                    Logger::get().error("Exception during triangle drawing: {}", e.what());
+                }
+            }
+            else {
+                Logger::get().warning("No vertex buffer available for drawing");
             }
         }
 
@@ -2741,7 +3227,7 @@ private:
 
             createGraphicsPipeline();
             createSyncObjects();
-
+            createTriangle();
 
             beginFrame();
 
@@ -3136,31 +3622,16 @@ private:
 
             // 4. Configure vertex input
             // For now, let's assume a simple vertex with position and color
-            VkVertexInputBindingDescription bindingDescription{};
-            bindingDescription.binding = 0;
-            bindingDescription.stride = sizeof(float) * 6; // 3 for position, 3 for color
-            bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-            std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+            auto bindingDescription = Vertex::getBindingDescription();
+            auto attributeDescriptions = Vertex::getAttributeDescriptions();
 
-            // Position attribute
-            attributeDescriptions[0].binding = 0;
-            attributeDescriptions[0].location = 0;
-            attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-            attributeDescriptions[0].offset = 0;
-
-            // Color attribute
-            attributeDescriptions[1].binding = 0;
-            attributeDescriptions[1].location = 1;
-            attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-            attributeDescriptions[1].offset = sizeof(float) * 3;
-
-            // Configure vertex input state
             pipelineState.vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
             pipelineState.vertexInputState.vertexBindingDescriptionCount = 1;
             pipelineState.vertexInputState.pVertexBindingDescriptions = &bindingDescription;
             pipelineState.vertexInputState.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
             pipelineState.vertexInputState.pVertexAttributeDescriptions = attributeDescriptions.data();
+
 
             // 5. Input assembly
             pipelineState.inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;

@@ -356,7 +356,7 @@ namespace tremor::gfx {
         friend class D3D12Backend;
     };
 
-    // Buffer resource
+    /*// Buffer resource
     class Buffer : public Resource {
     public:
         virtual ~Buffer() = default;
@@ -372,7 +372,7 @@ namespace tremor::gfx {
         // Friendship with backend for creation
         friend class VulkanBackend;
         friend class D3D12Backend;
-    };
+    };*/
 
     // Shader resource
     class Shader : public Resource {
