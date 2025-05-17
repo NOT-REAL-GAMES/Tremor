@@ -3,6 +3,7 @@
 #include "RenderBackendBase.h"
 #include "res.h"
 #include "mem.h"
+#include <shaderc/shaderc.hpp>
 
 // Define concepts for Vulkan types
 template<typename T>
@@ -34,7 +35,97 @@ void chainStructure(void** ppNext, T& structure) {
     ppNext = &structure.pNext;
 }
 
+
+
 namespace tremor::gfx { 
+
+    // Helper function to infer shader type from filename
+    inline ShaderType inferShaderTypeFromFilename(const std::string& filename) {
+        if (filename.find(".vert") != std::string::npos) return ShaderType::Vertex;
+        if (filename.find(".frag") != std::string::npos) return ShaderType::Fragment;
+        if (filename.find(".comp") != std::string::npos) return ShaderType::Compute;
+        if (filename.find(".geom") != std::string::npos) return ShaderType::Geometry;
+        if (filename.find(".tesc") != std::string::npos) return ShaderType::TessControl;
+        if (filename.find(".tese") != std::string::npos) return ShaderType::TessEvaluation;
+        if (filename.find(".mesh") != std::string::npos) return ShaderType::Mesh;
+        if (filename.find(".task") != std::string::npos) return ShaderType::Task;
+        if (filename.find(".rgen") != std::string::npos) return ShaderType::RayGen;
+        if (filename.find(".rmiss") != std::string::npos) return ShaderType::RayMiss;
+        if (filename.find(".rchit") != std::string::npos) return ShaderType::RayClosestHit;
+        if (filename.find(".rahit") != std::string::npos) return ShaderType::RayAnyHit;
+        if (filename.find(".rint") != std::string::npos) return ShaderType::RayIntersection;
+        if (filename.find(".rcall") != std::string::npos) return ShaderType::Callable;
+
+        // Default to vertex if unknown
+        return ShaderType::Vertex;
+    }
+
+    // First, add these as member variables if they don't exist already
+    class CommandPoolResource {
+    private:
+        VkDevice m_device = VK_NULL_HANDLE;
+        VkCommandPool m_handle = VK_NULL_HANDLE;
+
+    public:
+        CommandPoolResource() = default;
+
+        CommandPoolResource(VkDevice device, VkCommandPool handle = VK_NULL_HANDLE)
+            : m_device(device), m_handle(handle) {
+        }
+
+        ~CommandPoolResource() {
+            cleanup();
+        }
+
+        // Disable copying
+        CommandPoolResource(const CommandPoolResource&) = delete;
+        CommandPoolResource& operator=(const CommandPoolResource&) = delete;
+
+        // Enable moving
+        CommandPoolResource(CommandPoolResource&& other) noexcept
+            : m_device(other.m_device), m_handle(other.m_handle) {
+            other.m_handle = VK_NULL_HANDLE;
+        }
+
+        CommandPoolResource& operator=(CommandPoolResource&& other) noexcept {
+            if (this != &other) {
+                cleanup();
+                m_device = other.m_device;
+                m_handle = other.m_handle;
+                other.m_handle = VK_NULL_HANDLE;
+            }
+            return *this;
+        }
+
+        // Accessors
+        VkCommandPool& handle() { return m_handle; }
+        const VkCommandPool& handle() const { return m_handle; }
+        operator VkCommandPool() const { return m_handle; }
+
+        // Check if valid
+        operator bool() const { return m_handle != VK_NULL_HANDLE; }
+
+        // Release ownership without destroying
+        VkCommandPool release() {
+            VkCommandPool temp = m_handle;
+            m_handle = VK_NULL_HANDLE;
+            return temp;
+        }
+
+        // Reset with a new handle
+        void reset(VkCommandPool newHandle = VK_NULL_HANDLE) {
+            cleanup();
+            m_handle = newHandle;
+        }
+
+    private:
+        void cleanup() {
+            if (m_handle != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
+                vkDestroyCommandPool(m_device, m_handle, nullptr);
+                m_handle = VK_NULL_HANDLE;
+            }
+        }
+    };
 
     // Instance RAII wrapper
     class InstanceResource {
@@ -168,6 +259,444 @@ namespace tremor::gfx {
                 m_handle = VK_NULL_HANDLE;
             }
         }
+    };
+
+    class ShaderCompiler {
+    public:
+        // Options for shader compilation
+        struct CompileOptions {
+            bool optimize = true;
+            bool generateDebugInfo = false;
+            std::vector<std::string> includePaths;
+            std::unordered_map<std::string, std::string> macros;
+        };
+
+        // Initialize the compiler
+        ShaderCompiler() {
+            m_compiler = std::make_unique<shaderc::Compiler>();
+            m_options = std::make_unique<shaderc::CompileOptions>();
+        }
+
+        // Compile GLSL or HLSL source to SPIR-V
+        std::vector<uint32_t> compileToSpv(
+            const std::string& source,
+            ShaderType type,
+            const std::string& filename,
+            int flags = 0) {
+
+            // Set up options
+            //m_options->SetOptimizationLevel(options.optimize ?
+            //    shaderc_optimization_level_performance :
+            //    shaderc_optimization_level_zero);
+
+            //if (options.generateDebugInfo) {
+            //    m_options->SetGenerateDebugInfo();
+            //}
+
+            // Add macros
+            //for (const auto& [name, value] : options.macros) {
+            //    m_options->AddMacroDefinition(name, value);
+            //}
+
+            // Add include directories
+            // Requires implementing a custom include resolver if needed
+
+            // Determine shader stage
+            shaderc_shader_kind kind = getShaderKind(type);
+
+            // Compile
+            shaderc::SpvCompilationResult result = m_compiler->CompileGlslToSpv(
+                source, kind, filename.c_str(), *m_options);
+
+            // Check for errors
+            if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
+                Logger::get().error("Shader compilation failed: {}", result.GetErrorMessage());
+                return {}; // Return empty vector on error
+            }
+
+            // Return SPIR-V binary
+            std::vector<uint32_t> spirv(result.cbegin(), result.cend());
+            return spirv;
+        }
+
+        // Compile a shader file to SPIR-V
+        std::vector<uint32_t> compileFileToSpv(
+            const std::string& filename,
+            ShaderType type,
+            const CompileOptions& options = {}) {
+
+            // Read file content
+            std::ifstream file(filename);
+            if (!file.is_open()) {
+                Logger::get().error("Failed to open shader file: {}", filename);
+                return {};
+            }
+
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            file.close();
+
+            // Compile the source
+            return compileToSpv(buffer.str(), type, filename);
+        }
+
+    private:
+        // Convert ShaderType to shaderc shader kind
+        shaderc_shader_kind getShaderKind(ShaderType type) {
+            switch (type) {
+            case ShaderType::Vertex:
+                return shaderc_vertex_shader;
+            case ShaderType::Fragment:
+                return shaderc_fragment_shader;
+            case ShaderType::Compute:
+                return shaderc_compute_shader;
+            case ShaderType::Geometry:
+                return shaderc_geometry_shader;
+            case ShaderType::TessControl:
+                return shaderc_tess_control_shader;
+            case ShaderType::TessEvaluation:
+                return shaderc_tess_evaluation_shader;
+            case ShaderType::Mesh:
+                return shaderc_mesh_shader;
+            case ShaderType::Task:
+                return shaderc_task_shader;
+            case ShaderType::RayGen:
+                return shaderc_raygen_shader;
+            case ShaderType::RayMiss:
+                return shaderc_miss_shader;
+            case ShaderType::RayClosestHit:
+                return shaderc_closesthit_shader;
+            case ShaderType::RayAnyHit:
+                return shaderc_anyhit_shader;
+            case ShaderType::RayIntersection:
+                return shaderc_intersection_shader;
+            case ShaderType::Callable:
+                return shaderc_callable_shader;
+            default:
+                return shaderc_vertex_shader;
+            }
+        }
+
+        std::unique_ptr<shaderc::Compiler> m_compiler;
+        std::unique_ptr<shaderc::CompileOptions> m_options;
+    };
+
+
+
+    class ShaderModule {
+    public:
+
+        // Default constructor
+        ShaderModule() = default;
+
+        // Constructor with device and raw module
+        ShaderModule(VkDevice device, VkShaderModule rawModule, ShaderType type = ShaderType::Vertex)
+            : m_device(device), m_type(type), m_entryPoint("main") {
+            if (rawModule != VK_NULL_HANDLE) {
+                m_module = std::make_unique<ShaderModuleResource>(device, rawModule);
+            }
+        }
+
+        // Destructor - resource is automatically cleaned up by RAII
+        ~ShaderModule() = default;
+
+        // Load from precompiled SPIR-V file
+        static std::unique_ptr<ShaderModule> loadFromFile(VkDevice device, const std::string& filename,
+            ShaderType type = ShaderType::Vertex,
+            const std::string& entryPoint = "main") {
+            // Read file...
+            std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+            if (!file.is_open()) {
+                Logger::get().error("Failed to open shader file: {}", filename);
+                return nullptr;
+            }
+
+            size_t fileSize = static_cast<size_t>(file.tellg());
+            std::vector<char> shaderCode(fileSize);
+
+            file.seekg(0);
+            file.read(shaderCode.data(), fileSize);
+            file.close();
+
+            // Create module
+            VkShaderModuleCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            createInfo.codeSize = fileSize;
+            createInfo.pCode = reinterpret_cast<const uint32_t*>(shaderCode.data());
+
+            VkShaderModule shaderModule = VK_NULL_HANDLE;
+            if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+                Logger::get().error("Failed to create shader module from file: {}", filename);
+                return nullptr;
+            }
+
+            // Create ShaderModule object
+            auto result = std::make_unique<ShaderModule>();
+            result->m_device = device;
+            result->m_module = std::make_unique<ShaderModuleResource>(device, shaderModule);
+            result->m_type = type;
+            result->m_entryPoint = entryPoint;
+            result->m_filename = filename;
+
+            return result;
+        }
+
+        // Create shader stage info for pipeline creation
+        VkPipelineShaderStageCreateInfo createShaderStageInfo() const {
+            VkPipelineShaderStageCreateInfo stageInfo{};
+            stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stageInfo.stage = getShaderStageFlagBits();
+            stageInfo.module = m_module ? m_module->handle() : VK_NULL_HANDLE;
+            stageInfo.pName = m_entryPoint.c_str();
+            return stageInfo;
+        }
+
+        // Get the raw Vulkan handle directly
+        VkShaderModule getHandle() const {
+            return m_module ? m_module->handle() : VK_NULL_HANDLE;
+        }
+
+        // Check if valid
+        bool isValid() const {
+            return m_module && m_module->handle() != VK_NULL_HANDLE;
+        }
+
+        // Explicit conversion operator
+        explicit operator bool() const {
+            return isValid();
+        }
+
+        // Access methods
+        ShaderType getType() const { return m_type; }
+        const std::string& getEntryPoint() const { return m_entryPoint; }
+        const std::string& getFilename() const { return m_filename; }
+
+        // Compile and load from GLSL/HLSL source
+        static std::unique_ptr<ShaderModule> compileFromSource(
+            VkDevice device,
+            const std::string& source,
+            ShaderType type,
+            const std::string& filename = "unnamed_shader",
+            const std::string& entryPoint = "main",
+            const ShaderCompiler::CompileOptions& options = {}) {
+
+            // Compile to SPIR-V
+            static ShaderCompiler compiler;
+            auto spirv = compiler.compileToSpv(source, type, filename);
+
+            if (spirv.empty()) {
+                // Compilation failed
+                return nullptr;
+            }
+
+            // Create shader module
+            VkShaderModuleCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            createInfo.codeSize = spirv.size() * sizeof(uint32_t);
+            createInfo.pCode = spirv.data();
+
+            VkShaderModule shaderModule = VK_NULL_HANDLE;
+            if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+                Logger::get().error("Failed to create shader module from compiled source");
+                return nullptr;
+            }
+
+            // Create ShaderModule object
+            auto result = std::make_unique<ShaderModule>();
+            result->m_device = device;
+            result->m_module = std::make_unique<ShaderModuleResource>(device, shaderModule);
+            result->m_type = type;
+            result->m_entryPoint = entryPoint;
+            result->m_filename = filename;
+            result->m_spirvCode = std::move(spirv);
+
+            return result;
+        }
+
+        // Compile and load from GLSL/HLSL file
+        static std::unique_ptr<ShaderModule> compileFromFile(
+            VkDevice device,
+            const std::string& filename,
+            const std::string& entryPoint = "main",
+            int flags = 0) {
+
+            // Detect shader type from filename
+            ShaderType type = inferShaderTypeFromFilename(filename);
+
+            // Compile file to SPIR-V
+            static ShaderCompiler compiler;
+            auto spirv = compiler.compileFileToSpv(filename, type);
+
+            if (spirv.empty()) {
+                // Compilation failed
+                return nullptr;
+            }
+
+            // Create shader module
+            VkShaderModuleCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            createInfo.codeSize = spirv.size() * sizeof(uint32_t);
+            createInfo.pCode = spirv.data();
+
+            VkShaderModule shaderModule = VK_NULL_HANDLE;
+            if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+                Logger::get().error("Failed to create shader module from compiled file: {}", filename);
+                return nullptr;
+            }
+
+            // Create ShaderModule object
+            auto result = std::make_unique<ShaderModule>();
+            result->m_device = device;
+            result->m_module = std::make_unique<ShaderModuleResource>(device, shaderModule);
+            result->m_type = type;
+            result->m_entryPoint = entryPoint;
+            result->m_filename = filename;
+            result->m_spirvCode = std::move(spirv);
+
+            return result;
+        }
+
+    private:    
+        std::vector<uint32_t> m_spirvCode; // Store SPIR-V code
+
+        // Convert shader type to Vulkan stage flag
+        VkShaderStageFlagBits getShaderStageFlagBits() const {
+            switch (m_type) {
+            case ShaderType::Vertex:         return VK_SHADER_STAGE_VERTEX_BIT;
+            case ShaderType::Fragment:       return VK_SHADER_STAGE_FRAGMENT_BIT;
+            case ShaderType::Compute:        return VK_SHADER_STAGE_COMPUTE_BIT;
+            case ShaderType::Geometry:       return VK_SHADER_STAGE_GEOMETRY_BIT;
+            case ShaderType::TessControl:    return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+            case ShaderType::TessEvaluation: return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+            case ShaderType::Mesh:           return VK_SHADER_STAGE_MESH_BIT_EXT;
+            case ShaderType::Task:           return VK_SHADER_STAGE_TASK_BIT_EXT;
+            case ShaderType::RayGen:         return VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+            case ShaderType::RayMiss:        return VK_SHADER_STAGE_MISS_BIT_KHR;
+            case ShaderType::RayClosestHit:  return VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+            case ShaderType::RayAnyHit:      return VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+            case ShaderType::RayIntersection:return VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
+            case ShaderType::Callable:       return VK_SHADER_STAGE_CALLABLE_BIT_KHR;
+            default:                         return VK_SHADER_STAGE_VERTEX_BIT;
+            }
+        }
+
+    private:
+        VkDevice m_device = VK_NULL_HANDLE;
+        std::unique_ptr<ShaderModuleResource> m_module;
+        ShaderType m_type = ShaderType::Vertex;
+        std::string m_entryPoint = "main";
+        std::string m_filename;
+    };
+
+    
+    // Convenience function for loading shaders with automatic type detection
+    inline std::unique_ptr<ShaderModule> loadShader(VkDevice device, const std::string& filename, const std::string& entryPoint = "main") {
+        ShaderType type = inferShaderTypeFromFilename(filename);
+        return ShaderModule::loadFromFile(device, filename, type, entryPoint);
+    }
+
+
+    class ShaderManager {
+    public:
+        ShaderManager(VkDevice device) : m_device(device) {}
+
+        // Load a shader with automatic compilation
+        std::shared_ptr<ShaderModule> loadShader(
+            const std::string& filename,
+            const std::string& entryPoint = "main",
+            const ShaderCompiler::CompileOptions& options = {}) {
+
+            // Check if already loaded
+            auto it = m_shaders.find(filename);
+            if (it != m_shaders.end()) {
+                return it->second;
+            }
+
+            // Determine if it's a SPIR-V or source file
+            bool isSpirv = filename.ends_with(".spv");
+
+            // Load the shader
+            std::shared_ptr<ShaderModule> shader;
+            if (isSpirv) {
+                shader = std::shared_ptr<ShaderModule>(
+                    ShaderModule::loadFromFile(m_device, filename,
+                        inferShaderTypeFromFilename(filename),
+                        entryPoint).release());
+            }
+            else {
+                shader = std::shared_ptr<ShaderModule>(
+                    ShaderModule::compileFromFile(m_device, filename, entryPoint).release());
+            }
+
+            // Store and return
+            if (shader) {
+                m_shaders[filename] = shader;
+                m_shaderFileTimestamps[filename] = getFileTimestamp(filename);
+            }
+
+            return shader;
+        }
+
+        // Check for shader file changes and reload if needed
+        void checkForChanges() {
+            for (auto& [filename, shader] : m_shaders) {
+                auto currentTimestamp = getFileTimestamp(filename);
+                if (currentTimestamp > m_shaderFileTimestamps[filename]) {
+                    Logger::get().info("Shader file changed, reloading: {}", filename);
+
+                    // Get current options
+                    bool isSpirv = filename.ends_with(".spv");
+                    auto entryPoint = shader->getEntryPoint();
+
+                    // Reload the shader
+                    std::shared_ptr<ShaderModule> newShader;
+                    if (isSpirv) {
+                        newShader = std::shared_ptr<ShaderModule>(
+                            ShaderModule::loadFromFile(m_device, filename,
+                                inferShaderTypeFromFilename(filename),
+                                entryPoint).release());
+                    }
+                    else {
+                        ShaderCompiler::CompileOptions options;
+                        newShader = std::shared_ptr<ShaderModule>(
+                            ShaderModule::compileFromFile(m_device, filename, entryPoint).release());
+                    }
+
+                    // Update the shader if reload succeeded
+                    if (newShader) {
+                        m_shaders[filename] = newShader;
+                        m_shaderFileTimestamps[filename] = currentTimestamp;
+
+                        // Notify any systems that need to know about shader changes
+                        // This could include pipeline objects that need to be rebuilt
+                        notifyShaderReloaded(filename, newShader);
+                    }
+                }
+            }
+        }
+
+    private:
+        // Get file modification timestamp
+        std::filesystem::file_time_type getFileTimestamp(const std::string& filename) {
+            try {
+                return std::filesystem::last_write_time(filename);
+            }
+            catch (const std::exception& e) {
+                Logger::get().error("Failed to get file timestamp: {}", e.what());
+                return std::filesystem::file_time_type();
+            }
+        }
+
+        // Notify systems about shader reloads
+        void notifyShaderReloaded(const std::string& filename, std::shared_ptr<ShaderModule> shader) {
+            // You would implement this to notify pipeline cache or other systems
+            Logger::get().info("Shader reloaded: {}", filename);
+        }
+
+        VkDevice m_device;
+        std::unordered_map<std::string, std::shared_ptr<ShaderModule>> m_shaders;
+        std::unordered_map<std::string, std::filesystem::file_time_type> m_shaderFileTimestamps;
     };
 
     // Debug utils messenger wrapper (for debug builds)
@@ -362,6 +891,327 @@ namespace tremor::gfx {
         }
     };
 
+    class RenderPass {
+    public:
+        struct Attachment {
+            VkFormat format = VK_FORMAT_UNDEFINED;
+            VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
+            VkAttachmentLoadOp loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            VkAttachmentStoreOp storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkAttachmentLoadOp stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            VkAttachmentStoreOp stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            VkImageLayout initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            VkImageLayout finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        };
+
+        struct SubpassDependency {
+            uint32_t srcSubpass = VK_SUBPASS_EXTERNAL;
+            uint32_t dstSubpass = 0;
+            VkPipelineStageFlags srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            VkPipelineStageFlags dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            VkAccessFlags srcAccessMask = 0;
+            VkAccessFlags dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            VkDependencyFlags dependencyFlags = 0;
+        };
+
+        struct CreateInfo {
+            std::vector<Attachment> attachments;
+            std::vector<SubpassDependency> dependencies;
+        };
+
+        RenderPass(VkDevice device, const CreateInfo& createInfo);
+        ~RenderPass() = default; // RAII handles cleanup
+
+        // No copying
+        RenderPass(const RenderPass&) = delete;
+        RenderPass& operator=(const RenderPass&) = delete;
+
+        // Moving is allowed
+        RenderPass(RenderPass&&) noexcept = default;
+        RenderPass& operator=(RenderPass&&) noexcept = default;
+
+        // Getters
+        VkRenderPass handle() const { return m_renderPass; }
+        operator VkRenderPass() const { return m_renderPass; }
+
+        // Begin a render pass
+        void begin(VkCommandBuffer cmdBuffer, VkFramebuffer framebuffer, const VkRect2D& renderArea,
+            const std::vector<VkClearValue>& clearValues);
+
+        // End a render pass
+        void end(VkCommandBuffer cmdBuffer);
+
+    private:
+        VkDevice m_device;
+        RenderPassResource m_renderPass;  // RAII wrapper
+    };
+
+    class PipelineState {
+    public:
+        // Shader stages
+        std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+
+        // Vertex input state
+        VkPipelineVertexInputStateCreateInfo vertexInputState{};
+
+        // Input assembly state
+        VkPipelineInputAssemblyStateCreateInfo inputAssemblyState{};
+
+        // Viewport state
+        VkPipelineViewportStateCreateInfo viewportState{};
+
+        // Rasterization state
+        VkPipelineRasterizationStateCreateInfo rasterizationState{};
+
+        // Multisample state
+        VkPipelineMultisampleStateCreateInfo multisampleState{};
+
+        // Depth stencil state
+        VkPipelineDepthStencilStateCreateInfo depthStencilState{};
+
+        // Color blend state
+        VkPipelineColorBlendStateCreateInfo colorBlendState{};
+
+        // Dynamic state
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+    };
+
+    class DynamicRenderer {
+    public:
+        struct ColorAttachment {
+            VkImageView imageView = VK_NULL_HANDLE;
+            VkImageLayout imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            VkResolveModeFlagBits resolveMode = VK_RESOLVE_MODE_NONE;
+            VkImageView resolveImageView = VK_NULL_HANDLE;
+            VkImageLayout resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            VkAttachmentLoadOp loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            VkAttachmentStoreOp storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkClearValue clearValue{};
+        };
+
+        struct DepthStencilAttachment {
+            VkImageView imageView = VK_NULL_HANDLE;
+            VkImageLayout imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            VkAttachmentLoadOp loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            VkAttachmentStoreOp storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            VkAttachmentLoadOp stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            VkAttachmentStoreOp stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            VkClearValue clearValue{};
+        };
+
+        struct RenderingInfo {
+            VkRect2D renderArea{};
+            uint32_t layerCount = 1;
+            uint32_t viewMask = 0;
+            std::vector<ColorAttachment> colorAttachments;
+            std::optional<DepthStencilAttachment> depthStencilAttachment;
+        };
+
+        DynamicRenderer() = default;
+        ~DynamicRenderer() = default;
+
+        // Begin dynamic rendering
+        void begin(VkCommandBuffer cmdBuffer, const RenderingInfo& renderingInfo) {
+            // Setup color attachments
+            std::vector<VkRenderingAttachmentInfoKHR> colorAttachmentInfos;
+            colorAttachmentInfos.reserve(renderingInfo.colorAttachments.size());
+
+            for (const auto& colorAttachment : renderingInfo.colorAttachments) {
+                VkRenderingAttachmentInfoKHR attachmentInfo{};
+                attachmentInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+                attachmentInfo.imageView = colorAttachment.imageView;
+                attachmentInfo.imageLayout = colorAttachment.imageLayout;
+                attachmentInfo.resolveMode = colorAttachment.resolveMode;
+                attachmentInfo.resolveImageView = colorAttachment.resolveImageView;
+                attachmentInfo.resolveImageLayout = colorAttachment.resolveImageLayout;
+                attachmentInfo.loadOp = colorAttachment.loadOp;
+                attachmentInfo.storeOp = colorAttachment.storeOp;
+                attachmentInfo.clearValue = colorAttachment.clearValue;
+
+                colorAttachmentInfos.push_back(attachmentInfo);
+            }
+
+            // Setup depth-stencil attachment
+            VkRenderingAttachmentInfoKHR depthAttachmentInfo{};
+            if (renderingInfo.depthStencilAttachment) {
+                depthAttachmentInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+                depthAttachmentInfo.imageView = renderingInfo.depthStencilAttachment->imageView;
+                depthAttachmentInfo.imageLayout = renderingInfo.depthStencilAttachment->imageLayout;
+                depthAttachmentInfo.loadOp = renderingInfo.depthStencilAttachment->loadOp;
+                depthAttachmentInfo.storeOp = renderingInfo.depthStencilAttachment->storeOp;
+                depthAttachmentInfo.clearValue = renderingInfo.depthStencilAttachment->clearValue;
+            }
+
+            VkRenderingAttachmentInfoKHR stencilAttachmentInfo{};
+            if (renderingInfo.depthStencilAttachment) {
+                stencilAttachmentInfo = depthAttachmentInfo;
+                stencilAttachmentInfo.loadOp = renderingInfo.depthStencilAttachment->stencilLoadOp;
+                stencilAttachmentInfo.storeOp = renderingInfo.depthStencilAttachment->stencilStoreOp;
+            }
+
+            // Configure rendering info
+            VkRenderingInfoKHR info{};
+            info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
+            info.renderArea = renderingInfo.renderArea;
+            info.layerCount = renderingInfo.layerCount;
+            info.viewMask = renderingInfo.viewMask;
+            info.colorAttachmentCount = static_cast<uint32_t>(colorAttachmentInfos.size());
+            info.pColorAttachments = colorAttachmentInfos.data();
+            info.pDepthAttachment = renderingInfo.depthStencilAttachment ? &depthAttachmentInfo : nullptr;
+            info.pStencilAttachment = renderingInfo.depthStencilAttachment ? &stencilAttachmentInfo : nullptr;
+
+            // Begin dynamic rendering
+            vkCmdBeginRendering(cmdBuffer, &info);
+        }
+
+        // End dynamic rendering
+        void end(VkCommandBuffer cmdBuffer) {
+            vkCmdEndRendering(cmdBuffer);
+        }
+    };
+
+    // Implementation
+    RenderPass::RenderPass(VkDevice device, const CreateInfo& createInfo)
+        : m_device(device), m_renderPass(device) {
+
+        std::vector<VkAttachmentDescription> attachmentDescriptions;
+        attachmentDescriptions.reserve(createInfo.attachments.size());
+
+        for (const auto& attachment : createInfo.attachments) {
+            VkAttachmentDescription desc{};
+            desc.format = attachment.format;
+            desc.samples = attachment.samples;
+            desc.loadOp = attachment.loadOp;
+            desc.storeOp = attachment.storeOp;
+            desc.stencilLoadOp = attachment.stencilLoadOp;
+            desc.stencilStoreOp = attachment.stencilStoreOp;
+            desc.initialLayout = attachment.initialLayout;
+            desc.finalLayout = attachment.finalLayout;
+            attachmentDescriptions.push_back(desc);
+        }
+
+        // Setup color and depth attachment references
+        VkAttachmentReference colorAttachmentRef{};
+        colorAttachmentRef.attachment = 0;  // First attachment
+        colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference depthAttachmentRef{};
+        if (attachmentDescriptions.size() > 1) {
+            depthAttachmentRef.attachment = 1;  // Second attachment for depth
+            depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        }
+
+        // Configure the subpass
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = (attachmentDescriptions.size() > 0) ? 1 : 0;
+        subpass.pColorAttachments = (attachmentDescriptions.size() > 0) ? &colorAttachmentRef : nullptr;
+        subpass.pDepthStencilAttachment = (attachmentDescriptions.size() > 1) ? &depthAttachmentRef : nullptr;
+
+        // Configure dependencies
+        std::vector<VkSubpassDependency> dependencies;
+        dependencies.reserve(createInfo.dependencies.size());
+
+        for (const auto& dependency : createInfo.dependencies) {
+            VkSubpassDependency dep{};
+            dep.srcSubpass = dependency.srcSubpass;
+            dep.dstSubpass = dependency.dstSubpass;
+            dep.srcStageMask = dependency.srcStageMask;
+            dep.dstStageMask = dependency.dstStageMask;
+            dep.srcAccessMask = dependency.srcAccessMask;
+            dep.dstAccessMask = dependency.dstAccessMask;
+            dep.dependencyFlags = dependency.dependencyFlags;
+            dependencies.push_back(dep);
+        }
+
+        // Create the render pass
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = static_cast<uint32_t>(attachmentDescriptions.size());
+        renderPassInfo.pAttachments = attachmentDescriptions.data();
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
+        renderPassInfo.pDependencies = dependencies.empty() ? nullptr : dependencies.data();
+
+        if (vkCreateRenderPass(m_device, &renderPassInfo, nullptr, &m_renderPass.handle()) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create render pass");
+        }
+    }
+
+    void RenderPass::begin(VkCommandBuffer cmdBuffer, VkFramebuffer framebuffer,
+        const VkRect2D& renderArea, const std::vector<VkClearValue>& clearValues) {
+        VkRenderPassBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        beginInfo.renderPass = m_renderPass;
+        beginInfo.framebuffer = framebuffer;
+        beginInfo.renderArea = renderArea;
+        beginInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        beginInfo.pClearValues = clearValues.data();
+
+        vkCmdBeginRenderPass(cmdBuffer, &beginInfo, VK_SUBPASS_CONTENTS_INLINE);
+    }
+
+    void RenderPass::end(VkCommandBuffer cmdBuffer) {
+        vkCmdEndRenderPass(cmdBuffer);
+    }
+
+    // Framebuffer class to accompany the RenderPass
+    class Framebuffer {
+    public:
+        struct CreateInfo {
+            VkRenderPass renderPass;
+            std::vector<VkImageView> attachments;
+            uint32_t width;
+            uint32_t height;
+            uint32_t layers = 1;
+        };
+
+        Framebuffer(VkDevice device, const CreateInfo& createInfo);
+        ~Framebuffer() = default;  // RAII handles cleanup
+
+        // No copying
+        Framebuffer(const Framebuffer&) = delete;
+        Framebuffer& operator=(const Framebuffer&) = delete;
+
+        // Moving is allowed
+        Framebuffer(Framebuffer&&) noexcept = default;
+        Framebuffer& operator=(Framebuffer&&) noexcept = default;
+
+        // Getters
+        VkFramebuffer handle() const { return m_framebuffer; }
+        operator VkFramebuffer() const { return m_framebuffer; }
+
+        uint32_t width() const { return m_width; }
+        uint32_t height() const { return m_height; }
+
+    private:
+        VkDevice m_device;
+        FramebufferResource m_framebuffer;  // RAII wrapper
+        uint32_t m_width;
+        uint32_t m_height;
+        uint32_t m_layers;
+    };
+
+    // Implementation
+    Framebuffer::Framebuffer(VkDevice device, const CreateInfo& createInfo)
+        : m_device(device), m_framebuffer(device),
+        m_width(createInfo.width), m_height(createInfo.height), m_layers(createInfo.layers) {
+
+        VkFramebufferCreateInfo framebufferInfo{};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = createInfo.renderPass;
+        framebufferInfo.attachmentCount = static_cast<uint32_t>(createInfo.attachments.size());
+        framebufferInfo.pAttachments = createInfo.attachments.data();
+        framebufferInfo.width = m_width;
+        framebufferInfo.height = m_height;
+        framebufferInfo.layers = m_layers;
+
+        if (vkCreateFramebuffer(m_device, &framebufferInfo, nullptr, &m_framebuffer.handle()) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create framebuffer");
+        }
+    }
+
     class VulkanDevice {
     public:
         // Structure for tracking physical device capabilities
@@ -526,7 +1376,7 @@ namespace tremor::gfx {
         VkFormat imageFormat() const { return m_imageFormat; }
         VkExtent2D extent() const { return m_extent; }
         const std::vector<VkImage>& images() const { return m_images; }
-        const std::vector<VkImageView>& imageViews() const { return m_imageViews; }
+        const std::vector<ImageViewResource>& imageViews() const { return m_imageViews; }
         uint32_t imageCount() const { return static_cast<uint32_t>(m_images.size()); }
         bool isVSync() const { return m_vsync; }
         bool isHDR() const { return m_hdr; }
@@ -539,7 +1389,7 @@ namespace tremor::gfx {
         // Swap chain objects
         SwapchainResource m_swapChain;
         std::vector<VkImage> m_images;
-        std::vector<VkImageView> m_imageViews;
+        std::vector<ImageViewResource> m_imageViews;
 
         // Properties
         VkFormat m_imageFormat;
@@ -722,6 +1572,8 @@ namespace tremor::gfx {
             throw std::runtime_error("Failed to create swap chain");
         }
 
+        m_swapChain = SwapchainResource(m_device.device(), m_swapChain.handle());
+
         // Get swap chain images
         vkGetSwapchainImagesKHR(m_device.device(), m_swapChain, &imageCount, nullptr);
         m_images.resize(imageCount);
@@ -757,7 +1609,7 @@ namespace tremor::gfx {
             createInfo.subresourceRange.baseArrayLayer = 0;
             createInfo.subresourceRange.layerCount = 1;
 
-            if (vkCreateImageView(m_device.device(), &createInfo, nullptr, &m_imageViews[i]) != VK_SUCCESS) {
+            if (vkCreateImageView(m_device.device(), &createInfo, nullptr, &m_imageViews[i].handle()) != VK_SUCCESS) {
                 throw std::runtime_error("Failed to create image view");
             }
         }
@@ -1382,12 +2234,488 @@ namespace tremor::gfx {
 
         SDL_Window* w;
 
+        std::unique_ptr<VulkanResourceManager> res;
+
 #if _DEBUG
         VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
 #endif
 
 		VulkanBackend() = default;
         ~VulkanBackend() override = default;
+
+        bool createCommandPool() {
+            // Get the graphics queue family index
+            uint32_t queueFamilyIndex = vkDevice->graphicsQueueFamily();
+
+            // Command pool creation info
+            VkCommandPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+            poolInfo.queueFamilyIndex = queueFamilyIndex;
+            poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; // Allow individual command buffer reset
+
+            // Create the command pool
+            VkCommandPool commandPool = VK_NULL_HANDLE;
+            if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
+                Logger::get().error("Failed to create command pool");
+                return false;
+            }
+
+            // Store in RAII wrapper
+            m_commandPool = std::make_unique<CommandPoolResource>(device, commandPool);
+            Logger::get().info("Command pool created successfully");
+
+            return true;
+        }
+
+        bool createCommandBuffers() {
+            // Make sure we have a command pool
+            if (!m_commandPool || !*m_commandPool) {
+                Logger::get().error("Cannot create command buffers without a valid command pool");
+                return false;
+            }
+
+            // Resize the command buffer vector
+            m_commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+
+            // Allocate command buffers
+            VkCommandBufferAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            allocInfo.commandPool = *m_commandPool;
+            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocInfo.commandBufferCount = static_cast<uint32_t>(m_commandBuffers.size());
+
+            if (vkAllocateCommandBuffers(device, &allocInfo, m_commandBuffers.data()) != VK_SUCCESS) {
+                Logger::get().error("Failed to allocate command buffers");
+                return false;
+            }
+
+            Logger::get().info("Command buffers created successfully: {}", m_commandBuffers.size());
+            return true;
+        }
+
+        bool createSyncObjects() {
+            // Resize sync object vectors
+            m_imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+            m_renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+            m_inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+
+            // Create semaphores and fences for each frame
+            VkSemaphoreCreateInfo semaphoreInfo{};
+            semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+            VkFenceCreateInfo fenceInfo{};
+            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // Start signaled so first frame doesn't wait indefinitely
+
+            for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                // Create image available semaphore
+                VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
+                if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS) {
+                    Logger::get().error("Failed to create image available semaphore for frame {}", i);
+                    return false;
+                }
+                m_imageAvailableSemaphores[i] = SemaphoreResource(device, imageAvailableSemaphore);
+
+                // Create render finished semaphore
+                VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
+                if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS) {
+                    Logger::get().error("Failed to create render finished semaphore for frame {}", i);
+                    return false;
+                }
+                m_renderFinishedSemaphores[i] = SemaphoreResource(device, renderFinishedSemaphore);
+
+                // Create in-flight fence
+                VkFence inFlightFence = VK_NULL_HANDLE;
+                if (vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) {
+                    Logger::get().error("Failed to create in-flight fence for frame {}", i);
+                    return false;
+                }
+                m_inFlightFences[i] = FenceResource(device, inFlightFence);
+            }
+
+            Logger::get().info("Synchronization objects created successfully");
+            return true;
+        }
+
+
+
+        bool createFramebuffers() {
+            // Get swapchain image count
+            const auto& swapchainImages = vkSwapchain.get()->imageViews();
+            const auto& swapchainExtent = vkSwapchain.get()->extent();
+
+            // Resize framebuffer container
+            m_framebuffers.resize(swapchainImages.size());
+
+            // Create a framebuffer for each swapchain image view
+            for (size_t i = 0; i < swapchainImages.size(); i++) {
+                // Each framebuffer needs the color and depth attachments
+                std::vector<VkImageView> attachments = {
+                    swapchainImages[i],        // Color attachment
+                    *m_depthImageView           // Depth attachment
+                };
+
+                Framebuffer::CreateInfo framebufferInfo{};
+                framebufferInfo.renderPass = *rp;
+                framebufferInfo.attachments = attachments;
+                framebufferInfo.width = swapchainExtent.width;
+                framebufferInfo.height = swapchainExtent.height;
+                framebufferInfo.layers = 1;
+
+                try {
+                    m_framebuffers[i] = std::make_unique<Framebuffer>(device, framebufferInfo);
+                }
+                catch (const std::exception& e) {
+                    Logger::get().error("Failed to create framebuffer {}: {}", i, e.what());
+                    return false;
+                }
+            }
+
+            Logger::get().info("Created {} framebuffers", m_framebuffers.size());
+            return true;
+        }
+
+        // Add member variable to hold framebuffers
+    private:
+        std::vector<std::unique_ptr<Framebuffer>> m_framebuffers;
+
+        // Add these member variables to your VulkanBackend class
+        std::unique_ptr<CommandPoolResource> m_commandPool;
+        std::vector<VkCommandBuffer> m_commandBuffers;
+        std::vector<SemaphoreResource> m_imageAvailableSemaphores;
+        std::vector<SemaphoreResource> m_renderFinishedSemaphores;
+        std::vector<FenceResource> m_inFlightFences;
+
+
+        void createRenderPass() {
+            // Create render pass configuration
+            RenderPass::CreateInfo renderPassInfo{};
+
+            // Color attachment (will be the swapchain image)
+            RenderPass::Attachment colorAttachment{};
+            colorAttachment.format = vkSwapchain.get()->imageFormat();  // Use swapchain format
+            colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+            colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;  // Clear on load
+            colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;  // Store after use
+            colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // No stencil for color
+            colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // No stencil for color
+            colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // Don't care about initial layout
+            colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;  // Ready for presentation
+            renderPassInfo.attachments.push_back(colorAttachment);
+
+            // Depth attachment
+            RenderPass::Attachment depthAttachment{};
+            depthAttachment.format = m_depthFormat;  // Use the depth format you selected
+            depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+            depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;  // Clear depth on load
+            depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // No need to store depth
+            depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // Depends on if stencil used
+            depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // Depends on if stencil used
+            depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // Don't care about initial layout
+            depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;  // Optimal for depth
+            renderPassInfo.attachments.push_back(depthAttachment);
+
+            // Add dependencies for proper synchronization
+
+            // Dependency 1: Wait for color attachment output before writing to it
+            RenderPass::SubpassDependency colorDependency{};
+            colorDependency.srcSubpass = VK_SUBPASS_EXTERNAL;  // External means before/after the render pass
+            colorDependency.dstSubpass = 0;  // Our only subpass
+            colorDependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;  // Wait on this stage
+            colorDependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;  // Before this stage
+            colorDependency.srcAccessMask = 0;  // No access needed before
+            colorDependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;  // For this access
+            colorDependency.dependencyFlags = 0;  // No special flags
+            renderPassInfo.dependencies.push_back(colorDependency);
+
+            // Dependency 2: Wait for early fragment tests before writing depth
+            RenderPass::SubpassDependency depthDependency{};
+            depthDependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+            depthDependency.dstSubpass = 0;
+            depthDependency.srcStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            depthDependency.dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            depthDependency.srcAccessMask = 0;
+            depthDependency.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            depthDependency.dependencyFlags = 0;
+            renderPassInfo.dependencies.push_back(depthDependency);
+
+            // Create the render pass
+            try {
+                rp = std::make_unique<RenderPass>(device, renderPassInfo);
+                Logger::get().info("Render pass created successfully");
+            }
+            catch (const std::exception& e) {
+                Logger::get().error("Failed to create render pass: {}", e.what());
+                throw; // Rethrow to be caught by initialize
+            }
+        }
+
+        // Make sure you have a method to create depth resources
+        bool createDepthResources() {
+            // Find suitable depth format
+            m_depthFormat = findDepthFormat();
+
+            // Create depth image and view
+            VkExtent2D extent = vkSwapchain.get()->extent();
+
+            // Create depth image
+            VkImageCreateInfo imageInfo{};
+            imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            imageInfo.imageType = VK_IMAGE_TYPE_2D;
+            imageInfo.extent.width = extent.width;
+            imageInfo.extent.height = extent.height;
+            imageInfo.extent.depth = 1;
+            imageInfo.mipLevels = 1;
+            imageInfo.arrayLayers = 1;
+            imageInfo.format = m_depthFormat;
+            imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+            // Create the image with RAII wrapper
+            m_depthImage = std::make_unique<ImageResource>(device);
+            if (vkCreateImage(device, &imageInfo, nullptr, &m_depthImage->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to create depth image");
+                return false;
+            }
+
+            // Allocate memory
+            VkMemoryRequirements memRequirements;
+            vkGetImageMemoryRequirements(device, *m_depthImage, &memRequirements);
+
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memRequirements.size;
+            allocInfo.memoryTypeIndex = res.get()->findMemoryType(memRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+            m_depthImageMemory = std::make_unique<DeviceMemoryResource>(device);
+            if (vkAllocateMemory(device, &allocInfo, nullptr, &m_depthImageMemory->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to allocate depth image memory");
+                return false;
+            }
+
+            vkBindImageMemory(device, *m_depthImage, *m_depthImageMemory, 0);
+
+            // Create image view
+            VkImageViewCreateInfo viewInfo{};
+            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewInfo.image = *m_depthImage;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = m_depthFormat;
+            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            viewInfo.subresourceRange.baseMipLevel = 0;
+            viewInfo.subresourceRange.levelCount = 1;
+            viewInfo.subresourceRange.baseArrayLayer = 0;
+            viewInfo.subresourceRange.layerCount = 1;
+
+            m_depthImageView = std::make_unique<ImageViewResource>(device);
+            if (vkCreateImageView(device, &viewInfo, nullptr, &m_depthImageView->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to create depth image view");
+                return false;
+            }
+
+            Logger::get().info("Depth resources created successfully");
+            return true;
+        }
+
+        // Helper function to find a suitable depth format
+        VkFormat findDepthFormat() {
+            // Try to find a supported depth format in order of preference
+            std::vector<VkFormat> candidates = {
+                VK_FORMAT_D32_SFLOAT_S8_UINT,
+                VK_FORMAT_D32_SFLOAT,
+                VK_FORMAT_D24_UNORM_S8_UINT,
+                VK_FORMAT_D16_UNORM_S8_UINT,
+                VK_FORMAT_D16_UNORM
+            };
+
+            for (VkFormat format : candidates) {
+                VkFormatProperties props;
+                vkGetPhysicalDeviceFormatProperties(physicalDevice, format, &props);
+
+                // Check if optimal tiling supports depth attachment
+                if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+                    return format;
+                }
+            }
+
+            throw std::runtime_error("Failed to find supported depth format");
+        }
+
+        void beginFrame() override {
+            // Wait for previous frame to finish
+            if (m_inFlightFences.size() > 0) {
+                vkWaitForFences(device, 1, &m_inFlightFences[currentFrame].handle(), VK_TRUE, UINT64_MAX);
+            }
+            // Acquire next image
+            uint32_t imageIndex;
+            VkResult result = vkSwapchain.get()->acquireNextImage(UINT64_MAX,
+                m_imageAvailableSemaphores[currentFrame],
+                VK_NULL_HANDLE,
+                imageIndex);
+
+            if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+                // Recreate swapchain and return
+                int width, height;
+                SDL_GetWindowSize(w, &width, &height);
+                vkSwapchain.get()->recreate(width,height);
+                return;
+            }
+            else if (result != VK_SUCCESS) {
+                throw std::runtime_error("Failed to acquire swap chain image");
+            }
+
+            // Reset fence for this frame
+            vkResetFences(device, 1, &m_inFlightFences[currentFrame].handle());
+
+            // Reset the command buffer for this frame
+            vkResetCommandBuffer(m_commandBuffers[currentFrame], 0);
+
+            // Begin recording commands
+            VkCommandBufferBeginInfo beginInfo{};
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            beginInfo.flags = 0;
+            beginInfo.pInheritanceInfo = nullptr;
+
+            if (vkBeginCommandBuffer(m_commandBuffers[currentFrame], &beginInfo) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to begin recording command buffer");
+            }
+
+            if (vkDevice.get()->capabilities().dynamicRendering) {
+                // Setup rendering info for our dynamic renderer
+                DynamicRenderer::RenderingInfo renderingInfo{};
+
+                // Set render area
+                renderingInfo.renderArea.offset = { 0, 0 };
+                renderingInfo.renderArea.extent = vkSwapchain.get()->extent();
+                renderingInfo.layerCount = 1;
+                renderingInfo.viewMask = 0;  // No multiview (VR) for now
+
+                // Configure color attachment
+                DynamicRenderer::ColorAttachment colorAttachment{};
+                colorAttachment.imageView = vkSwapchain.get()->imageViews()[imageIndex];
+                colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                colorAttachment.clearValue.color = { {1.0f, 0.0f, 0.3125f, 1.0f} };  // Dark blue
+
+                // Add to the renderingInfo
+                renderingInfo.colorAttachments.push_back(colorAttachment);
+
+                // Configure depth-stencil attachment
+                DynamicRenderer::DepthStencilAttachment depthStencilAttachment{};
+                depthStencilAttachment.imageView = *m_depthImageView;
+                depthStencilAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depthStencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                depthStencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                depthStencilAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                depthStencilAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                depthStencilAttachment.clearValue.depthStencil = { 1.0f, 0 };
+
+                // Add to the renderingInfo
+                renderingInfo.depthStencilAttachment = depthStencilAttachment;
+
+                // Begin dynamic rendering
+                dr.get()->begin(m_commandBuffers[currentFrame], renderingInfo);
+
+                // Store current image index for endFrame
+                m_currentImageIndex = imageIndex;
+            }
+            else {
+
+                // Begin render pass
+                VkRenderPassBeginInfo renderPassInfo{};
+                renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+                renderPassInfo.renderPass = *rp;
+                renderPassInfo.framebuffer = *m_framebuffers[imageIndex];
+                renderPassInfo.renderArea.offset = { 0, 0 };
+                renderPassInfo.renderArea.extent = vkSwapchain.get()->extent();
+
+                // Clear values for each attachment
+                std::array<VkClearValue, 2> clearValues{};
+                clearValues[0].color = { {1.0f, 0.0f, 0.3f, 1.0f} };  // Dark blue
+                clearValues[1].depthStencil = { 1.0f, 0 };
+
+                renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+                renderPassInfo.pClearValues = clearValues.data();
+
+                // Begin the render pass using the command buffer
+                vkCmdBeginRenderPass(m_commandBuffers[currentFrame], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+                // Store the current image index for use in endFrame
+                m_currentImageIndex = imageIndex;
+            }
+        }
+
+        void endFrame() override {
+            if (vkDevice.get()->capabilities().dynamicRendering) {
+                dr.get()->end(m_commandBuffers[currentFrame]);
+            }
+            else {
+                // End the render pass
+                vkCmdEndRenderPass(m_commandBuffers[currentFrame]);
+            }
+            // End command buffer recording
+            if (vkEndCommandBuffer(m_commandBuffers[currentFrame]) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to record command buffer");
+            }
+
+            // Submit command buffer
+            VkSubmitInfo submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+            VkSemaphore waitSemaphores[] = { m_imageAvailableSemaphores[currentFrame] };
+            VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+            submitInfo.waitSemaphoreCount = 1;
+            submitInfo.pWaitSemaphores = waitSemaphores;
+            submitInfo.pWaitDstStageMask = waitStages;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &m_commandBuffers[currentFrame];
+
+            VkSemaphore signalSemaphores[] = { m_renderFinishedSemaphores[currentFrame] };
+            submitInfo.signalSemaphoreCount = 1;
+            submitInfo.pSignalSemaphores = signalSemaphores;
+
+            if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, m_inFlightFences[currentFrame].handle()) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to submit draw command buffer");
+            }
+
+            // Present the image
+            VkResult result = vkSwapchain.get()->present(m_currentImageIndex, m_renderFinishedSemaphores[currentFrame]);
+
+            if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
+                // Recreate swapchain
+                int width, height;
+                SDL_GetWindowSize(w, &width, &height);
+                vkSwapchain.get()->recreate(width, height);
+            }
+            else if (result != VK_SUCCESS) {
+                throw std::runtime_error("Failed to present swap chain image");
+            }
+
+            // Move to next frame
+            currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+        }
+
+        // Add member variable to store current image index
+private:
+    uint32_t m_currentImageIndex = 0;
+    static constexpr int MAX_FRAMES_IN_FLIGHT = 2;  // Double buffering
+
+        // Also add member variables to hold depth resources
+    private:
+        std::unique_ptr<RenderPass> rp;
+
+        // Depth resources
+        std::unique_ptr<ImageResource> m_depthImage;
+        std::unique_ptr<DeviceMemoryResource> m_depthImageMemory;
+        std::unique_ptr<ImageViewResource> m_depthImageView;
+        VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
 
         bool initialize(SDL_Window* window) override {
         
@@ -1397,12 +2725,33 @@ namespace tremor::gfx {
             createInstance();
             createDeviceAndSwapChain();
 
+            createCommandPool();
+            createCommandBuffers();
+
+            createDepthResources();
+            if (vkDevice.get()->capabilities().dynamicRendering) {
+                dr = std::make_unique<DynamicRenderer>();
+                Logger::get().info("Dynamic renderer created.");
+            } else {
+                createRenderPass();
+                createFramebuffers();
+            }
+
+            sm = std::make_unique<ShaderManager>(vkDevice.get()->device());
+
+            createGraphicsPipeline();
+            createSyncObjects();
+
+
+            beginFrame();
+
+            endFrame();
+
+
             return true;
         };
         void shutdown() override {};
 
-        void beginFrame() override {};
-        void endFrame() override {};
 
         TextureHandle createTexture(const TextureDesc& desc) {
             // Implementation of texture creation with Vulkan
@@ -1463,12 +2812,8 @@ namespace tremor::gfx {
 
         // Command submission
         VkCommandPool commandPool = VK_NULL_HANDLE;
-        std::vector<VkCommandBuffer> commandBuffers;
 
         // Synchronization
-        std::vector<VkSemaphore> imageAvailableSemaphores;
-        std::vector<VkSemaphore> renderFinishedSemaphores;
-        std::vector<VkFence> inFlightFences;
         size_t currentFrame = 0;
 
         bool get_surface_capabilities_2 = false;
@@ -1483,7 +2828,6 @@ namespace tremor::gfx {
 
         // Format information
         VkFormat m_colorFormat = VK_FORMAT_UNDEFINED;
-        VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
 
 
         // Properties
@@ -1734,9 +3078,10 @@ namespace tremor::gfx {
 
             VulkanDevice::DevicePreferences prefs;
             prefs.preferDiscreteGPU = true;
-            prefs.requireMeshShaders = false;  // Set based on your requirements
-            prefs.requireRayQuery = false;     // Set based on your requirements
-            prefs.requireSparseBinding = false; // Set based on your requirements
+            prefs.requireMeshShaders = true;  // Set based on your requirements
+            prefs.requireRayQuery = true;     // Set based on your requirements
+            prefs.requireSparseBinding = true; // Set based on your requirements
+
 
             // Create device
             vkDevice = std::make_unique<VulkanDevice>(instance, surface, prefs);
@@ -1757,15 +3102,252 @@ namespace tremor::gfx {
             m_colorFormat = vkDevice->colorFormat();
             m_depthFormat = vkDevice->depthFormat();
 
+            res = std::make_unique<VulkanResourceManager>(device, physicalDevice);
+
             return true;
         }
-        bool createImageViews();
-        bool createRenderPass();
-        bool createGraphicsPipeline();
-        bool createFramebuffers();
-        bool createCommandPool();
-        bool createCommandBuffers();
-        bool createSyncObjects();
+
+        std::unique_ptr<DynamicRenderer> dr;
+
+        std::unique_ptr<ShaderManager> sm;
+
+        bool createGraphicsPipeline() {
+            // 1. Load shaders
+            // For now, let's create simple vertex and fragment shaders
+            auto vertShader = sm.get()->loadShader("shaders/basic.vert");
+
+            auto fragShader = sm.get()->loadShader("shaders/basic.frag");
+
+
+            if (!vertShader || !fragShader) {
+                Logger::get().error("Failed to load shader modules");
+                return false;
+            }
+
+            // 2. Create shader stages
+            std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
+                vertShader->createShaderStageInfo(),
+                fragShader->createShaderStageInfo()
+            };
+
+
+            // 3. Create pipeline state
+            PipelineState pipelineState;
+
+            // 4. Configure vertex input
+            // For now, let's assume a simple vertex with position and color
+            VkVertexInputBindingDescription bindingDescription{};
+            bindingDescription.binding = 0;
+            bindingDescription.stride = sizeof(float) * 6; // 3 for position, 3 for color
+            bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+            std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+
+            // Position attribute
+            attributeDescriptions[0].binding = 0;
+            attributeDescriptions[0].location = 0;
+            attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+            attributeDescriptions[0].offset = 0;
+
+            // Color attribute
+            attributeDescriptions[1].binding = 0;
+            attributeDescriptions[1].location = 1;
+            attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+            attributeDescriptions[1].offset = sizeof(float) * 3;
+
+            // Configure vertex input state
+            pipelineState.vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            pipelineState.vertexInputState.vertexBindingDescriptionCount = 1;
+            pipelineState.vertexInputState.pVertexBindingDescriptions = &bindingDescription;
+            pipelineState.vertexInputState.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+            pipelineState.vertexInputState.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+            // 5. Input assembly
+            pipelineState.inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            pipelineState.inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            pipelineState.inputAssemblyState.primitiveRestartEnable = VK_FALSE;
+
+            // 6. Viewport and scissor - using dynamic state
+            VkViewport viewport{};
+            viewport.x = 0.0f;
+            viewport.y = 0.0f;
+            viewport.width = static_cast<float>(vkSwapchain->extent().width);
+            viewport.height = static_cast<float>(vkSwapchain->extent().height);
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+
+            VkRect2D scissor{};
+            scissor.offset = { 0, 0 };
+            scissor.extent = vkSwapchain->extent();
+
+            pipelineState.viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            pipelineState.viewportState.viewportCount = 1;
+            pipelineState.viewportState.pViewports = &viewport;
+            pipelineState.viewportState.scissorCount = 1;
+            pipelineState.viewportState.pScissors = &scissor;
+
+            // 7. Rasterization
+            pipelineState.rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            pipelineState.rasterizationState.depthClampEnable = VK_FALSE;
+            pipelineState.rasterizationState.rasterizerDiscardEnable = VK_FALSE;
+            pipelineState.rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
+            pipelineState.rasterizationState.lineWidth = 1.0f;
+            pipelineState.rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
+            pipelineState.rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+            pipelineState.rasterizationState.depthBiasEnable = VK_FALSE;
+
+            // 8. Multisampling
+            pipelineState.multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            pipelineState.multisampleState.sampleShadingEnable = VK_FALSE;
+            pipelineState.multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+            // 9. Depth/stencil testing
+            pipelineState.depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            pipelineState.depthStencilState.depthTestEnable = VK_TRUE;
+            pipelineState.depthStencilState.depthWriteEnable = VK_TRUE;
+            pipelineState.depthStencilState.depthCompareOp = VK_COMPARE_OP_LESS;
+            pipelineState.depthStencilState.depthBoundsTestEnable = VK_FALSE;
+            pipelineState.depthStencilState.stencilTestEnable = VK_FALSE;
+
+            // 10. Color blending
+            VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+            colorBlendAttachment.colorWriteMask =
+                VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            colorBlendAttachment.blendEnable = VK_FALSE;
+
+            pipelineState.colorBlendState.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            pipelineState.colorBlendState.logicOpEnable = VK_FALSE;
+            pipelineState.colorBlendState.attachmentCount = 1;
+            pipelineState.colorBlendState.pAttachments = &colorBlendAttachment;
+
+            // 11. Dynamic state
+            std::vector<VkDynamicState> dynamicStates = {
+                VK_DYNAMIC_STATE_VIEWPORT,
+                VK_DYNAMIC_STATE_SCISSOR
+            };
+
+            pipelineState.dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            pipelineState.dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+            pipelineState.dynamicState.pDynamicStates = dynamicStates.data();
+
+            // 12. Create pipeline layout
+            // For simplicity, we'll use an empty layout for now
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+
+            VkPipelineLayout pipelineLayout;
+            if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+                Logger::get().error("Failed to create pipeline layout");
+                return false;
+            }
+
+            // Store pipeline layout in RAII wrapper
+            m_pipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayout);
+
+            // 13. Create the actual pipeline
+            if (vkDevice->capabilities().dynamicRendering) {
+                // For dynamic rendering, we need to use VkPipelineRenderingCreateInfoKHR
+                VkPipelineRenderingCreateInfoKHR renderingInfo{};
+                renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+                renderingInfo.colorAttachmentCount = 1;
+                VkFormat colorFormat = vkSwapchain->imageFormat();
+                renderingInfo.pColorAttachmentFormats = &colorFormat;
+                renderingInfo.depthAttachmentFormat = m_depthFormat;
+
+                VkGraphicsPipelineCreateInfo pipelineInfo{};
+                pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+                pipelineInfo.pNext = &renderingInfo; // Link dynamic rendering info
+                pipelineInfo.stageCount = 2;
+                pipelineInfo.pStages = shaderStages.data();
+                pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
+                pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
+                pipelineInfo.pViewportState = &pipelineState.viewportState;
+                pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
+                pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
+                pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
+                pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
+                pipelineInfo.pDynamicState = &pipelineState.dynamicState;
+                pipelineInfo.layout = *m_pipelineLayout;
+                pipelineInfo.renderPass = VK_NULL_HANDLE; // Not used with dynamic rendering
+                pipelineInfo.subpass = 0;
+                pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+
+                VkPipeline graphicsPipeline;
+                if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+                    Logger::get().error("Failed to create graphics pipeline with dynamic rendering");
+                    return false;
+                }
+
+                // Store in RAII wrapper
+                m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
+            }
+            else {
+                // Traditional render pass approach
+                VkGraphicsPipelineCreateInfo pipelineInfo{};
+                pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+                pipelineInfo.stageCount = 2;
+                pipelineInfo.pStages = shaderStages.data();
+                pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
+                pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
+                pipelineInfo.pViewportState = &pipelineState.viewportState;
+                pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
+                pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
+                pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
+                pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
+                pipelineInfo.pDynamicState = &pipelineState.dynamicState;
+                pipelineInfo.layout = *m_pipelineLayout;
+                pipelineInfo.renderPass = *rp; // Use the traditional render pass
+                pipelineInfo.subpass = 0;
+                pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+
+                VkPipeline graphicsPipeline;
+                if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
+                    Logger::get().error("Failed to create graphics pipeline with render pass");
+                    return false;
+                }
+
+                // Store in RAII wrapper
+                m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
+            }
+
+            Logger::get().info("Graphics pipeline created successfully");
+
+
+            return true;
+        }
+
+        // Helper method to load shader modules
+        VkShaderModule loadShader(const std::string& filename) {
+            // Read the file
+            std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+            if (!file.is_open()) {
+                Logger::get().error("Failed to open shader file: {}", filename);
+                return VK_NULL_HANDLE;
+            }
+
+            size_t fileSize = static_cast<size_t>(file.tellg());
+            std::vector<char> shaderCode(fileSize);
+
+            file.seekg(0);
+            file.read(shaderCode.data(), fileSize);
+            file.close();
+
+            // Create shader module
+            VkShaderModuleCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            createInfo.codeSize = fileSize;
+            createInfo.pCode = reinterpret_cast<const uint32_t*>(shaderCode.data());
+
+            VkShaderModule shaderModule;
+            if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+                Logger::get().error("Failed to create shader module for: {}", filename);
+                return VK_NULL_HANDLE;
+            }
+
+            return shaderModule;
+        }
 
         // Physical device selection
         bool isDeviceSuitable(VkPhysicalDevice device);
@@ -1780,6 +3362,11 @@ namespace tremor::gfx {
 
         // Submission/presentation
         void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex);
+
+        // Add these member variables
+        std::unique_ptr<PipelineLayoutResource> m_pipelineLayout;
+        std::unique_ptr<PipelineResource> m_graphicsPipeline;
+
     };
 
 }
