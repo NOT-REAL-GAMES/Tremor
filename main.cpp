@@ -40,6 +40,9 @@ concept StringLike = requires(T t) {
 #include "mem.h"
 #include "RenderBackend.h"
 
+#include "vm_bytecode.hpp"
+#include "vm_decoder.hpp"
+
 class Engine {
 public:
 

@@ -112,7 +112,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <AdditionalIncludeDirectories>
       </AdditionalIncludeDirectories>
@@ -134,7 +134,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <AdditionalIncludeDirectories>
       </AdditionalIncludeDirectories>
@@ -154,6 +154,8 @@
     <ClCompile Include="mem.h" />
     <ClCompile Include="oldmain.cpp" />
     <ClCompile Include="res.h" />
+    <ClCompile Include="vm.cpp" />
+    <ClCompile Include="vm_bytecode.cpp" />
     <ClCompile Include="volk.c" />
   </ItemGroup>
   <ItemGroup>
@@ -162,6 +164,12 @@
     <ClInclude Include="RenderBackend.h" />
     <ClInclude Include="RenderBackendBase.h" />
     <ClInclude Include="vk.h" />
+    <ClInclude Include="vm.hpp" />
+    <ClInclude Include="vm_bytecode.hpp" />
+    <ClInclude Include="vm_decoder.hpp" />
+    <ClInclude Include="vm_execution.hpp" />
+    <ClInclude Include="vm_memory.hpp" />
+    <ClInclude Include="vm_syscall.hpp" />
     <ClInclude Include="volk.h" />
     <ClInclude Include="wsaerror.h" />
   </ItemGroup>
