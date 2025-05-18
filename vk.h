@@ -4,6 +4,12 @@
 #include "res.h"
 #include "mem.h"
 #include <shaderc/shaderc.hpp>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <spirv_cross/spirv_cross.hpp>
+#include <spirv_cross/spirv_glsl.hpp>
+
 
 // Define concepts for Vulkan types
 template<typename T>
@@ -109,6 +115,93 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
     }
 }
 namespace tremor::gfx { 
+
+    struct PBRMaterialUBO {
+        // Basic properties
+        alignas(16) float baseColor[4];   // vec4 in shader
+        alignas(4) float metallic;        // float in shader
+        alignas(4) float roughness;       // float in shader
+        alignas(4) float ao;              // float in shader
+        alignas(16) float emissive[3];    // vec3 in shader (padded to 16 bytes)
+
+        // Texture availability flags
+        alignas(4) int hasAlbedoMap;
+        alignas(4) int hasNormalMap;
+        alignas(4) int hasMetallicRoughnessMap;
+        alignas(4) int hasAoMap;
+        alignas(4) int hasEmissiveMap;
+    };
+
+    struct PBRMaterial {
+        // Base maps
+        std::unique_ptr<ImageResource> albedoMap;
+        std::unique_ptr<ImageResource> normalMap;
+        std::unique_ptr<ImageResource> metallicRoughnessMap; // R: metallic, G: roughness
+        std::unique_ptr<ImageResource> aoMap;               // Ambient occlusion
+        std::unique_ptr<ImageResource> emissiveMap;
+
+        // Default values for when maps aren't available
+        float baseColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        float metallic = 0.0f;
+        float roughness = 0.5f;
+        float ao = 1.0f;
+        float emissive[3] = {0.0f, 0.0f, 0.0f};
+
+        // Sampler states
+        std::unique_ptr<SamplerResource> sampler;
+
+        // Image views for all textures
+        std::unique_ptr<ImageViewResource> albedoImageView;
+        std::unique_ptr<ImageViewResource> normalImageView;
+        std::unique_ptr<ImageViewResource> metallicRoughnessImageView;
+        std::unique_ptr<ImageViewResource> aoImageView;
+        std::unique_ptr<ImageViewResource> emissiveImageView;
+    };
+
+    struct PBRVertex {
+        float position[3];
+        float normal[3];
+        float tangent[4];    // XYZ = tangent direction, W = handedness for bitangent
+        float texCoord[2];
+
+        static VkVertexInputBindingDescription getBindingDescription() {
+            VkVertexInputBindingDescription bindingDescription{};
+            bindingDescription.binding = 0;
+            bindingDescription.stride = sizeof(PBRVertex);
+            bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+            return bindingDescription;
+        }
+
+        static std::array<VkVertexInputAttributeDescription, 4> getAttributeDescriptions() {
+            std::array<VkVertexInputAttributeDescription, 4> attributeDescriptions{};
+
+            // Position
+            attributeDescriptions[0].binding = 0;
+            attributeDescriptions[0].location = 0;
+            attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+            attributeDescriptions[0].offset = offsetof(PBRVertex, position);
+
+            // Normal
+            attributeDescriptions[1].binding = 0;
+            attributeDescriptions[1].location = 1;
+            attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+            attributeDescriptions[1].offset = offsetof(PBRVertex, normal);
+
+            // Tangent
+            attributeDescriptions[2].binding = 0;
+            attributeDescriptions[2].location = 2;
+            attributeDescriptions[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            attributeDescriptions[2].offset = offsetof(PBRVertex, tangent);
+
+            // Texture Coordinates
+            attributeDescriptions[3].binding = 0;
+            attributeDescriptions[3].location = 3;
+            attributeDescriptions[3].format = VK_FORMAT_R32G32_SFLOAT;
+            attributeDescriptions[3].offset = offsetof(PBRVertex, texCoord);
+
+            return attributeDescriptions;
+        }
+    };
 
     // Basic Vertex structure with position and color
     struct Vertex {
@@ -2554,6 +2647,7 @@ namespace tremor::gfx {
         SDL_Window* w;
 
         std::unique_ptr<VulkanResourceManager> res;
+        std::unique_ptr<Buffer> m_materialBuffer;
 
 #if _DEBUG
         VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
@@ -2561,6 +2655,160 @@ namespace tremor::gfx {
 
 		VulkanBackend() = default;
         ~VulkanBackend() override = default;
+
+        struct UniformBufferObject {
+            alignas(16) glm::mat4 model;
+            alignas(16) glm::mat4 view;
+            alignas(16) glm::mat4 proj;
+            alignas(16) glm::vec3 cameraPos;
+        };
+
+        // Add this to your VulkanBackend class as a member variable
+        std::unique_ptr<Buffer> m_uniformBuffer;
+
+        // Create a method to create the UBO
+        bool createUniformBuffer() {
+            // Create the uniform buffer
+            VkDeviceSize bufferSize = sizeof(UniformBufferObject);
+            m_uniformBuffer = std::make_unique<Buffer>(
+                device,
+                physicalDevice,
+                bufferSize,
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            // Initialize the UBO with identity matrices and a camera position
+            updateUniformBuffer();
+
+            return true;
+        }
+
+        // Add a method to update the UBO every frame
+        void updateUniformBuffer() {
+            static auto startTime = std::chrono::high_resolution_clock::now();
+            auto currentTime = std::chrono::high_resolution_clock::now();
+            float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
+
+            UniformBufferObject ubo{};
+
+            // Create a simple model matrix (rotate the quad over time)
+            ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(45.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+
+            // Create a view matrix (look at the quad from a slight distance)
+            ubo.view = glm::lookAt(
+                glm::vec3(0.0f, 0.0f, 4.0f),  // Move camera further back
+                glm::vec3(0.0f, 0.0f, 0.0f),
+                glm::vec3(0.0f, 1.0f, 0.0f)
+            );
+
+            // Create a projection matrix (perspective projection)
+            // Get the window size for aspect ratio
+            int width, height;
+            SDL_GetWindowSize(w, &width, &height);
+            float aspect = width / (float)height;
+
+            ubo.proj = glm::perspective(glm::radians(45.0f), aspect, 0.01f, 100.0f);
+
+            // Flip Y coordinate for Vulkan
+            ubo.proj[1][1] *= -1;
+
+            // Set camera position (same as view matrix eye position)
+            ubo.cameraPos = glm::vec3(0.0f, 0.0f, 4.0f);
+
+            // Update the buffer data
+            m_uniformBuffer->update(&ubo, sizeof(ubo));
+
+            Logger::get().info("Model matrix:\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}",
+                ubo.model[0][0], ubo.model[0][1], ubo.model[0][2], ubo.model[0][3],
+                ubo.model[1][0], ubo.model[1][1], ubo.model[1][2], ubo.model[1][3],
+                ubo.model[2][0], ubo.model[2][1], ubo.model[2][2], ubo.model[2][3],
+                ubo.model[3][0], ubo.model[3][1], ubo.model[3][2], ubo.model[3][3]
+                ); // Similar for view and proj
+
+            Logger::get().info("View matrix:\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}",
+                ubo.view[0][0], ubo.view[0][1], ubo.view[0][2], ubo.view[0][3],
+                ubo.view[1][0], ubo.view[1][1], ubo.view[1][2], ubo.view[1][3],
+                ubo.view[2][0], ubo.view[2][1], ubo.view[2][2], ubo.view[2][3],
+                ubo.view[3][0], ubo.view[3][1], ubo.view[3][2], ubo.view[3][3]
+            ); // Similar for proj and proj
+
+            Logger::get().info("proj matrix:\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}",
+                ubo.proj[0][0], ubo.proj[0][1], ubo.proj[0][2], ubo.proj[0][3],
+                ubo.proj[1][0], ubo.proj[1][1], ubo.proj[1][2], ubo.proj[1][3],
+                ubo.proj[2][0], ubo.proj[2][1], ubo.proj[2][2], ubo.proj[2][3],
+                ubo.proj[3][0], ubo.proj[3][1], ubo.proj[3][2], ubo.proj[3][3]
+            ); // Similar for view and proj
+
+        }
+
+        // Add a method to create a light UBO as well
+        struct LightUBO {
+            alignas(16) glm::vec3 direction;
+            alignas(16) glm::vec3 color;
+        };
+
+        std::unique_ptr<Buffer> m_lightBuffer;
+
+        bool createLightBuffer() {
+            // Create the light uniform buffer
+            VkDeviceSize bufferSize = sizeof(LightUBO);
+            m_lightBuffer = std::make_unique<Buffer>(
+                device,
+                physicalDevice,
+                bufferSize,
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            // Initialize with default light values
+            LightUBO light{};
+            light.direction = glm::normalize(glm::vec3(1.0f, -3.0f, -2.0f)); // Light coming from above-right
+            light.color = glm::vec3(1.0f, 1.0f, 1.0f); // White light
+
+            m_lightBuffer->update(&light, sizeof(light));
+
+            return true;
+        }
+
+        void createMaterialUBO() {
+            // Create the uniform buffer for material properties
+            VkDeviceSize uboSize = sizeof(PBRMaterialUBO);
+            m_materialBuffer = std::make_unique<Buffer>(
+                device,
+                physicalDevice,
+                uboSize,
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            // Initialize the material data
+            PBRMaterialUBO uboData = {};
+
+            // Set default values
+            uboData.baseColor[0] = 1.0f;  // r
+            uboData.baseColor[1] = 1.0f;  // g
+            uboData.baseColor[2] = 1.0f;  // b
+            uboData.baseColor[3] = 1.0f;  // a
+
+            uboData.metallic = 0.0f;
+            uboData.roughness = 0.5f;
+            uboData.ao = 1.0f;
+
+            uboData.emissive[0] = 0.0f;   // r
+            uboData.emissive[1] = 0.0f;   // g
+            uboData.emissive[2] = 0.0f;   // b
+
+            // Indicate which textures are available
+            uboData.hasAlbedoMap = 1;  // We have an albedo texture
+            uboData.hasNormalMap = 0;  // We don't have these other textures yet
+            uboData.hasMetallicRoughnessMap = 0;
+            uboData.hasAoMap = 0;
+            uboData.hasEmissiveMap = 0;
+
+            // Upload the data to the GPU
+            m_materialBuffer->update(&uboData, uboSize);
+        }
 
         bool createCommandPool() {
             // Get the graphics queue family index
@@ -2691,6 +2939,37 @@ namespace tremor::gfx {
         };
 
 
+        struct SimpleVertex {
+    float position[3];   // XYZ position - location 0
+    float texCoord[2];   // UV coordinates - location 3 (to match your existing layout)
+
+    static VkVertexInputBindingDescription getBindingDescription() {
+        VkVertexInputBindingDescription bindingDescription{};
+        bindingDescription.binding = 0;
+        bindingDescription.stride = sizeof(SimpleVertex);
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        return bindingDescription;
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+
+        // Position attribute
+        attributeDescriptions[0].binding = 0;
+        attributeDescriptions[0].location = 0;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[0].offset = offsetof(SimpleVertex, position);
+
+        // Texture coordinate attribute
+        attributeDescriptions[1].binding = 0;
+        attributeDescriptions[1].location = 3;  // Keep location 3 to match your existing code
+        attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[1].offset = offsetof(SimpleVertex, texCoord);
+
+        return attributeDescriptions;
+    }
+};
+
         bool createTriangle() {
             try {
                 // Create command pool for transfers if needed
@@ -2710,16 +2989,19 @@ namespace tremor::gfx {
                 }
 
                 // Create a quad with texture coordinates instead
-                std::vector<Vertex> vertices = {
-                    // Positions             Colors              Texture Coords
-                    {{-0.28125f, -0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 0.0f}}, // Bottom left
-                    {{0.28125f, 0.5f, 0.0f},   {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}}, // Top right
-                    {{0.28125f, -0.5f, 0.0f},  {1.0f, 1.0f, 1.0f}, {1.0f, 0.0f}}, // Bottom right
+                std::vector<SimpleVertex> vertices = {
+                    // First triangle (counter-clockwise)
+                    // position              texCoord
+                    {{-0.5f, -0.5f, 0.0f},  {0.0f, 0.0f}}, // Bottom left
+                    {{ 0.5f,  0.5f, 0.0f},  {1.0f, 1.0f}}, // Top right
+                    {{-0.5f,  0.5f, 0.0f},  {0.0f, 1.0f}}, // Top left
 
-                    {{-0.28125f, -0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}, {0.0f, 0.0f}}, // Bottom left (repeated)
-                    {{-0.28125f, 0.5f, 0.0f},  {1.0f, 1.0f, 1.0f}, {0.0f, 1.0f}},  // Top left
-                    {{0.28125f, 0.5f, 0.0f},   {1.0f, 1.0f, 1.0f}, {1.0f, 1.0f}}, // Top right (repeated)
+                    // Second triangle (counter-clockwise) 
+                    {{-0.5f, -0.5f, 0.0f},  {0.0f, 0.0f}}, // Bottom left
+                    {{ 0.5f, -0.5f, 0.0f},  {1.0f, 0.0f}}, // Bottom right
+                    {{ 0.5f,  0.5f, 0.0f},  {1.0f, 1.0f}}, // Top right
                 };
+
 
                 // Create vertex buffer with HOST_VISIBLE memory
                 VkDeviceSize vertexBufferSize = sizeof(vertices[0]) * vertices.size();
@@ -3008,6 +3290,9 @@ namespace tremor::gfx {
         }
 
         void beginFrame() override {
+
+            updateUniformBuffer();
+
             // Wait for previous frame to finish
             if (m_inFlightFences.size() > 0) {
                 vkWaitForFences(device, 1, &m_inFlightFences[currentFrame].handle(), VK_TRUE, UINT64_MAX);
@@ -3068,7 +3353,7 @@ namespace tremor::gfx {
                 colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
                 colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
                 colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-                colorAttachment.clearValue.color = { {1.0f, 0.0f, 0.4125f, 1.0f} };  // Dark blue
+                colorAttachment.clearValue.color = { {0.0f, 0.0f, 0.2f, 1.0f} };  // Dark blue
 
                 // Add to the renderingInfo
                 renderingInfo.colorAttachments.push_back(colorAttachment);
@@ -3259,6 +3544,8 @@ private:
             createCommandBuffers();
 
             createDepthResources();
+            createUniformBuffer();
+            createLightBuffer();
             if (vkDevice.get()->capabilities().dynamicRendering) {
                 dr = std::make_unique<DynamicRenderer>();
                 Logger::get().info("Dynamic renderer created.");
@@ -3269,7 +3556,10 @@ private:
 
             sm = std::make_unique<ShaderManager>(vkDevice.get()->device());
             createTriangle();
-			createTestTexture();
+			createTestTexture();            
+            createMaterialUBO();
+
+			createPBRDescriptorSetLayout();
             createDescriptorSet();
 
             createGraphicsPipeline();
@@ -3821,8 +4111,8 @@ private:
                 viewInfo.subresourceRange.baseArrayLayer = 0;
                 viewInfo.subresourceRange.layerCount = 1;
 
-                m_textureImageView = std::make_unique<ImageViewResource>(device);
-                if (vkCreateImageView(device, &viewInfo, nullptr, &m_textureImageView->handle()) != VK_SUCCESS) {
+                m_missingTextureImageView = std::make_unique<ImageViewResource>(device);
+                if (vkCreateImageView(device, &viewInfo, nullptr, &m_missingTextureImageView->handle()) != VK_SUCCESS) {
                     Logger::get().error("Failed to create texture image view");
                     return false;
                 }
@@ -3899,18 +4189,23 @@ private:
             vkFreeCommandBuffers(device, *m_commandPool, 1, &commandBuffer);
         }
 
-        bool createDescriptorSet() {
-            // Create descriptor set layout
-            VkDescriptorSetLayoutBinding samplerLayoutBinding{};
-            samplerLayoutBinding.binding = 0;
-            samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            samplerLayoutBinding.descriptorCount = 1;
-            samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bool createPBRDescriptorSetLayout() {
+            // Just two bindings - UBO and texture
+            std::array<VkDescriptorSetLayoutBinding, 2> bindings = {
+                // Binding 0: UBO for vertex shader
+                VkDescriptorSetLayoutBinding{
+                    0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr
+                },
+                // Binding 1: Texture sampler
+                VkDescriptorSetLayoutBinding{
+                    1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+                }
+            };
 
             VkDescriptorSetLayoutCreateInfo layoutInfo{};
             layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            layoutInfo.bindingCount = 1;
-            layoutInfo.pBindings = &samplerLayoutBinding;
+            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+            layoutInfo.pBindings = bindings.data();
 
             m_descriptorSetLayout = std::make_unique<DescriptorSetLayoutResource>(device);
             if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_descriptorSetLayout->handle()) != VK_SUCCESS) {
@@ -3918,7 +4213,7 @@ private:
                 return false;
             }
 
-            // Update the pipeline layout to use the descriptor set layout
+            // Create the pipeline layout
             VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
             pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
             pipelineLayoutInfo.setLayoutCount = 1;
@@ -3931,15 +4226,20 @@ private:
             }
             m_pipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayout);
 
-            // Create descriptor pool
-            VkDescriptorPoolSize poolSize{};
-            poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            poolSize.descriptorCount = 1;
+            return true;
+        }
+
+        bool createDescriptorSet() {
+            // Create descriptor pool with just what we need
+            std::array<VkDescriptorPoolSize, 2> poolSizes = {
+                VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
+                VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}
+            };
 
             VkDescriptorPoolCreateInfo poolInfo{};
             poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-            poolInfo.poolSizeCount = 1;
-            poolInfo.pPoolSizes = &poolSize;
+            poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+            poolInfo.pPoolSizes = poolSizes.data();
             poolInfo.maxSets = 1;
 
             m_descriptorPool = std::make_unique<DescriptorPoolResource>(device);
@@ -3956,7 +4256,6 @@ private:
             allocInfo.pSetLayouts = &m_descriptorSetLayout->handle();
 
             VkDescriptorSet descriptorSetHandle = VK_NULL_HANDLE;
-
             if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSetHandle) != VK_SUCCESS) {
                 Logger::get().error("Failed to allocate descriptor set");
                 return false;
@@ -3964,33 +4263,52 @@ private:
 
             m_descriptorSet = std::make_unique<DescriptorSetResource>(device, descriptorSetHandle);
 
-            // Update descriptor set
+            // Update the descriptor set
+            // 1. UBO descriptor
+            VkDescriptorBufferInfo uboInfo{};
+            uboInfo.buffer = m_uniformBuffer->getBuffer();
+            uboInfo.offset = 0;
+            uboInfo.range = sizeof(UniformBufferObject);
+
+            // 2. Texture descriptor
             VkDescriptorImageInfo imageInfo{};
             imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            imageInfo.imageView = *m_textureImageView;
+            imageInfo.imageView = *m_missingTextureImageView;
             imageInfo.sampler = *m_textureSampler;
 
-            VkWriteDescriptorSet descriptorWrite{};
-            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrite.dstSet = m_descriptorSet->handle();
-            descriptorWrite.dstBinding = 0;
-            descriptorWrite.dstArrayElement = 0;
-            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrite.descriptorCount = 1;
-            descriptorWrite.pImageInfo = &imageInfo;
+            // Prepare descriptor writes
+            std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
 
-            vkUpdateDescriptorSets(device, 1, &descriptorWrite, 0, nullptr);
+            // UBO at binding 0
+            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[0].dstSet = *m_descriptorSet;
+            descriptorWrites[0].dstBinding = 0;
+            descriptorWrites[0].dstArrayElement = 0;
+            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrites[0].descriptorCount = 1;
+            descriptorWrites[0].pBufferInfo = &uboInfo;
 
-            Logger::get().info("Descriptor set created successfully");
+            // Texture at binding 1
+            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[1].dstSet = *m_descriptorSet;
+            descriptorWrites[1].dstBinding = 1;
+            descriptorWrites[1].dstArrayElement = 0;
+            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            descriptorWrites[1].descriptorCount = 1;
+            descriptorWrites[1].pImageInfo = &imageInfo;
+
+            // Update all descriptors at once
+            vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+
+            Logger::get().info("Descriptor set created and updated successfully");
             return true;
         }
-
         bool createGraphicsPipeline() {
             // 1. Load shaders
             // For now, let's create simple vertex and fragment shaders
-            auto vertShader = sm.get()->loadShader("shaders/basic.vert");
+            auto vertShader = sm.get()->loadShader("shaders/pbr.vert");
 
-            auto fragShader = sm.get()->loadShader("shaders/basic.frag");
+            auto fragShader = sm.get()->loadShader("shaders/pbr.frag");
 
 
             if (!vertShader || !fragShader) {
@@ -4011,8 +4329,8 @@ private:
             // 4. Configure vertex input
             // For now, let's assume a simple vertex with position and color
 
-            auto bindingDescription = Vertex::getBindingDescription();
-            auto attributeDescriptions = Vertex::getAttributeDescriptions();
+            auto bindingDescription = SimpleVertex::getBindingDescription();
+            auto attributeDescriptions = SimpleVertex::getAttributeDescriptions();
 
             pipelineState.vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
             pipelineState.vertexInputState.vertexBindingDescriptionCount = 1;
@@ -4073,7 +4391,14 @@ private:
             colorBlendAttachment.colorWriteMask =
                 VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                 VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-            colorBlendAttachment.blendEnable = VK_FALSE;
+            colorBlendAttachment.blendEnable = VK_TRUE;
+            colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+            colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
 
             pipelineState.colorBlendState.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
             pipelineState.colorBlendState.logicOpEnable = VK_FALSE;
@@ -4092,14 +4417,6 @@ private:
 
             // 12. Create pipeline layout
             // For simplicity, we'll use an empty layout for now
-            VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-
-            VkPipelineLayout pipelineLayout;
-            if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
-                Logger::get().error("Failed to create pipeline layout");
-                return false;
-            }
 
             // Store pipeline layout in RAII wrapper
             //m_pipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayout);
@@ -4179,7 +4496,7 @@ private:
         // Texture resources
         std::unique_ptr<ImageResource> m_textureImage;
         std::unique_ptr<DeviceMemoryResource> m_textureImageMemory;
-        std::unique_ptr<ImageViewResource> m_textureImageView;
+        std::unique_ptr<ImageViewResource> m_missingTextureImageView;
         std::unique_ptr<SamplerResource> m_textureSampler;
 
         // Descriptor resources

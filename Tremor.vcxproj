@@ -173,6 +173,9 @@
     <ClInclude Include="volk.h" />
     <ClInclude Include="wsaerror.h" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="shaders\pbr.vert" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>
