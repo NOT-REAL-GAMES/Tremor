@@ -304,6 +304,14 @@ template<> inline void VulkanResource<VkRenderPass>::destroy(VkDevice device, Vk
     vkDestroyRenderPass(device, handle, nullptr);
 }
 
+template<> inline void VulkanResource<VkDescriptorPool>::destroy(VkDevice device, VkDescriptorPool handle) {
+    vkDestroyDescriptorPool(device, handle, nullptr);
+}
+
+template<> inline void VulkanResource<VkDescriptorSet>::destroy(VkDevice device, VkDescriptorSet handle) {
+}
+
+
 // Type aliases for convenience
 using ImageResource = VulkanResource<VkImage>;
 using ImageViewResource = VulkanResource<VkImageView>;
@@ -312,6 +320,8 @@ using DeviceMemoryResource = VulkanResource<VkDeviceMemory>;
 using PipelineResource = VulkanResource<VkPipeline>;
 using ShaderModuleResource = VulkanResource<VkShaderModule>;
 using DescriptorSetLayoutResource = VulkanResource<VkDescriptorSetLayout>;
+using DescriptorPoolResource = VulkanResource<VkDescriptorPool>;
+using DescriptorSetResource = VulkanResource<VkDescriptorSet>;
 using PipelineLayoutResource = VulkanResource<VkPipelineLayout>;
 using SamplerResource = VulkanResource<VkSampler>;
 using SwapchainResource = VulkanResource<VkSwapchainKHR>;
