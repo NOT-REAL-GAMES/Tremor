@@ -116,6 +116,625 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
 }
 namespace tremor::gfx { 
 
+
+
+    class ShaderReflection {
+    public:
+        std::unordered_map<VkShaderStageFlags, std::unique_ptr<spirv_cross::CompilerGLSL>> m_compilers;
+
+        struct ResourceBinding {
+            uint32_t set;
+            uint32_t binding;
+            VkDescriptorType descriptorType;
+            uint32_t count;  // Array size
+            VkShaderStageFlags stageFlags;
+            std::string name;
+        };
+
+        struct UBOMember {
+            std::string name;
+            uint32_t offset;
+            uint32_t size;
+
+            // Store essential type information rather than SPIRType directly
+            struct TypeInfo {
+                spirv_cross::SPIRType::BaseType baseType;
+                uint32_t vecSize = 1;
+                uint32_t columns = 1;
+                std::vector<uint32_t> arrayDims;
+            } typeInfo;
+        };
+
+        struct UniformBuffer {
+            uint32_t set;
+            uint32_t binding;
+            uint32_t size;
+            VkShaderStageFlags stageFlags;
+            std::string name;
+            uint32_t typeId;
+            uint32_t baseTypeId;
+
+            // Add this field to store members directly
+            std::vector<UBOMember> members;
+        };
+
+
+        // Then update the getUBOMembers method
+        std::vector<UBOMember> getUBOMembers(const UniformBuffer& ubo) const {
+            
+            spirv_cross::CompilerGLSL* compiler = nullptr;
+            
+            const VkShaderStageFlags stagesToTry[] = {
+                VK_SHADER_STAGE_VERTEX_BIT,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                // Add other stages as needed
+            };
+            
+            for (VkShaderStageFlags stage : stagesToTry) {
+                // Check if this stage is part of the UBO's stages
+                if (ubo.stageFlags & stage) {
+                    auto it = m_compilers.find(stage);
+                    if (it != m_compilers.end()) {
+                        compiler = it->second.get();
+                        break;
+                    }
+                }
+            }
+
+            if (!compiler) {
+                Logger::get().error("No compiler found for shader stage {}", ubo.stageFlags);
+                return {};
+            }
+
+            std::vector<UBOMember> members;
+
+            const spirv_cross::SPIRType& type = compiler->get_type(ubo.baseTypeId);
+
+            for (uint32_t i = 0; i < type.member_types.size(); i++) {
+                UBOMember member;
+                member.name = compiler->get_member_name(ubo.baseTypeId, i);
+                member.offset = compiler->type_struct_member_offset(type, i);
+                member.size = compiler->get_declared_struct_member_size(type, i);
+
+                // Get member type information
+                const spirv_cross::SPIRType& memberType = compiler->get_type(type.member_types[i]);
+                member.typeInfo.baseType = memberType.basetype;
+                member.typeInfo.vecSize = memberType.vecsize;
+                member.typeInfo.columns = memberType.columns;
+                member.typeInfo.arrayDims = std::vector<uint32_t>(memberType.array.begin(), memberType.array.end());
+                members.push_back(member);
+            }
+
+            return members;
+        }
+
+        struct PushConstantRange {
+            VkShaderStageFlags stageFlags;
+            uint32_t offset;
+            uint32_t size;
+        };
+
+        ShaderReflection() = default;
+
+        void reflect(const std::vector<uint32_t>& spirvCode, VkShaderStageFlags stageFlags) {
+            spirv_cross::CompilerGLSL compiler(spirvCode);
+            spirv_cross::ShaderResources resources = compiler.get_shader_resources();
+
+
+            Logger::get().info("Shader reflection found: {} uniform buffers, {} sampled images",
+                resources.uniform_buffers.size(), resources.sampled_images.size());
+
+            // Print all resources by name
+            for (const auto& resource : resources.sampled_images) {
+                ResourceBinding binding;
+                binding.set = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
+                binding.binding = compiler.get_decoration(resource.id, spv::DecorationBinding);
+                binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+
+                // Check if this is an array
+                spirv_cross::SPIRType type = compiler.get_type(resource.type_id);
+                binding.count = type.array.empty() ? 1 : type.array[0];
+
+                // Ensure stage flags are not zero
+                binding.stageFlags = stageFlags;
+                binding.name = resource.name;
+
+				Logger::get().info("Resource: {} (set {}, binding {})", binding.name, binding.set, binding.binding);
+
+                m_resourceBindings.push_back(binding);
+            }
+
+
+            // Process uniform buffers
+            for (const auto& resource : resources.uniform_buffers) {
+                UniformBuffer ubo;
+                // Set basic properties
+                ubo.set = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
+                ubo.binding = compiler.get_decoration(resource.id, spv::DecorationBinding);
+                ubo.name = resource.name;
+                ubo.stageFlags = stageFlags;
+                ubo.typeId = resource.type_id;
+                ubo.baseTypeId = resource.base_type_id;
+
+                // Get UBO size
+                const spirv_cross::SPIRType& type = compiler.get_type(resource.base_type_id);
+                ubo.size = compiler.get_declared_struct_size(type);
+
+                // Extract members immediately
+                for (uint32_t i = 0; i < type.member_types.size(); i++) {
+                    UBOMember member;
+                    member.name = compiler.get_member_name(resource.base_type_id, i);
+                    member.offset = compiler.type_struct_member_offset(type, i);
+                    member.size = compiler.get_declared_struct_member_size(type, i);
+
+                    // Get member type info
+                    const spirv_cross::SPIRType& memberType = compiler.get_type(type.member_types[i]);
+                    member.typeInfo.baseType = memberType.basetype;
+                    member.typeInfo.vecSize = memberType.vecsize;
+                    member.typeInfo.columns = memberType.columns;
+                    member.typeInfo.arrayDims = std::vector<uint32_t>(memberType.array.begin(), memberType.array.end());
+
+                    ubo.members.push_back(member);
+                }
+
+                // Store UBO
+                m_uniformBuffers.push_back(ubo);
+
+                // Also add to resource bindings
+                ResourceBinding binding;
+                binding.set = ubo.set;
+                binding.binding = ubo.binding;
+                binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                binding.count = 1;
+                binding.stageFlags = stageFlags;
+                binding.name = ubo.name;
+                m_resourceBindings.push_back(binding);
+            }
+
+            // Process storage buffers
+            for (const auto& resource : resources.storage_buffers) {
+                ResourceBinding binding;
+                binding.set = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
+                binding.binding = compiler.get_decoration(resource.id, spv::DecorationBinding);
+                binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                binding.count = 1;
+                binding.stageFlags = stageFlags;
+                binding.name = resource.name;
+                m_resourceBindings.push_back(binding);
+            }
+
+            // Process combined image samplers
+            for (const auto& resource : resources.sampled_images) {
+                ResourceBinding binding;
+                binding.set = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
+                binding.binding = compiler.get_decoration(resource.id, spv::DecorationBinding);
+                binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+
+                // Check if this is an array
+                spirv_cross::SPIRType type = compiler.get_type(resource.type_id);
+                binding.count = type.array.empty() ? 1 : type.array[0];
+
+                binding.stageFlags = stageFlags;
+                binding.name = resource.name;
+                m_resourceBindings.push_back(binding);
+            }
+
+            // Process separate images
+            for (const auto& resource : resources.separate_images) {
+                ResourceBinding binding;
+                binding.set = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
+                binding.binding = compiler.get_decoration(resource.id, spv::DecorationBinding);
+                binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+
+                spirv_cross::SPIRType type = compiler.get_type(resource.type_id);
+                binding.count = type.array.empty() ? 1 : type.array[0];
+
+                binding.stageFlags = stageFlags;
+                binding.name = resource.name;
+                m_resourceBindings.push_back(binding);
+            }
+
+            // Process separate samplers
+            for (const auto& resource : resources.separate_samplers) {
+                ResourceBinding binding;
+                binding.set = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
+                binding.binding = compiler.get_decoration(resource.id, spv::DecorationBinding);
+                binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+
+                spirv_cross::SPIRType type = compiler.get_type(resource.type_id);
+                binding.count = type.array.empty() ? 1 : type.array[0];
+
+                binding.stageFlags = stageFlags;
+                binding.name = resource.name;
+                m_resourceBindings.push_back(binding);
+            }
+
+            // Process storage images
+            for (const auto& resource : resources.storage_images) {
+                ResourceBinding binding;
+                binding.set = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
+                binding.binding = compiler.get_decoration(resource.id, spv::DecorationBinding);
+                binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+
+                spirv_cross::SPIRType type = compiler.get_type(resource.type_id);
+                binding.count = type.array.empty() ? 1 : type.array[0];
+
+                binding.stageFlags = stageFlags;
+                binding.name = resource.name;
+                m_resourceBindings.push_back(binding);
+            }
+
+            // Process push constants
+            for (const auto& resource : resources.push_constant_buffers) {
+                const spirv_cross::SPIRType& type = compiler.get_type(resource.base_type_id);
+                uint32_t size = compiler.get_declared_struct_size(type);
+
+                PushConstantRange range;
+                range.stageFlags = stageFlags;
+                range.offset = 0; // Will be calculated when merging with other stages
+                range.size = size;
+                m_pushConstantRanges.push_back(range);
+            }
+
+            // Process vertex input attributes (for vertex shaders only)
+            if (stageFlags & VK_SHADER_STAGE_VERTEX_BIT) {
+                for (const auto& resource : resources.stage_inputs) {
+                    const uint32_t location = compiler.get_decoration(resource.id, spv::DecorationLocation);
+                    const spirv_cross::SPIRType& type = compiler.get_type(resource.type_id);
+
+                    VertexAttribute attr;
+                    attr.location = location;
+                    attr.name = resource.name;
+
+                    // Determine format based on type
+                    attr.format = getFormatFromType(type);
+
+                    m_vertexAttributes.push_back(attr);
+                }
+            }
+        }
+
+        // Merge reflection data from multiple shaders (e.g., vertex + fragment)
+        void merge(const ShaderReflection& other) {
+            // Merge resource bindings, combining stage flags for duplicate bindings
+            for (const auto& binding : other.m_resourceBindings) {
+                auto it = std::find_if(m_resourceBindings.begin(), m_resourceBindings.end(),
+                    [&binding](const ResourceBinding& existing) {
+                        return existing.set == binding.set &&
+                            existing.binding == binding.binding &&
+                            existing.descriptorType == binding.descriptorType;
+                    });
+
+                if (it != m_resourceBindings.end()) {
+                    it->stageFlags |= binding.stageFlags;
+                }
+                else {
+                    m_resourceBindings.push_back(binding);
+                }
+            }
+
+            // For UBOs
+            for (const auto& ubo : other.m_uniformBuffers) {
+                auto it = std::find_if(m_uniformBuffers.begin(), m_uniformBuffers.end(),
+                    [&ubo](const UniformBuffer& existing) {
+                        return existing.set == ubo.set && existing.binding == ubo.binding;
+                    });
+
+                if (it != m_uniformBuffers.end()) {
+                    // Combine stage flags
+                    it->stageFlags |= ubo.stageFlags;
+
+                    // Preserve member info if we don't have it yet
+                    if (it->members.empty() && !ubo.members.empty()) {
+                        it->members = ubo.members;
+                    }
+                }
+                else {
+                    m_uniformBuffers.push_back(ubo);
+                }
+            }
+
+            // Merge push constant ranges with proper offsets
+            for (const auto& range : other.m_pushConstantRanges) {
+                // For simplicity we'll just add the new range
+                // A more complete implementation would merge overlapping ranges
+                m_pushConstantRanges.push_back(range);
+            }
+
+            // Merge vertex attributes (typically only from vertex shader, but included for completeness)
+            for (const auto& attr : other.m_vertexAttributes) {
+                if (std::find_if(m_vertexAttributes.begin(), m_vertexAttributes.end(),
+                    [&attr](const VertexAttribute& existing) {
+                        return existing.location == attr.location;
+                    }) == m_vertexAttributes.end()) {
+                    m_vertexAttributes.push_back(attr);
+                }
+            }
+        }
+
+        std::unique_ptr<DescriptorSetLayoutResource> createDescriptorSetLayout(VkDevice device, uint32_t setNumber) const {
+
+            std::vector<VkDescriptorSetLayoutBinding> bindings;
+
+            // Debug output before creating layout
+            Logger::get().info("Creating descriptor set layout for set {}", setNumber);
+
+            for (const auto& binding : m_resourceBindings) {
+                if (binding.set == setNumber) {
+                    VkDescriptorSetLayoutBinding layoutBinding{};
+                    layoutBinding.binding = binding.binding;
+                    layoutBinding.descriptorType = binding.descriptorType;
+                    layoutBinding.descriptorCount = binding.count;
+                    layoutBinding.stageFlags = binding.stageFlags;
+                    layoutBinding.pImmutableSamplers = nullptr;
+
+                    // Log each binding we're adding
+                    const char* typeStr = "Unknown";
+                    switch (binding.descriptorType) {
+                    case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: typeStr = "UBO"; break;
+                    case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: typeStr = "Sampler"; break;
+                    default: typeStr = "Other"; break;
+                    }
+
+                    Logger::get().info("  Adding binding {}.{}: {} (count={}, stages=0x{:X})",
+                        binding.set, binding.binding, typeStr, binding.count, binding.stageFlags);
+
+                    bindings.push_back(layoutBinding);
+                }
+            }
+
+            if (bindings.empty()) {
+                Logger::get().info("No bindings found for set {}", setNumber);
+                return nullptr;  // No bindings for this set
+            }
+
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+            layoutInfo.pBindings = bindings.data();
+
+            Logger::get().info("Creating descriptor set layout with {} bindings", bindings.size());
+
+            auto layout = std::make_unique<DescriptorSetLayoutResource>(device);
+
+            VkResult result = vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &layout->handle());
+            if (result != VK_SUCCESS) {
+                Logger::get().error("Failed to create descriptor set layout for set {}: Error code {}",
+                    setNumber, static_cast<int>(result));
+                return nullptr;
+            }
+
+            Logger::get().info("Successfully created descriptor set layout for set {}", setNumber);
+            return layout;
+        }
+
+
+        // Create pipeline layout with all descriptor set layouts and push constants
+        std::unique_ptr<PipelineLayoutResource> createPipelineLayout(VkDevice device) const {
+            // First determine how many unique descriptor sets we need
+            uint32_t maxSet = 0;
+            for (const auto& binding : m_resourceBindings) {
+                maxSet = std::max(maxSet, binding.set);
+            }
+
+            std::vector<std::unique_ptr<DescriptorSetLayoutResource>> setLayouts;
+            std::vector<VkDescriptorSetLayout> rawSetLayouts;
+
+            // Create a layout for each set
+            for (uint32_t i = 0; i <= maxSet; i++) {
+                auto layout = createDescriptorSetLayout(device, i);
+                if (layout != nullptr) {
+                    rawSetLayouts.push_back(layout->handle());
+                    setLayouts.push_back(std::move(layout));
+                }
+                else {
+                    // No bindings for this set, but we need to maintain the set indexes
+                    // Create an empty layout
+                    VkDescriptorSetLayoutCreateInfo emptyLayoutInfo{};
+                    emptyLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+                    emptyLayoutInfo.bindingCount = 0;
+
+                    auto emptyLayout = std::make_unique<DescriptorSetLayoutResource>(device);
+                    if (vkCreateDescriptorSetLayout(device, &emptyLayoutInfo, nullptr, &emptyLayout->handle()) != VK_SUCCESS) {
+                        Logger::get().error("Failed to create empty descriptor set layout for set {}", i);
+                        return nullptr;
+                    }
+
+                    rawSetLayouts.push_back(emptyLayout->handle());
+                    setLayouts.push_back(std::move(emptyLayout));
+                }
+            }
+
+            // Organize push constant ranges
+            std::vector<VkPushConstantRange> pushConstantRanges;
+            for (const auto& range : m_pushConstantRanges) {
+                VkPushConstantRange vkRange{};
+                vkRange.stageFlags = range.stageFlags;
+                vkRange.offset = range.offset;
+                vkRange.size = range.size;
+                pushConstantRanges.push_back(vkRange);
+            }
+
+            // Create the pipeline layout
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(rawSetLayouts.size());
+            pipelineLayoutInfo.pSetLayouts = rawSetLayouts.data();
+            pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size());
+            pipelineLayoutInfo.pPushConstantRanges = pushConstantRanges.empty() ? nullptr : pushConstantRanges.data();
+
+            VkPipelineLayout pipelineLayout;
+            if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+                Logger::get().error("Failed to create pipeline layout");
+                return nullptr;
+            }
+
+            return std::make_unique<PipelineLayoutResource>(device, pipelineLayout);
+        }
+
+        // Create a descriptor pool based on the reflected shader needs
+        std::unique_ptr<DescriptorPoolResource> createDescriptorPool(VkDevice device, uint32_t maxSets = 100) const {
+            // Count needed descriptors by type
+            std::unordered_map<VkDescriptorType, uint32_t> typeCount;
+
+            for (const auto& binding : m_resourceBindings) {
+                typeCount[binding.descriptorType] += binding.count;
+            }
+
+            // Create pool sizes for each needed descriptor type
+            std::vector<VkDescriptorPoolSize> poolSizes;
+            for (const auto& [type, count] : typeCount) {
+                VkDescriptorPoolSize poolSize{};
+                poolSize.type = type;
+                poolSize.descriptorCount = count * maxSets; // Multiply by max sets to allow multiple allocations
+                poolSizes.push_back(poolSize);
+            }
+
+            // Create the descriptor pool
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT; // Allow freeing individual sets
+            poolInfo.maxSets = maxSets;
+            poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+            poolInfo.pPoolSizes = poolSizes.data();
+
+            auto pool = std::make_unique<DescriptorPoolResource>(device);
+            if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to create descriptor pool");
+                return nullptr;
+            }
+
+            return pool;
+        }
+
+        // Generate vertex input state based on vertex attributes
+        VkPipelineVertexInputStateCreateInfo createVertexInputState() const {
+            // For simplicity, we'll assume a single binding
+            // A more complete implementation would support multiple vertex buffers
+
+            // Sort attributes by location
+            std::vector<VertexAttribute> sortedAttrs = m_vertexAttributes;
+            std::sort(sortedAttrs.begin(), sortedAttrs.end(),
+                [](const VertexAttribute& a, const VertexAttribute& b) {
+                    return a.location < b.location;
+                });
+
+            // Create attribute descriptions
+            m_attributeDescriptions.clear();
+            for (const auto& attr : sortedAttrs) {
+                VkVertexInputAttributeDescription attrDesc{};
+                attrDesc.location = attr.location;
+                attrDesc.binding = 0;  // Single binding
+                attrDesc.format = attr.format;
+
+                // Calculate offset based on previous attributes
+                uint32_t offset = 0;
+                for (size_t i = 0; i < m_attributeDescriptions.size(); i++) {
+                    offset += getFormatSize(m_attributeDescriptions[i].format);
+                }
+                attrDesc.offset = offset;
+
+                m_attributeDescriptions.push_back(attrDesc);
+            }
+
+            // Create binding description
+            uint32_t stride = 0;
+            for (const auto& attr : m_attributeDescriptions) {
+                stride += getFormatSize(attr.format);
+            }
+
+            m_bindingDescription.binding = 0;
+            m_bindingDescription.stride = stride;
+            m_bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+            // Create vertex input state
+            m_vertexInputState = {};
+            m_vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            m_vertexInputState.vertexBindingDescriptionCount = 1;
+            m_vertexInputState.pVertexBindingDescriptions = &m_bindingDescription;
+            m_vertexInputState.vertexAttributeDescriptionCount = static_cast<uint32_t>(m_attributeDescriptions.size());
+            m_vertexInputState.pVertexAttributeDescriptions = m_attributeDescriptions.data();
+
+            return m_vertexInputState;
+        }
+
+        struct VertexAttribute {
+            uint32_t location;
+            std::string name;
+            VkFormat format;
+        };
+
+        // Getters for reflected data
+        const std::vector<ResourceBinding>& getResourceBindings() const { return m_resourceBindings; }
+        const std::vector<UniformBuffer>& getUniformBuffers() const { return m_uniformBuffers; }
+        const std::vector<PushConstantRange>& getPushConstantRanges() const { return m_pushConstantRanges; }
+        const std::vector<VertexAttribute>& getVertexAttributes() const { return m_vertexAttributes; }
+
+    private:
+        
+
+        // Helper to determine VkFormat from SPIR-V type
+        VkFormat getFormatFromType(const spirv_cross::SPIRType& type) const {
+            // Basic mapping from SPIR-V types to Vulkan formats
+            if (type.basetype == spirv_cross::SPIRType::Float) {
+                if (type.vecsize == 1) return VK_FORMAT_R32_SFLOAT;
+                if (type.vecsize == 2) return VK_FORMAT_R32G32_SFLOAT;
+                if (type.vecsize == 3) return VK_FORMAT_R32G32B32_SFLOAT;
+                if (type.vecsize == 4) return VK_FORMAT_R32G32B32A32_SFLOAT;
+            }
+            else if (type.basetype == spirv_cross::SPIRType::Int) {
+                if (type.vecsize == 1) return VK_FORMAT_R32_SINT;
+                if (type.vecsize == 2) return VK_FORMAT_R32G32_SINT;
+                if (type.vecsize == 3) return VK_FORMAT_R32G32B32_SINT;
+                if (type.vecsize == 4) return VK_FORMAT_R32G32B32A32_SINT;
+            }
+            else if (type.basetype == spirv_cross::SPIRType::UInt) {
+                if (type.vecsize == 1) return VK_FORMAT_R32_UINT;
+                if (type.vecsize == 2) return VK_FORMAT_R32G32_UINT;
+                if (type.vecsize == 3) return VK_FORMAT_R32G32B32_UINT;
+                if (type.vecsize == 4) return VK_FORMAT_R32G32B32A32_UINT;
+            }
+
+            // Default for unknown type
+            return VK_FORMAT_UNDEFINED;
+        }
+
+        // Helper to get size of a format in bytes
+        uint32_t getFormatSize(VkFormat format) const {
+            switch (format) {
+            case VK_FORMAT_R32_SFLOAT:
+            case VK_FORMAT_R32_UINT:
+            case VK_FORMAT_R32_SINT:
+                return 4;
+            case VK_FORMAT_R32G32_SFLOAT:
+            case VK_FORMAT_R32G32_UINT:
+            case VK_FORMAT_R32G32_SINT:
+                return 8;
+            case VK_FORMAT_R32G32B32_SFLOAT:
+            case VK_FORMAT_R32G32B32_UINT:
+            case VK_FORMAT_R32G32B32_SINT:
+                return 12;
+            case VK_FORMAT_R32G32B32A32_SFLOAT:
+            case VK_FORMAT_R32G32B32A32_UINT:
+            case VK_FORMAT_R32G32B32A32_SINT:
+                return 16;
+            default:
+                return 0;
+            }
+        }
+
+        std::vector<ResourceBinding> m_resourceBindings;
+        std::vector<UniformBuffer> m_uniformBuffers;
+        std::vector<PushConstantRange> m_pushConstantRanges;
+        std::vector<VertexAttribute> m_vertexAttributes;
+
+        // Store created descriptions for vertex input state
+        mutable VkVertexInputBindingDescription m_bindingDescription;
+        mutable std::vector<VkVertexInputAttributeDescription> m_attributeDescriptions;
+        mutable VkPipelineVertexInputStateCreateInfo m_vertexInputState;
+    };
+
     struct PBRMaterialUBO {
         // Basic properties
         alignas(16) float baseColor[4];   // vec4 in shader
@@ -158,89 +777,6 @@ namespace tremor::gfx {
         std::unique_ptr<ImageViewResource> emissiveImageView;
     };
 
-    struct PBRVertex {
-        float position[3];
-        float normal[3];
-        float tangent[4];    // XYZ = tangent direction, W = handedness for bitangent
-        float texCoord[2];
-
-        static VkVertexInputBindingDescription getBindingDescription() {
-            VkVertexInputBindingDescription bindingDescription{};
-            bindingDescription.binding = 0;
-            bindingDescription.stride = sizeof(PBRVertex);
-            bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-            return bindingDescription;
-        }
-
-        static std::array<VkVertexInputAttributeDescription, 4> getAttributeDescriptions() {
-            std::array<VkVertexInputAttributeDescription, 4> attributeDescriptions{};
-
-            // Position
-            attributeDescriptions[0].binding = 0;
-            attributeDescriptions[0].location = 0;
-            attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-            attributeDescriptions[0].offset = offsetof(PBRVertex, position);
-
-            // Normal
-            attributeDescriptions[1].binding = 0;
-            attributeDescriptions[1].location = 1;
-            attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-            attributeDescriptions[1].offset = offsetof(PBRVertex, normal);
-
-            // Tangent
-            attributeDescriptions[2].binding = 0;
-            attributeDescriptions[2].location = 2;
-            attributeDescriptions[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-            attributeDescriptions[2].offset = offsetof(PBRVertex, tangent);
-
-            // Texture Coordinates
-            attributeDescriptions[3].binding = 0;
-            attributeDescriptions[3].location = 3;
-            attributeDescriptions[3].format = VK_FORMAT_R32G32_SFLOAT;
-            attributeDescriptions[3].offset = offsetof(PBRVertex, texCoord);
-
-            return attributeDescriptions;
-        }
-    };
-
-    // Basic Vertex structure with position and color
-    struct Vertex {
-        float position[3];    // XYZ position
-        float color[3];       // RGB color
-        float texCoord[2];    // UV texture coordinates
-
-        static VkVertexInputBindingDescription getBindingDescription() {
-            VkVertexInputBindingDescription bindingDescription{};
-            bindingDescription.binding = 0;
-            bindingDescription.stride = sizeof(Vertex);
-            bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-            return bindingDescription;
-        }
-
-        static std::array<VkVertexInputAttributeDescription, 3> getAttributeDescriptions() {
-            std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
-
-            // Position attribute
-            attributeDescriptions[0].binding = 0;
-            attributeDescriptions[0].location = 0;
-            attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-            attributeDescriptions[0].offset = offsetof(Vertex, position);
-
-            // Color attribute (we'll keep this for debugging)
-            attributeDescriptions[1].binding = 0;
-            attributeDescriptions[1].location = 1;
-            attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-            attributeDescriptions[1].offset = offsetof(Vertex, color);
-
-            // Texture coordinate attribute
-            attributeDescriptions[2].binding = 0;
-            attributeDescriptions[2].location = 2;
-            attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
-            attributeDescriptions[2].offset = offsetof(Vertex, texCoord);
-
-            return attributeDescriptions;
-        }
-    };    
     
     // Generic Buffer class that can be used for both vertex and index buffers
     class Buffer {
@@ -798,6 +1334,8 @@ namespace tremor::gfx {
     class ShaderModule {
     public:
 
+        const std::vector<uint32_t>& getSPIRVCode() const { return m_spirvCode; }
+
         // Default constructor
         ShaderModule() = default;
 
@@ -806,11 +1344,21 @@ namespace tremor::gfx {
             : m_device(device), m_type(type), m_entryPoint("main") {
             if (rawModule != VK_NULL_HANDLE) {
                 m_module = std::make_unique<ShaderModuleResource>(device, rawModule);
+				Logger::get().info("Shader module created with raw handle");
+                if (m_spirvCode.size() > 0) {
+                    m_reflection = std::make_unique<ShaderReflection>();
+                    m_reflection->reflect(m_spirvCode, getShaderStageFlagBits());
+                }
             }
         }
 
         // Destructor - resource is automatically cleaned up by RAII
         ~ShaderModule() = default;
+
+        std::unique_ptr<ShaderReflection> m_reflection;
+
+        const ShaderReflection* getReflection() const { return m_reflection.get(); }
+        ShaderReflection* getReflection() { return m_reflection.get(); }
 
         // Load from precompiled SPIR-V file
         static std::unique_ptr<ShaderModule> loadFromFile(VkDevice device, const std::string& filename,
@@ -850,6 +1398,14 @@ namespace tremor::gfx {
             result->m_type = type;
             result->m_entryPoint = entryPoint;
             result->m_filename = filename;
+
+            // ADD THIS: Store the SPIRV code for reflection
+            result->m_spirvCode.resize(fileSize / sizeof(uint32_t));
+            memcpy(result->m_spirvCode.data(), shaderCode.data(), fileSize);
+
+            // ADD THIS: Initialize reflection
+            result->m_reflection = std::make_unique<ShaderReflection>();
+            result->m_reflection->reflect(result->m_spirvCode, result->getShaderStageFlagBits());
 
             return result;
         }
@@ -965,6 +1521,10 @@ namespace tremor::gfx {
             result->m_entryPoint = entryPoint;
             result->m_filename = filename;
             result->m_spirvCode = std::move(spirv);
+
+            // ADD THIS: Initialize reflection
+            result->m_reflection = std::make_unique<ShaderReflection>();
+            result->m_reflection->reflect(result->m_spirvCode, result->getShaderStageFlagBits());
 
             return result;
         }
@@ -1386,6 +1946,156 @@ namespace tremor::gfx {
 
         // Dynamic state
         VkPipelineDynamicStateCreateInfo dynamicState{};
+
+        void setupFromShaderReflection(const std::vector<std::shared_ptr<ShaderModule>>& shaders) {
+            // Combine shader reflection data
+            ShaderReflection combinedReflection;
+
+            for (const auto& shader : shaders) {
+                const ShaderReflection* reflection = shader->getReflection();
+                if (reflection) {
+                    combinedReflection.merge(*reflection);
+                }
+            }
+
+            // Setup vertex input state from reflection
+            if (shaders[0]->getType() == ShaderType::Vertex) {
+                vertexInputState = combinedReflection.createVertexInputState();
+            }
+
+            // The rest of the pipeline state would typically be set manually
+            // or from other configuration sources
+        }
+    };
+
+    class DescriptorSetBuilder {
+    public:
+        DescriptorSetBuilder(VkDevice device, ShaderReflection& reflection)
+            : m_device(device), m_reflection(reflection) {
+        }
+
+        // Create descriptor sets for all shader resource sets
+        std::vector<std::unique_ptr<DescriptorSetResource>> createDescriptorSets() {
+            std::vector<std::unique_ptr<DescriptorSetResource>> result;
+
+            // Create pool
+            auto pool = m_reflection.createDescriptorPool(m_device);
+            if (!pool) {
+                return result;
+            }
+
+            // Find the max set number used in the shaders
+            uint32_t maxSet = 0;
+            for (const auto& binding : m_reflection.getResourceBindings()) {
+                maxSet = std::max(maxSet, binding.set);
+            }
+
+            // Create layouts for each set
+            std::vector<std::unique_ptr<DescriptorSetLayoutResource>> layouts;
+            std::vector<VkDescriptorSetLayout> rawLayouts;
+
+			Logger::get().info("Creating descriptor sets for {} sets", maxSet + 1);
+
+            for (uint32_t i = 0; i <= maxSet; i++) {
+                auto layout = m_reflection.createDescriptorSetLayout(m_device, i);
+                if (layout != nullptr) {
+                    rawLayouts.push_back(layout->handle());
+                    layouts.push_back(std::move(layout));
+                }
+                else {
+                    // Create an empty layout for this set
+                    Logger::get().info("Creating empty descriptor set layout for set {}", i);
+
+                    VkDescriptorSetLayoutCreateInfo emptyLayoutInfo{};
+                    emptyLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+                    emptyLayoutInfo.bindingCount = 0;
+
+                    auto emptyLayout = std::make_unique<DescriptorSetLayoutResource>(m_device);
+                    if (vkCreateDescriptorSetLayout(m_device, &emptyLayoutInfo, nullptr, &emptyLayout->handle()) != VK_SUCCESS) {
+                        Logger::get().error("Failed to create empty descriptor set layout for set {}", i);
+                        continue;
+                    }
+
+                    rawLayouts.push_back(emptyLayout->handle());
+                    layouts.push_back(std::move(emptyLayout));
+                }
+            }
+
+            if (rawLayouts.empty()) {
+                return result;  // No descriptor sets needed
+            }
+
+            // Allocate descriptor sets
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = pool->handle();
+            allocInfo.descriptorSetCount = static_cast<uint32_t>(rawLayouts.size());
+            allocInfo.pSetLayouts = rawLayouts.data();
+
+            std::vector<VkDescriptorSet> descriptorSets(rawLayouts.size());
+            if (vkAllocateDescriptorSets(m_device, &allocInfo, descriptorSets.data()) != VK_SUCCESS) {
+                Logger::get().error("Failed to allocate descriptor sets");
+                return result;
+            }
+
+            // Create RAII wrappers
+            for (auto& set : descriptorSets) {
+                result.push_back(std::make_unique<DescriptorSetResource>(m_device, set));
+            }
+
+            // Store for later use when updating
+            m_pool = std::move(pool);
+            m_layouts = std::move(layouts);
+
+            return result;
+        }
+
+        // Update descriptor set for a uniform buffer
+        void updateUniformBuffer(VkDescriptorSet set, uint32_t binding, VkBuffer buffer,
+            VkDeviceSize offset, VkDeviceSize range) {
+            VkDescriptorBufferInfo bufferInfo{};
+            bufferInfo.buffer = buffer;
+            bufferInfo.offset = offset;
+            bufferInfo.range = range;
+
+            VkWriteDescriptorSet descriptorWrite{};
+            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrite.dstSet = set;
+            descriptorWrite.dstBinding = binding;
+            descriptorWrite.dstArrayElement = 0;
+            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrite.descriptorCount = 1;
+            descriptorWrite.pBufferInfo = &bufferInfo;
+
+            vkUpdateDescriptorSets(m_device, 1, &descriptorWrite, 0, nullptr);
+        }
+
+        // Update descriptor set for a combined image sampler
+        void updateCombinedImageSampler(VkDescriptorSet set, uint32_t binding,
+            VkImageView imageView, VkSampler sampler,
+            VkImageLayout imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            VkDescriptorImageInfo imageInfo{};
+            imageInfo.imageLayout = imageLayout;
+            imageInfo.imageView = imageView;
+            imageInfo.sampler = sampler;
+
+            VkWriteDescriptorSet descriptorWrite{};
+            descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrite.dstSet = set;
+            descriptorWrite.dstBinding = binding;
+            descriptorWrite.dstArrayElement = 0;
+            descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            descriptorWrite.descriptorCount = 1;
+            descriptorWrite.pImageInfo = &imageInfo;
+
+            vkUpdateDescriptorSets(m_device, 1, &descriptorWrite, 0, nullptr);
+        }
+
+    private:
+        VkDevice m_device;
+        ShaderReflection& m_reflection;
+        std::unique_ptr<DescriptorPoolResource> m_pool;
+        std::vector<std::unique_ptr<DescriptorSetLayoutResource>> m_layouts;
     };
 
     class DynamicRenderer {
@@ -2649,6 +3359,15 @@ namespace tremor::gfx {
         std::unique_ptr<VulkanResourceManager> res;
         std::unique_ptr<Buffer> m_materialBuffer;
 
+        // Collection of loaded shaders for the current pipeline
+        std::vector<std::shared_ptr<ShaderModule>> m_pipelineShaders;
+
+        // Storage for descriptor set layouts
+        std::vector<std::unique_ptr<DescriptorSetLayoutResource>> m_descriptorSetLayouts;
+
+        // Storage for descriptor sets
+        std::vector<std::unique_ptr<DescriptorSetResource>> m_descriptorSets;
+
 #if _DEBUG
         VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
 #endif
@@ -2719,37 +3438,21 @@ namespace tremor::gfx {
             // Update the buffer data
             m_uniformBuffer->update(&ubo, sizeof(ubo));
 
-            Logger::get().info("Model matrix:\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}",
-                ubo.model[0][0], ubo.model[0][1], ubo.model[0][2], ubo.model[0][3],
-                ubo.model[1][0], ubo.model[1][1], ubo.model[1][2], ubo.model[1][3],
-                ubo.model[2][0], ubo.model[2][1], ubo.model[2][2], ubo.model[2][3],
-                ubo.model[3][0], ubo.model[3][1], ubo.model[3][2], ubo.model[3][3]
-                ); // Similar for view and proj
-
-            Logger::get().info("View matrix:\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}",
-                ubo.view[0][0], ubo.view[0][1], ubo.view[0][2], ubo.view[0][3],
-                ubo.view[1][0], ubo.view[1][1], ubo.view[1][2], ubo.view[1][3],
-                ubo.view[2][0], ubo.view[2][1], ubo.view[2][2], ubo.view[2][3],
-                ubo.view[3][0], ubo.view[3][1], ubo.view[3][2], ubo.view[3][3]
-            ); // Similar for proj and proj
-
-            Logger::get().info("proj matrix:\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}",
-                ubo.proj[0][0], ubo.proj[0][1], ubo.proj[0][2], ubo.proj[0][3],
-                ubo.proj[1][0], ubo.proj[1][1], ubo.proj[1][2], ubo.proj[1][3],
-                ubo.proj[2][0], ubo.proj[2][1], ubo.proj[2][2], ubo.proj[2][3],
-                ubo.proj[3][0], ubo.proj[3][1], ubo.proj[3][2], ubo.proj[3][3]
-            ); // Similar for view and proj
-
         }
-
-        // Add a method to create a light UBO as well
-        struct LightUBO {
-            alignas(16) glm::vec3 direction;
-            alignas(16) glm::vec3 color;
-        };
 
         std::unique_ptr<Buffer> m_lightBuffer;
 
+        // Add this struct to your class
+        struct LightUBO {
+            alignas(16) glm::vec3 position;
+            alignas(16) glm::vec3 color;
+            float ambientStrength;
+            float diffuseStrength;
+            float specularStrength;
+            float shininess;
+        };
+
+        // Add this function to create and initialize the light buffer
         bool createLightBuffer() {
             // Create the light uniform buffer
             VkDeviceSize bufferSize = sizeof(LightUBO);
@@ -2763,52 +3466,38 @@ namespace tremor::gfx {
 
             // Initialize with default light values
             LightUBO light{};
-            light.direction = glm::normalize(glm::vec3(1.0f, -3.0f, -2.0f)); // Light coming from above-right
-            light.color = glm::vec3(1.0f, 1.0f, 1.0f); // White light
+            light.position = glm::vec3(0.0f, 0.0f, 5.0f);  // Light position above and in front
+            light.color = glm::vec3(1.0f, 1.0f, 1.0f);     // White light
+            light.ambientStrength = 0.1f;                  // Subtle ambient light
+            light.diffuseStrength = 0.7f;                  // Strong diffuse component
+            light.specularStrength = 0.5f;                 // Medium specular highlights
+            light.shininess = 32.0f;                       // Moderately focused highlights
 
             m_lightBuffer->update(&light, sizeof(light));
-
+			Logger::get().info("Light buffer created successfully");
             return true;
         }
 
-        void createMaterialUBO() {
-            // Create the uniform buffer for material properties
-            VkDeviceSize uboSize = sizeof(PBRMaterialUBO);
-            m_materialBuffer = std::make_unique<Buffer>(
-                device,
-                physicalDevice,
-                uboSize,
-                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-            );
+        bool updateLight() {
+            static auto startTime = std::chrono::high_resolution_clock::now();
+            auto currentTime = std::chrono::high_resolution_clock::now();
+            float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
-            // Initialize the material data
-            PBRMaterialUBO uboData = {};
 
-            // Set default values
-            uboData.baseColor[0] = 1.0f;  // r
-            uboData.baseColor[1] = 1.0f;  // g
-            uboData.baseColor[2] = 1.0f;  // b
-            uboData.baseColor[3] = 1.0f;  // a
+            LightUBO light{};
+            light.position = glm::vec3(sin(time)*5, 0.0, cos(time)*5);  // Light position above and in front
+            light.color = glm::vec3(1.0f, 1.0f, 1.0f);     // White light
+            light.ambientStrength = 0.1f;                  // Subtle ambient light
+            light.diffuseStrength = 0.7f;                  // Strong diffuse component
+            light.specularStrength = 0.5f;                 // Medium specular highlights
+            light.shininess = 32.0f;                       // Moderately focused highlights
 
-            uboData.metallic = 0.0f;
-            uboData.roughness = 0.5f;
-            uboData.ao = 1.0f;
+            m_lightBuffer->update(&light, sizeof(light));
+            Logger::get().info("Light buffer created successfully");
+            return true;
 
-            uboData.emissive[0] = 0.0f;   // r
-            uboData.emissive[1] = 0.0f;   // g
-            uboData.emissive[2] = 0.0f;   // b
-
-            // Indicate which textures are available
-            uboData.hasAlbedoMap = 1;  // We have an albedo texture
-            uboData.hasNormalMap = 0;  // We don't have these other textures yet
-            uboData.hasMetallicRoughnessMap = 0;
-            uboData.hasAoMap = 0;
-            uboData.hasEmissiveMap = 0;
-
-            // Upload the data to the GPU
-            m_materialBuffer->update(&uboData, uboSize);
         }
+
 
         bool createCommandPool() {
             // Get the graphics queue family index
@@ -2938,39 +3627,99 @@ namespace tremor::gfx {
             size_t m_vertexCount = 0;
         };
 
+        struct BlinnPhongVertex {
+            float position[3];  // XYZ position - location 0
+            float normal[3];    // Normal vector - location 1
+            float texCoord[2];  // UV coordinates - location 3
 
-        struct SimpleVertex {
-    float position[3];   // XYZ position - location 0
-    float texCoord[2];   // UV coordinates - location 3 (to match your existing layout)
+            static VkVertexInputBindingDescription getBindingDescription() {
+                VkVertexInputBindingDescription bindingDescription{};
+                bindingDescription.binding = 0;
+                bindingDescription.stride = sizeof(BlinnPhongVertex);
+                bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+                return bindingDescription;
+            }
 
-    static VkVertexInputBindingDescription getBindingDescription() {
-        VkVertexInputBindingDescription bindingDescription{};
-        bindingDescription.binding = 0;
-        bindingDescription.stride = sizeof(SimpleVertex);
-        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-        return bindingDescription;
-    }
+            static std::array<VkVertexInputAttributeDescription, 3> getAttributeDescriptions() {
+                std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
 
-    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
-        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+                // Position attribute
+                attributeDescriptions[0].binding = 0;
+                attributeDescriptions[0].location = 0;
+                attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+                attributeDescriptions[0].offset = offsetof(BlinnPhongVertex, position);
 
-        // Position attribute
-        attributeDescriptions[0].binding = 0;
-        attributeDescriptions[0].location = 0;
-        attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-        attributeDescriptions[0].offset = offsetof(SimpleVertex, position);
+                // Normal attribute - location 1
+                attributeDescriptions[1].binding = 0;
+                attributeDescriptions[1].location = 1;
+                attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+                attributeDescriptions[1].offset = offsetof(BlinnPhongVertex, normal);
 
-        // Texture coordinate attribute
-        attributeDescriptions[1].binding = 0;
-        attributeDescriptions[1].location = 3;  // Keep location 3 to match your existing code
-        attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
-        attributeDescriptions[1].offset = offsetof(SimpleVertex, texCoord);
+                // Texture coordinate attribute - location 2 (not 3!)
+                attributeDescriptions[2].binding = 0;
+                attributeDescriptions[2].location = 2;
+                attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
+                attributeDescriptions[2].offset = offsetof(BlinnPhongVertex, texCoord);
+                return attributeDescriptions;
+            }
+        };
 
-        return attributeDescriptions;
-    }
-};
+        std::vector<BlinnPhongVertex> createCube() {
+            // Create a cube with proper normals for each face
+            std::vector<BlinnPhongVertex> vertices;
 
-        bool createTriangle() {
+            // Front face (Z+)
+            vertices.push_back({ {-0.5f, -0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ { 0.5f, -0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 0.0f} });
+            vertices.push_back({ { 0.5f,  0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ {-0.5f, -0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ { 0.5f,  0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ {-0.5f,  0.5f,  0.5f}, { 0.0f,  0.0f,  1.0f}, {0.0f, 1.0f} });
+
+            // Back face (Z-)
+            vertices.push_back({ { 0.5f, -0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ {-0.5f, -0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 0.0f} });
+            vertices.push_back({ {-0.5f,  0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ { 0.5f, -0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ {-0.5f,  0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ { 0.5f,  0.5f, -0.5f}, { 0.0f,  0.0f, -1.0f}, {0.0f, 1.0f} });
+
+            // Right face (X+)
+            vertices.push_back({ { 0.5f, -0.5f,  0.5f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ { 0.5f, -0.5f, -0.5f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} });
+            vertices.push_back({ { 0.5f,  0.5f, -0.5f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ { 0.5f, -0.5f,  0.5f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ { 0.5f,  0.5f, -0.5f}, { 1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ { 0.5f,  0.5f,  0.5f}, { 1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} });
+
+            // Left face (X-)
+            vertices.push_back({ {-0.5f, -0.5f, -0.5f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ {-0.5f, -0.5f,  0.5f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 0.0f} });
+            vertices.push_back({ {-0.5f,  0.5f,  0.5f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ {-0.5f, -0.5f, -0.5f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ {-0.5f,  0.5f,  0.5f}, {-1.0f,  0.0f,  0.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ {-0.5f,  0.5f, -0.5f}, {-1.0f,  0.0f,  0.0f}, {0.0f, 1.0f} });
+
+            // Top face (Y+)
+            vertices.push_back({ {-0.5f,  0.5f,  0.5f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ { 0.5f,  0.5f,  0.5f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 0.0f} });
+            vertices.push_back({ { 0.5f,  0.5f, -0.5f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ {-0.5f,  0.5f,  0.5f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ { 0.5f,  0.5f, -0.5f}, { 0.0f,  1.0f,  0.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ {-0.5f,  0.5f, -0.5f}, { 0.0f,  1.0f,  0.0f}, {0.0f, 1.0f} });
+
+            // Bottom face (Y-)
+            vertices.push_back({ {-0.5f, -0.5f, -0.5f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ { 0.5f, -0.5f, -0.5f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 0.0f} });
+            vertices.push_back({ { 0.5f, -0.5f,  0.5f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ {-0.5f, -0.5f, -0.5f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 0.0f} });
+            vertices.push_back({ { 0.5f, -0.5f,  0.5f}, { 0.0f, -1.0f,  0.0f}, {1.0f, 1.0f} });
+            vertices.push_back({ {-0.5f, -0.5f,  0.5f}, { 0.0f, -1.0f,  0.0f}, {0.0f, 1.0f} });
+
+            return vertices;
+        }
+
+        bool createCubeMesh() {
             try {
                 // Create command pool for transfers if needed
                 if (!m_transferCommandPool) {
@@ -2988,22 +3737,10 @@ namespace tremor::gfx {
                     Logger::get().info("Transfer command pool created");
                 }
 
-                // Create a quad with texture coordinates instead
-                std::vector<SimpleVertex> vertices = {
-                    // First triangle (counter-clockwise)
-                    // position              texCoord
-                    {{-0.5f, -0.5f, 0.0f},  {0.0f, 0.0f}}, // Bottom left
-                    {{ 0.5f,  0.5f, 0.0f},  {1.0f, 1.0f}}, // Top right
-                    {{-0.5f,  0.5f, 0.0f},  {0.0f, 1.0f}}, // Top left
+                // Create a cube with proper normals
+                std::vector<BlinnPhongVertex> vertices = createCube();
 
-                    // Second triangle (counter-clockwise) 
-                    {{-0.5f, -0.5f, 0.0f},  {0.0f, 0.0f}}, // Bottom left
-                    {{ 0.5f, -0.5f, 0.0f},  {1.0f, 0.0f}}, // Bottom right
-                    {{ 0.5f,  0.5f, 0.0f},  {1.0f, 1.0f}}, // Top right
-                };
-
-
-                // Create vertex buffer with HOST_VISIBLE memory
+                // Create vertex buffer
                 VkDeviceSize vertexBufferSize = sizeof(vertices[0]) * vertices.size();
 
                 // Create buffer
@@ -3035,7 +3772,7 @@ namespace tremor::gfx {
                 allocInfo.allocationSize = memRequirements.size;
                 allocInfo.memoryTypeIndex = memoryTypeIndex;
 
-                VkDeviceMemory vertexBufferMemory;
+                VkDeviceMemory vertexBufferMemory;  // This was missing!
                 if (vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS) {
                     vkDestroyBuffer(device, vertexBufferHandle, nullptr);
                     Logger::get().error("Failed to allocate vertex buffer memory");
@@ -3064,16 +3801,15 @@ namespace tremor::gfx {
 
                 // Store in member variables
                 m_vertexBuffer = std::make_unique<VertexBufferSimple>(device, vertexBufferHandle, vertexBufferMemory, vertices.size());
-                Logger::get().info("Vertex buffer created successfully with {} vertices", vertices.size());
+                Logger::get().info("Cube vertex buffer created successfully with {} vertices", vertices.size());
 
                 return true;
             }
             catch (const std::exception& e) {
-                Logger::get().error("Exception in createTriangle: {}", e.what());
+                Logger::get().error("Exception in createCubeMesh: {}", e.what());
                 return false;
             }
         }
-
         // Add a simple vertex buffer class
         bool createFramebuffers() {
             // Get swapchain image count
@@ -3289,9 +4025,11 @@ namespace tremor::gfx {
             throw std::runtime_error("Failed to find supported depth format");
         }
 
+
         void beginFrame() override {
 
             updateUniformBuffer();
+            updateLight();
 
             // Wait for previous frame to finish
             if (m_inFlightFences.size() > 0) {
@@ -3555,12 +4293,11 @@ private:
             }
 
             sm = std::make_unique<ShaderManager>(vkDevice.get()->device());
-            createTriangle();
+            createCubeMesh();
 			createTestTexture();            
-            createMaterialUBO();
 
-			createPBRDescriptorSetLayout();
-            createDescriptorSet();
+			createDescriptorSetLayouts();
+            createAndUpdateDescriptorSets();
 
             createGraphicsPipeline();
             createSyncObjects();
@@ -4188,309 +4925,631 @@ private:
 
             vkFreeCommandBuffers(device, *m_commandPool, 1, &commandBuffer);
         }
+        bool createDescriptorSetLayouts() {
+            // Get the combined reflection data
+            ShaderReflection combinedReflection;
 
-        bool createPBRDescriptorSetLayout() {
-            // Just two bindings - UBO and texture
-            std::array<VkDescriptorSetLayoutBinding, 2> bindings = {
-                // Binding 0: UBO for vertex shader
-                VkDescriptorSetLayoutBinding{
-                    0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr
-                },
-                // Binding 1: Texture sampler
-                VkDescriptorSetLayoutBinding{
-                    1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr
+            // Add all your shaders
+            for (const auto& shader : m_pipelineShaders) {
+                const ShaderReflection* reflection = shader->getReflection();
+                if (reflection) {
+                    combinedReflection.merge(*reflection);
                 }
-            };
-
-            VkDescriptorSetLayoutCreateInfo layoutInfo{};
-            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-            layoutInfo.pBindings = bindings.data();
-
-            m_descriptorSetLayout = std::make_unique<DescriptorSetLayoutResource>(device);
-            if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_descriptorSetLayout->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create descriptor set layout");
-                return false;
             }
 
-            // Create the pipeline layout
-            VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            pipelineLayoutInfo.setLayoutCount = 1;
-            pipelineLayoutInfo.pSetLayouts = &m_descriptorSetLayout->handle();
+            // Find highest set number to determine how many layouts to create
+            uint32_t maxSetNumber = 0;
+            for (const auto& binding : combinedReflection.getResourceBindings()) {
+                maxSetNumber = std::max(maxSetNumber, binding.set);
+            }
 
-            VkPipelineLayout pipelineLayout;
-            if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+            // Create descriptor set layouts for each set
+            m_descriptorSetLayouts.resize(maxSetNumber + 1);
+            for (uint32_t i = 0; i <= maxSetNumber; i++) {
+                m_descriptorSetLayouts[i] = combinedReflection.createDescriptorSetLayout(device, i);
+                if (!m_descriptorSetLayouts[i]) {
+                    Logger::get().error("Failed to create descriptor set layout for set {}", i);
+                    return false;
+                }
+            }
+
+            // Create pipeline layout using all descriptor set layouts
+            m_pipelineLayout = combinedReflection.createPipelineLayout(device);
+            if (!m_pipelineLayout) {
                 Logger::get().error("Failed to create pipeline layout");
                 return false;
             }
-            m_pipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayout);
 
-            return true;
-        }
-
-        bool createDescriptorSet() {
-            // Create descriptor pool with just what we need
-            std::array<VkDescriptorPoolSize, 2> poolSizes = {
-                VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1},
-                VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}
-            };
-
-            VkDescriptorPoolCreateInfo poolInfo{};
-            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-            poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-            poolInfo.pPoolSizes = poolSizes.data();
-            poolInfo.maxSets = 1;
-
-            m_descriptorPool = std::make_unique<DescriptorPoolResource>(device);
-            if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_descriptorPool->handle()) != VK_SUCCESS) {
+            // Create descriptor pool sized appropriately based on reflection
+            m_descriptorPool = combinedReflection.createDescriptorPool(device);
+            if (!m_descriptorPool) {
                 Logger::get().error("Failed to create descriptor pool");
                 return false;
             }
 
-            // Allocate descriptor set
+            return true;
+        }
+
+        bool createAndUpdateDescriptorSets() {
+            // Get the combined reflection data again (or store it from before)
+            ShaderReflection combinedReflection;
+            // ... add shaders to reflection ...
+
+            // Allocate descriptor sets for all layouts
+            std::vector<VkDescriptorSetLayout> rawLayouts;
+            for (const auto& layout : m_descriptorSetLayouts) {
+                if (layout) {
+                    rawLayouts.push_back(layout->handle());
+                }
+            }
+
+            if (rawLayouts.empty()) {
+                Logger::get().warning("No descriptor layouts found");
+                return true; // Not an error, just no descriptors needed
+            }
+
             VkDescriptorSetAllocateInfo allocInfo{};
             allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
             allocInfo.descriptorPool = *m_descriptorPool;
-            allocInfo.descriptorSetCount = 1;
-            allocInfo.pSetLayouts = &m_descriptorSetLayout->handle();
+            allocInfo.descriptorSetCount = static_cast<uint32_t>(rawLayouts.size());
+            allocInfo.pSetLayouts = rawLayouts.data();
 
-            VkDescriptorSet descriptorSetHandle = VK_NULL_HANDLE;
-            if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSetHandle) != VK_SUCCESS) {
-                Logger::get().error("Failed to allocate descriptor set");
+            m_descriptorSets.resize(rawLayouts.size());
+            std::vector<VkDescriptorSet> rawSets(rawLayouts.size());
+
+            if (vkAllocateDescriptorSets(device, &allocInfo, rawSets.data()) != VK_SUCCESS) {
+                Logger::get().error("Failed to allocate descriptor sets");
                 return false;
             }
 
-            m_descriptorSet = std::make_unique<DescriptorSetResource>(device, descriptorSetHandle);
+            // Create RAII wrappers
+            for (size_t i = 0; i < rawSets.size(); i++) {
+                m_descriptorSets[i] = std::make_unique<DescriptorSetResource>(device, rawSets[i]);
+            }
 
-            // Update the descriptor set
-            // 1. UBO descriptor
-            VkDescriptorBufferInfo uboInfo{};
-            uboInfo.buffer = m_uniformBuffer->getBuffer();
-            uboInfo.offset = 0;
-            uboInfo.range = sizeof(UniformBufferObject);
+            // Update descriptor sets based on reflection data
+            std::vector<VkWriteDescriptorSet> descriptorWrites;
+            std::vector<VkDescriptorBufferInfo> bufferInfos;
+            std::vector<VkDescriptorImageInfo> imageInfos;
 
-            // 2. Texture descriptor
-            VkDescriptorImageInfo imageInfo{};
-            imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            imageInfo.imageView = *m_missingTextureImageView;
-            imageInfo.sampler = *m_textureSampler;
+            // Process UBOs
+            for (const auto& ubo : combinedReflection.getUniformBuffers()) {
+                // Find the correct buffer based on UBO name
+                VkBuffer buffer = VK_NULL_HANDLE;
+                VkDeviceSize range = 0;
 
-            // Prepare descriptor writes
-            std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+                if (ubo.name == "UniformBufferObject") {
+                    buffer = m_uniformBuffer->getBuffer();
+                    range = sizeof(UniformBufferObject);
+                }
+                else if (ubo.name == "LightUBO") {
+                    buffer = m_lightBuffer->getBuffer();
+                    range = sizeof(LightUBO);
+                }
+                else {
+                    Logger::get().warning("Unknown UBO: {}", ubo.name);
+                    continue;
+                }
 
-            // UBO at binding 0
-            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[0].dstSet = *m_descriptorSet;
-            descriptorWrites[0].dstBinding = 0;
-            descriptorWrites[0].dstArrayElement = 0;
-            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrites[0].descriptorCount = 1;
-            descriptorWrites[0].pBufferInfo = &uboInfo;
+                // Setup buffer info and descriptor write
+                VkDescriptorBufferInfo bufferInfo{};
+                bufferInfo.buffer = buffer;
+                bufferInfo.offset = 0;
+                bufferInfo.range = range;
+                bufferInfos.push_back(bufferInfo);
 
-            // Texture at binding 1
-            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[1].dstSet = *m_descriptorSet;
-            descriptorWrites[1].dstBinding = 1;
-            descriptorWrites[1].dstArrayElement = 0;
-            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrites[1].descriptorCount = 1;
-            descriptorWrites[1].pImageInfo = &imageInfo;
+                VkWriteDescriptorSet write{};
+                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                write.dstSet = *m_descriptorSets[ubo.set];
+                write.dstBinding = ubo.binding;
+                write.dstArrayElement = 0;
+                write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                write.descriptorCount = 1;
+                write.pBufferInfo = &bufferInfos.back();
+                descriptorWrites.push_back(write);
+            }
+
+            // Process samplers
+            for (const auto& binding : combinedReflection.getResourceBindings()) {
+                if (binding.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+                    // Setup image info
+                    VkDescriptorImageInfo imageInfo{};
+                    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+                    // Choose appropriate texture based on binding name or other criteria
+                    imageInfo.imageView = *m_missingTextureImageView; // Default
+                    imageInfo.sampler = *m_textureSampler;
+                    imageInfos.push_back(imageInfo);
+
+                    VkWriteDescriptorSet write{};
+                    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    write.dstSet = *m_descriptorSets[binding.set];
+                    write.dstBinding = binding.binding;
+                    write.dstArrayElement = 0;
+                    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    write.descriptorCount = 1;
+                    write.pImageInfo = &imageInfos.back();
+                    descriptorWrites.push_back(write);
+                }
+            }
 
             // Update all descriptors at once
-            vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+            if (!descriptorWrites.empty()) {
+                vkUpdateDescriptorSets(device,
+                    static_cast<uint32_t>(descriptorWrites.size()),
+                    descriptorWrites.data(), 0, nullptr);
+            }
 
-            Logger::get().info("Descriptor set created and updated successfully");
             return true;
         }
+
         bool createGraphicsPipeline() {
-            // 1. Load shaders
-            // For now, let's create simple vertex and fragment shaders
-            auto vertShader = sm.get()->loadShader("shaders/pbr.vert");
+            try {
+                // ===== 1. LOAD SHADERS =====
+                Logger::get().info("Loading and compiling shaders...");
+                m_pipelineShaders.clear();
 
-            auto fragShader = sm.get()->loadShader("shaders/pbr.frag");
+                auto vertShader = sm->loadShader("shaders/pbr.vert");
+                if (!vertShader) {
+                    Logger::get().error("Failed to load vertex shader: shaders/pbr.vert");
+                    return false;
+                }
 
+                auto fragShader = sm->loadShader("shaders/pbr.frag");
+                if (!fragShader) {
+                    Logger::get().error("Failed to load fragment shader: shaders/pbr.frag");
+                    return false;
+                }
 
-            if (!vertShader || !fragShader) {
-                Logger::get().error("Failed to load shader modules");
+                m_pipelineShaders.push_back(vertShader);
+                m_pipelineShaders.push_back(fragShader);
+
+                // ===== 2. PREPARE SHADER STAGES =====
+                std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+                shaderStages.reserve(m_pipelineShaders.size());
+
+                for (const auto& shader : m_pipelineShaders) {
+                    shaderStages.push_back(shader->createShaderStageInfo());
+                }
+
+                // ===== 3. EXTRACT REFLECTION DATA =====
+                Logger::get().info("Extracting shader reflection data...");
+                ShaderReflection combinedReflection;
+
+                for (const auto& shader : m_pipelineShaders) {
+                    const ShaderReflection* reflection = shader->getReflection();
+                    if (reflection) {
+                        combinedReflection.merge(*reflection);
+                    }
+                }
+
+                // ===== 4. CREATE DESCRIPTOR SET LAYOUTS =====
+                Logger::get().info("Creating descriptor set layouts...");
+                uint32_t maxSetNumber = 0;
+
+                for (const auto& binding : combinedReflection.getResourceBindings()) {
+                    maxSetNumber = std::max(maxSetNumber, binding.set);
+                }
+
+                Logger::get().info("Shader requires {} descriptor sets", maxSetNumber + 1);
+                m_descriptorSetLayouts.clear();
+                m_descriptorSetLayouts.resize(maxSetNumber + 1);
+
+                std::vector<VkDescriptorSetLayout> rawSetLayouts;
+                rawSetLayouts.reserve(maxSetNumber + 1);
+
+                for (uint32_t i = 0; i <= maxSetNumber; i++) {
+                    auto layout = combinedReflection.createDescriptorSetLayout(device, i);
+                    if (layout) {
+                        Logger::get().info("Created layout for set {} with bindings", i);
+                        m_descriptorSetLayouts[i] = std::move(layout);
+                        rawSetLayouts.push_back(m_descriptorSetLayouts[i]->handle());
+                    }
+                    else {
+                        // Create empty layout
+                        Logger::get().info("Creating empty layout for set {}", i);
+                        VkDescriptorSetLayoutCreateInfo emptyInfo{};
+                        emptyInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+                        emptyInfo.bindingCount = 0;
+
+                        auto emptyLayout = std::make_unique<DescriptorSetLayoutResource>(device);
+                        VkResult result = vkCreateDescriptorSetLayout(device, &emptyInfo, nullptr, &emptyLayout->handle());
+                        if (result != VK_SUCCESS) {
+                            Logger::get().error("Failed to create empty descriptor set layout: {}", static_cast<int>(result));
+                            return false;
+                        }
+
+                        m_descriptorSetLayouts[i] = std::move(emptyLayout);
+                        rawSetLayouts.push_back(m_descriptorSetLayouts[i]->handle());
+                    }
+                }
+
+                // ===== 5. CREATE PIPELINE LAYOUT =====
+                Logger::get().info("Creating pipeline layout...");
+                // Set up push constant ranges
+                std::vector<VkPushConstantRange> pushConstantRanges;
+                for (const auto& range : combinedReflection.getPushConstantRanges()) {
+                    VkPushConstantRange vkRange{};
+                    vkRange.stageFlags = range.stageFlags;
+                    vkRange.offset = range.offset;
+                    vkRange.size = range.size;
+                    pushConstantRanges.push_back(vkRange);
+                }
+
+                VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+                pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+                pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(rawSetLayouts.size());
+                pipelineLayoutInfo.pSetLayouts = rawSetLayouts.data();
+                pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size());
+                pipelineLayoutInfo.pPushConstantRanges = pushConstantRanges.empty() ? nullptr : pushConstantRanges.data();
+
+                VkPipelineLayout pipelineLayoutHandle;
+                VkResult layoutResult = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayoutHandle);
+                if (layoutResult != VK_SUCCESS) {
+                    Logger::get().error("Failed to create pipeline layout: {}", static_cast<int>(layoutResult));
+                    return false;
+                }
+
+                m_pipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayoutHandle);
+
+                // ===== 6. CREATE DESCRIPTOR POOL =====
+                Logger::get().info("Creating descriptor pool...");
+                m_descriptorPool = combinedReflection.createDescriptorPool(device);
+                if (!m_descriptorPool) {
+                    Logger::get().error("Failed to create descriptor pool");
+                    return false;
+                }
+
+                // ===== 7. ALLOCATE DESCRIPTOR SETS =====
+                Logger::get().info("Allocating descriptor sets...");
+                if (!rawSetLayouts.empty()) {
+                    // Allocate the sets
+                    VkDescriptorSetAllocateInfo allocInfo{};
+                    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+                    allocInfo.descriptorPool = m_descriptorPool->handle();
+                    allocInfo.descriptorSetCount = static_cast<uint32_t>(rawSetLayouts.size());
+                    allocInfo.pSetLayouts = rawSetLayouts.data();
+
+                    std::vector<VkDescriptorSet> rawSets(rawSetLayouts.size());
+                    VkResult allocResult = vkAllocateDescriptorSets(device, &allocInfo, rawSets.data());
+                    if (allocResult != VK_SUCCESS) {
+                        Logger::get().error("Failed to allocate descriptor sets: {}", static_cast<int>(allocResult));
+                        return false;
+                    }
+
+                    // Clear previous descriptor sets and create new wrappers
+                    m_descriptorSets.clear();
+                    for (auto rawSet : rawSets) {
+                        m_descriptorSets.push_back(std::make_unique<DescriptorSetResource>(device, rawSet));
+                    }
+
+                    // ===== 8. UPDATE DESCRIPTOR SETS =====
+                    Logger::get().info("Updating descriptor sets...");
+
+                    // First, count how many buffer and image infos we'll need for proper allocation
+                    size_t bufferInfoCount = 0;
+                    size_t imageInfoCount = 0;
+
+                    for (const auto& ubo : combinedReflection.getUniformBuffers()) {
+                        if (ubo.name == "UniformBufferObject" || ubo.name == "LightUBO") {
+                            bufferInfoCount++;
+                        }
+                    }
+
+                    for (const auto& binding : combinedReflection.getResourceBindings()) {
+                        if (binding.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+                            imageInfoCount++;
+                        }
+                    }
+
+                    // Pre-allocate all vectors to prevent reallocation during descriptor update
+                    std::vector<VkDescriptorBufferInfo> bufferInfos;
+                    std::vector<VkDescriptorImageInfo> imageInfos;
+                    std::vector<VkWriteDescriptorSet> descriptorWrites;
+
+                    bufferInfos.reserve(bufferInfoCount);
+                    imageInfos.reserve(imageInfoCount);
+                    descriptorWrites.reserve(bufferInfoCount + imageInfoCount);
+
+                    // Process UBOs with stable vector locations
+                    for (const auto& ubo : combinedReflection.getUniformBuffers()) {
+                        VkBuffer buffer = VK_NULL_HANDLE;
+                        VkDeviceSize range = 0;
+
+                        if (ubo.name == "UniformBufferObject") {
+                            if (!m_uniformBuffer) {
+                                Logger::get().warning("UniformBufferObject requested but buffer not created");
+                                continue;
+                            }
+                            buffer = m_uniformBuffer->getBuffer();
+                            range = sizeof(UniformBufferObject);
+                            Logger::get().info("Setting up UBO: {} with size {} bytes", ubo.name, range);
+                        }
+                        else if (ubo.name == "LightUBO") {
+                            if (!m_lightBuffer) {
+                                Logger::get().warning("LightUBO requested but buffer not created");
+                                continue;
+                            }
+                            buffer = m_lightBuffer->getBuffer();
+                            range = sizeof(LightUBO);
+                            Logger::get().info("Setting up UBO: {} with size {} bytes", ubo.name, range);
+                        }
+                        else {
+                            Logger::get().warning("Unknown UBO: {}", ubo.name);
+                            continue;
+                        }
+
+                        if (buffer == VK_NULL_HANDLE) {
+                            Logger::get().warning("Buffer for UBO {} is null, skipping", ubo.name);
+                            continue;
+                        }
+
+                        if (ubo.set >= m_descriptorSets.size()) {
+                            Logger::get().error("UBO references set {} which doesn't exist", ubo.set);
+                            continue;
+                        }
+
+                        // Add buffer info to the STABLE pre-allocated vector
+                        bufferInfos.push_back({
+                            buffer,   // buffer
+                            0,        // offset
+                            range     // range
+                            });
+
+                        // Create write descriptor with STABLE pointer to the buffer info
+                        // This is safe because we pre-allocated the vector capacity
+                        VkWriteDescriptorSet write{};
+                        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                        write.dstSet = m_descriptorSets[ubo.set]->handle();
+                        write.dstBinding = ubo.binding;
+                        write.dstArrayElement = 0;
+                        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                        write.descriptorCount = 1;
+                        write.pBufferInfo = &bufferInfos.back();
+
+                        descriptorWrites.push_back(write);
+                    }
+
+                    // Process image samplers with stable vector locations
+                    for (const auto& binding : combinedReflection.getResourceBindings()) {
+                        if (binding.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+                            if (binding.set >= m_descriptorSets.size()) {
+                                Logger::get().error("Sampler references set {} which doesn't exist", binding.set);
+                                continue;
+                            }
+
+                            if (!m_textureSampler || !m_missingTextureImageView) {
+                                Logger::get().error("Texture sampler or image view is null");
+                                continue;
+                            }
+
+                            // Add image info to the STABLE pre-allocated vector
+                            imageInfos.push_back({
+                                m_textureSampler->handle(),                 // sampler
+                                m_missingTextureImageView->handle(),        // imageView
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL    // imageLayout
+                                });
+
+                            // Create write descriptor with STABLE pointer to the image info
+                            VkWriteDescriptorSet write{};
+                            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                            write.dstSet = m_descriptorSets[binding.set]->handle();
+                            write.dstBinding = binding.binding;
+                            write.dstArrayElement = 0;
+                            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                            write.descriptorCount = 1;
+                            write.pImageInfo = &imageInfos.back();
+
+                            descriptorWrites.push_back(write);
+                        }
+                    }
+
+                    // Update all descriptors at once
+                    if (!descriptorWrites.empty()) {
+                        Logger::get().info("Updating {} descriptor writes", descriptorWrites.size());
+                        vkUpdateDescriptorSets(
+                            device,
+                            static_cast<uint32_t>(descriptorWrites.size()),
+                            descriptorWrites.data(),
+                            0,
+                            nullptr
+                        );
+                    }
+
+                    // Store the first descriptor set for convenience
+                    if (!m_descriptorSets.empty()) {
+                        m_descriptorSet = std::make_unique<DescriptorSetResource>(device, m_descriptorSets[0]->handle());
+                    }
+                }
+
+                // ===== 9. CONFIGURE PIPELINE STATE =====
+                Logger::get().info("Configuring pipeline state...");
+                PipelineState pipelineState;
+
+                // Configure vertex input state
+                auto bindingDescription = BlinnPhongVertex::getBindingDescription();
+                auto attributeDescriptions = BlinnPhongVertex::getAttributeDescriptions();
+
+                pipelineState.vertexInputState = {};
+                pipelineState.vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+                pipelineState.vertexInputState.vertexBindingDescriptionCount = 1;
+                pipelineState.vertexInputState.pVertexBindingDescriptions = &bindingDescription;
+                pipelineState.vertexInputState.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+                pipelineState.vertexInputState.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+                // Configure input assembly
+                pipelineState.inputAssemblyState = {};
+                pipelineState.inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+                pipelineState.inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+                pipelineState.inputAssemblyState.primitiveRestartEnable = VK_FALSE;
+
+                // Configure viewport and scissor state
+                VkViewport viewport{};
+                viewport.x = 0.0f;
+                viewport.y = 0.0f;
+                viewport.width = static_cast<float>(vkSwapchain->extent().width);
+                viewport.height = static_cast<float>(vkSwapchain->extent().height);
+                viewport.minDepth = 0.0f;
+                viewport.maxDepth = 1.0f;
+
+                VkRect2D scissor{};
+                scissor.offset = { 0, 0 };
+                scissor.extent = vkSwapchain->extent();
+
+                pipelineState.viewportState = {};
+                pipelineState.viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+                pipelineState.viewportState.viewportCount = 1;
+                pipelineState.viewportState.pViewports = &viewport;
+                pipelineState.viewportState.scissorCount = 1;
+                pipelineState.viewportState.pScissors = &scissor;
+
+                // Configure rasterization state
+                pipelineState.rasterizationState = {};
+                pipelineState.rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+                pipelineState.rasterizationState.depthClampEnable = VK_FALSE;
+                pipelineState.rasterizationState.rasterizerDiscardEnable = VK_FALSE;
+                pipelineState.rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
+                pipelineState.rasterizationState.lineWidth = 1.0f;
+                pipelineState.rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
+                pipelineState.rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+                pipelineState.rasterizationState.depthBiasEnable = VK_FALSE;
+
+                // Configure multisample state
+                pipelineState.multisampleState = {};
+                pipelineState.multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+                pipelineState.multisampleState.sampleShadingEnable = VK_FALSE;
+                pipelineState.multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+                // Configure depth/stencil state
+                pipelineState.depthStencilState = {};
+                pipelineState.depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+                pipelineState.depthStencilState.depthTestEnable = VK_TRUE;
+                pipelineState.depthStencilState.depthWriteEnable = VK_TRUE;
+                pipelineState.depthStencilState.depthCompareOp = VK_COMPARE_OP_LESS;
+                pipelineState.depthStencilState.depthBoundsTestEnable = VK_FALSE;
+                pipelineState.depthStencilState.stencilTestEnable = VK_FALSE;
+
+                // Configure color blend state
+                VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+                colorBlendAttachment.colorWriteMask =
+                    VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+                colorBlendAttachment.blendEnable = VK_TRUE;
+                colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+                colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+                colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+                colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+                pipelineState.colorBlendState = {};
+                pipelineState.colorBlendState.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+                pipelineState.colorBlendState.logicOpEnable = VK_FALSE;
+                pipelineState.colorBlendState.attachmentCount = 1;
+                pipelineState.colorBlendState.pAttachments = &colorBlendAttachment;
+
+                // Configure dynamic state
+                std::vector<VkDynamicState> dynamicStates = {
+                    VK_DYNAMIC_STATE_VIEWPORT,
+                    VK_DYNAMIC_STATE_SCISSOR
+                };
+
+                pipelineState.dynamicState = {};
+                pipelineState.dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+                pipelineState.dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+                pipelineState.dynamicState.pDynamicStates = dynamicStates.data();
+
+                // ===== 10. CREATE GRAPHICS PIPELINE =====
+                Logger::get().info("Creating graphics pipeline...");
+                if (vkDevice->capabilities().dynamicRendering) {
+                    // Dynamic rendering pipeline
+                    VkPipelineRenderingCreateInfoKHR renderingInfo{};
+                    renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+                    renderingInfo.colorAttachmentCount = 1;
+                    VkFormat colorFormat = vkSwapchain->imageFormat();
+                    renderingInfo.pColorAttachmentFormats = &colorFormat;
+                    renderingInfo.depthAttachmentFormat = m_depthFormat;
+
+                    VkGraphicsPipelineCreateInfo pipelineInfo{};
+                    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+                    pipelineInfo.pNext = &renderingInfo;
+                    pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+                    pipelineInfo.pStages = shaderStages.data();
+                    pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
+                    pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
+                    pipelineInfo.pViewportState = &pipelineState.viewportState;
+                    pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
+                    pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
+                    pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
+                    pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
+                    pipelineInfo.pDynamicState = &pipelineState.dynamicState;
+                    pipelineInfo.layout = m_pipelineLayout->handle();
+                    pipelineInfo.renderPass = VK_NULL_HANDLE; // Not used with dynamic rendering
+                    pipelineInfo.subpass = 0;
+                    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+
+                    VkPipeline graphicsPipeline;
+                    VkResult result = vkCreateGraphicsPipelines(
+                        device,
+                        VK_NULL_HANDLE,
+                        1,
+                        &pipelineInfo,
+                        nullptr,
+                        &graphicsPipeline
+                    );
+
+                    if (result != VK_SUCCESS) {
+                        Logger::get().error("Failed to create graphics pipeline with dynamic rendering: {}", static_cast<int>(result));
+                        return false;
+                    }
+
+                    m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
+                    Logger::get().info("Created dynamic rendering pipeline successfully");
+                }
+                else {
+                    // Traditional render pass pipeline
+                    VkGraphicsPipelineCreateInfo pipelineInfo{};
+                    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+                    pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+                    pipelineInfo.pStages = shaderStages.data();
+                    pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
+                    pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
+                    pipelineInfo.pViewportState = &pipelineState.viewportState;
+                    pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
+                    pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
+                    pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
+                    pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
+                    pipelineInfo.pDynamicState = &pipelineState.dynamicState;
+                    pipelineInfo.layout = m_pipelineLayout->handle();
+                    pipelineInfo.renderPass = rp->handle();
+                    pipelineInfo.subpass = 0;
+                    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+
+                    VkPipeline graphicsPipeline;
+                    VkResult result = vkCreateGraphicsPipelines(
+                        device,
+                        VK_NULL_HANDLE,
+                        1,
+                        &pipelineInfo,
+                        nullptr,
+                        &graphicsPipeline
+                    );
+
+                    if (result != VK_SUCCESS) {
+                        Logger::get().error("Failed to create graphics pipeline with render pass: {}", static_cast<int>(result));
+                        return false;
+                    }
+
+                    m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
+                    Logger::get().info("Created render pass pipeline successfully");
+                }
+
+                return true;
+            }
+            catch (const std::exception& e) {
+                Logger::get().error("Exception in createGraphicsPipeline: {}", e.what());
                 return false;
             }
-
-            // 2. Create shader stages
-            std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
-                vertShader->createShaderStageInfo(),
-                fragShader->createShaderStageInfo()
-            };
-
-
-            // 3. Create pipeline state
-            PipelineState pipelineState;
-
-            // 4. Configure vertex input
-            // For now, let's assume a simple vertex with position and color
-
-            auto bindingDescription = SimpleVertex::getBindingDescription();
-            auto attributeDescriptions = SimpleVertex::getAttributeDescriptions();
-
-            pipelineState.vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-            pipelineState.vertexInputState.vertexBindingDescriptionCount = 1;
-            pipelineState.vertexInputState.pVertexBindingDescriptions = &bindingDescription;
-            pipelineState.vertexInputState.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
-            pipelineState.vertexInputState.pVertexAttributeDescriptions = attributeDescriptions.data();
-
-
-            // 5. Input assembly
-            pipelineState.inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-            pipelineState.inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-            pipelineState.inputAssemblyState.primitiveRestartEnable = VK_FALSE;
-
-            // 6. Viewport and scissor - using dynamic state
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = static_cast<float>(vkSwapchain->extent().width);
-            viewport.height = static_cast<float>(vkSwapchain->extent().height);
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-
-            VkRect2D scissor{};
-            scissor.offset = { 0, 0 };
-            scissor.extent = vkSwapchain->extent();
-
-            pipelineState.viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-            pipelineState.viewportState.viewportCount = 1;
-            pipelineState.viewportState.pViewports = &viewport;
-            pipelineState.viewportState.scissorCount = 1;
-            pipelineState.viewportState.pScissors = &scissor;
-
-            // 7. Rasterization
-            pipelineState.rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-            pipelineState.rasterizationState.depthClampEnable = VK_FALSE;
-            pipelineState.rasterizationState.rasterizerDiscardEnable = VK_FALSE;
-            pipelineState.rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
-            pipelineState.rasterizationState.lineWidth = 1.0f;
-            pipelineState.rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
-            pipelineState.rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-            pipelineState.rasterizationState.depthBiasEnable = VK_FALSE;
-
-            // 8. Multisampling
-            pipelineState.multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-            pipelineState.multisampleState.sampleShadingEnable = VK_FALSE;
-            pipelineState.multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-            // 9. Depth/stencil testing
-            pipelineState.depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-            pipelineState.depthStencilState.depthTestEnable = VK_TRUE;
-            pipelineState.depthStencilState.depthWriteEnable = VK_TRUE;
-            pipelineState.depthStencilState.depthCompareOp = VK_COMPARE_OP_LESS;
-            pipelineState.depthStencilState.depthBoundsTestEnable = VK_FALSE;
-            pipelineState.depthStencilState.stencilTestEnable = VK_FALSE;
-
-            // 10. Color blending
-            VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-            colorBlendAttachment.colorWriteMask =
-                VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-            colorBlendAttachment.blendEnable = VK_TRUE;
-            colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-            colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-            colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-            colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-            colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
-
-
-            pipelineState.colorBlendState.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-            pipelineState.colorBlendState.logicOpEnable = VK_FALSE;
-            pipelineState.colorBlendState.attachmentCount = 1;
-            pipelineState.colorBlendState.pAttachments = &colorBlendAttachment;
-
-            // 11. Dynamic state
-            std::vector<VkDynamicState> dynamicStates = {
-                VK_DYNAMIC_STATE_VIEWPORT,
-                VK_DYNAMIC_STATE_SCISSOR
-            };
-
-            pipelineState.dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-            pipelineState.dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-            pipelineState.dynamicState.pDynamicStates = dynamicStates.data();
-
-            // 12. Create pipeline layout
-            // For simplicity, we'll use an empty layout for now
-
-            // Store pipeline layout in RAII wrapper
-            //m_pipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayout);
-
-            // 13. Create the actual pipeline
-            if (vkDevice->capabilities().dynamicRendering) {
-                // For dynamic rendering, we need to use VkPipelineRenderingCreateInfoKHR
-                VkPipelineRenderingCreateInfoKHR renderingInfo{};
-                renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
-                renderingInfo.colorAttachmentCount = 1;
-                VkFormat colorFormat = vkSwapchain->imageFormat();
-                renderingInfo.pColorAttachmentFormats = &colorFormat;
-                renderingInfo.depthAttachmentFormat = m_depthFormat;
-
-                VkGraphicsPipelineCreateInfo pipelineInfo{};
-                pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-                pipelineInfo.pNext = &renderingInfo; // Link dynamic rendering info
-                pipelineInfo.stageCount = 2;
-                pipelineInfo.pStages = shaderStages.data();
-                pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
-                pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
-                pipelineInfo.pViewportState = &pipelineState.viewportState;
-                pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
-                pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
-                pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
-                pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
-                pipelineInfo.pDynamicState = &pipelineState.dynamicState;
-                pipelineInfo.layout = *m_pipelineLayout;
-                pipelineInfo.renderPass = VK_NULL_HANDLE; // Not used with dynamic rendering
-                pipelineInfo.subpass = 0;
-                pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
-
-                VkPipeline graphicsPipeline;
-                if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
-                    Logger::get().error("Failed to create graphics pipeline with dynamic rendering");
-                    return false;
-                }
-
-                // Store in RAII wrapper
-                m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
-            }
-            else {
-                // Traditional render pass approach
-                VkGraphicsPipelineCreateInfo pipelineInfo{};
-                pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-                pipelineInfo.stageCount = 2;
-                pipelineInfo.pStages = shaderStages.data();
-                pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
-                pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
-                pipelineInfo.pViewportState = &pipelineState.viewportState;
-                pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
-                pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
-                pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
-                pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
-                pipelineInfo.pDynamicState = &pipelineState.dynamicState;
-                pipelineInfo.layout = *m_pipelineLayout;
-                pipelineInfo.renderPass = *rp; // Use the traditional render pass
-                pipelineInfo.subpass = 0;
-                pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
-
-                VkPipeline graphicsPipeline;
-                if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
-                    Logger::get().error("Failed to create graphics pipeline with render pass");
-                    return false;
-                }
-
-                // Store in RAII wrapper
-                m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
-            }
-
-            Logger::get().info("Graphics pipeline created successfully");
-
-
-            return true;
         }
 
         // Texture resources

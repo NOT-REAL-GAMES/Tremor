@@ -214,7 +214,12 @@ public:
     // Accessors
     T& handle() { return m_handle; }
     const T& handle() const { return m_handle; }
-    operator T() const { return m_handle; }
+    operator T() const {
+        if (this == nullptr) {            
+            Logger::get().error("RESOURCE DOES NOT EXIST. FUCK");
+            return nullptr;
+        }
+        return m_handle; }
 
     // Check if valid
     operator bool() const { return m_handle != VK_NULL_HANDLE; }
