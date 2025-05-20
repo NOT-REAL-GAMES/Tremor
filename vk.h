@@ -116,6 +116,646 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
 }
 namespace tremor::gfx { 
 
+    // Forward declaration for camera planes
+    struct Frustum;
+
+    class Camera {
+    public:
+        // Constructors
+        Camera();
+        Camera(float fovDegrees, float aspectRatio, float nearZ, float farZ);
+
+        // World position with 64-bit coordinates for your large world
+        // Stores integer and fractional parts separately for precision
+        struct WorldPosition {
+            glm::i64vec3 integer;       // Integer part (128th mm precision)
+            glm::vec3 fractional;       // Fractional part (0.0-1.0)
+
+            // Helper to get combined position (for relatively close objects)
+            glm::dvec3 getCombined() const {
+                return glm::dvec3(integer) + glm::dvec3(fractional);
+            }
+        };
+
+        // Basic camera properties
+        void setPosition(const WorldPosition& position) { m_position = position; m_viewDirty = true; }
+        void setPosition(const glm::vec3& position);    // Convenience for local space
+
+        void setRotation(const glm::quat& rotation) { m_rotation = rotation; m_viewDirty = true; }
+        void setRotation(float pitch, float yaw, float roll);
+
+        void setFov(float fovDegrees) { m_fovRadians = glm::radians(fovDegrees); m_projDirty = true; }
+        void setAspectRatio(float aspectRatio) { m_aspectRatio = aspectRatio; m_projDirty = true; }
+        void setClipPlanes(float nearZ, float farZ) { m_nearZ = nearZ; m_farZ = farZ; m_projDirty = true; }
+
+        // Camera movement
+        void move(const glm::vec3& delta);             // Move relative to camera orientation
+        void moveWorld(const glm::vec3& delta);        // Move in world coordinates
+        void rotate(float pitchDelta, float yawDelta, float rollDelta = 0.0f);
+
+        // Look at a target (in local space)
+        void lookAt(const glm::vec3& target, const glm::vec3& up = glm::vec3(0.0f, 1.0f, 0.0f));
+
+        // Look at a target (in world space)
+        void lookAt(const WorldPosition& target, const glm::vec3& up = glm::vec3(0.0f, 1.0f, 0.0f));
+
+        // Get current properties
+        const WorldPosition& getPosition() const { return m_position; }
+        glm::vec3 getLocalPosition() const;            // Position relative to origin
+        glm::quat getRotation() const { return m_rotation; }
+
+        float getFovDegrees() const { return glm::degrees(m_fovRadians); }
+        float getFovRadians() const { return m_fovRadians; }
+        float getAspectRatio() const { return m_aspectRatio; }
+        float getNearClip() const { return m_nearZ; }
+        float getFarClip() const { return m_farZ; }
+
+        // Directional vectors
+        glm::vec3 getForward() const;
+        glm::vec3 getRight() const;
+        glm::vec3 getUp() const;
+
+        // Get transformation matrices
+        const glm::mat4& getViewMatrix();
+        const glm::mat4& getProjectionMatrix();
+        const glm::mat4& getViewProjectionMatrix();
+
+        // Get view-space frustum for culling
+        Frustum getViewFrustum();
+
+        // Extract frustum planes for culling
+        void extractFrustumPlanes(glm::vec4 planes[6]);
+
+        // For clustered rendering
+        float getNearPlane() const { return m_nearZ; }
+        float getFarPlane() const { return m_farZ; }
+
+        // Get jittered projection matrix for TAA
+        glm::mat4 getJitteredProjectionMatrix(const glm::vec2& jitter);
+
+        // Update per-frame (handles animations, stabilization, etc.)
+        void update(float deltaTime);
+
+    private:
+        // Camera position and orientation
+        WorldPosition m_position;
+        glm::quat m_rotation;
+
+        // Projection parameters
+        float m_fovRadians;
+        float m_aspectRatio;
+        float m_nearZ;
+        float m_farZ;
+
+        // Cached matrices
+        glm::mat4 m_viewMatrix;
+        glm::mat4 m_projectionMatrix;
+        glm::mat4 m_viewProjectionMatrix;
+
+        // Dirty flags for matrix updates
+        bool m_viewDirty;
+        bool m_projDirty;
+        bool m_vpDirty;
+
+        // Update matrices if needed
+        void updateViewMatrix();
+        void updateProjectionMatrix();
+        void updateViewProjectionMatrix();
+
+        // Handle precision for large world coordinates
+        glm::mat4 calculateViewMatrix();
+
+        // Helper for 64-bit world coordinates
+        void normalizePosition();
+    };
+
+    // Frustum for culling
+    struct Frustum {
+        enum PlaneID {
+            NEAR = 0,
+            FAR,
+            LEFT,
+            RIGHT,
+            TOP,
+            BOTTOM,
+            PLANE_COUNT
+        };
+
+        // Planes stored as ax + by + cz + d = 0 where (a,b,c) is the normal
+        // and d is the distance from origin
+        glm::vec4 planes[PLANE_COUNT];
+
+        // Frustum corners
+        glm::vec3 corners[8];
+
+        // Test methods for culling
+        bool containsPoint(const glm::vec3& point) const;
+        bool containsSphere(const glm::vec3& center, float radius) const;
+        bool containsAABB(const glm::vec3& min, const glm::vec3& max) const;
+
+        // Advanced tests for clustered rendering
+        bool intersectsFrustum(const Frustum& other) const;
+    };
+
+
+
+    Camera::Camera()
+        : m_fovRadians(glm::radians(60.0f))
+        , m_aspectRatio(16.0f / 9.0f)
+        , m_nearZ(0.1f)
+        , m_farZ(1000.0f)
+        , m_viewDirty(true)
+        , m_projDirty(true)
+        , m_vpDirty(true) {
+
+        // Default position at origin
+        m_position.integer = glm::i64vec3(0);
+        m_position.fractional = glm::vec3(0.0f);
+
+        // Default orientation
+        m_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    Camera::Camera(float fovDegrees, float aspectRatio, float nearZ, float farZ)
+        : m_fovRadians(glm::radians(fovDegrees))
+        , m_aspectRatio(aspectRatio)
+        , m_nearZ(nearZ)
+        , m_farZ(farZ)
+        , m_viewDirty(true)
+        , m_projDirty(true)
+        , m_vpDirty(true) {
+
+        // Default position at origin
+        m_position.integer = glm::i64vec3(0);
+        m_position.fractional = glm::vec3(0.0f);
+
+        // Default orientation
+        m_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    void Camera::setPosition(const glm::vec3& position) {
+        Logger::get().info("Camera::setPosition: position={},{},{}",
+            position.x, position.y, position.z);
+        m_position.integer = glm::i64vec3(0);
+        m_position.fractional = position;
+        normalizePosition();
+        m_viewDirty = true;
+    }
+
+    void Camera::setRotation(float pitch, float yaw, float roll) {
+        // Create quaternion from Euler angles (in radians)
+        glm::quat quatPitch = glm::angleAxis(glm::radians(pitch), glm::vec3(1.0f, 0.0f, 0.0f));
+        glm::quat quatYaw = glm::angleAxis(glm::radians(yaw), glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::quat quatRoll = glm::angleAxis(glm::radians(roll), glm::vec3(0.0f, 0.0f, 1.0f));
+
+        m_rotation = quatYaw * quatPitch * quatRoll;
+        m_viewDirty = true;
+    }
+
+    void Camera::move(const glm::vec3& delta) {
+        // Convert delta to world space
+        glm::vec3 worldDelta = m_rotation * delta;
+
+        // Add to fractional part
+        m_position.fractional += worldDelta;
+
+        // Handle potential overflow/underflow
+        normalizePosition();
+        m_viewDirty = true;
+    }
+
+    void Camera::moveWorld(const glm::vec3& delta) {
+        // Add directly to fractional part
+        m_position.fractional += delta;
+
+        // Handle potential overflow/underflow
+        normalizePosition();
+        m_viewDirty = true;
+    }
+
+    void Camera::rotate(float pitchDelta, float yawDelta, float rollDelta) {
+        // Create delta rotation quaternion
+        glm::quat quatPitch = glm::angleAxis(glm::radians(pitchDelta), glm::vec3(1.0f, 0.0f, 0.0f));
+        glm::quat quatYaw = glm::angleAxis(glm::radians(yawDelta), glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::quat quatRoll = glm::angleAxis(glm::radians(rollDelta), glm::vec3(0.0f, 0.0f, 1.0f));
+
+        // Apply rotation (yaw * pitch * roll order)
+        glm::quat deltaRotation = quatYaw * quatPitch * quatRoll;
+        m_rotation = m_rotation * deltaRotation;
+
+        // Normalize to prevent drift
+        m_rotation = glm::normalize(m_rotation);
+        m_viewDirty = true;
+    }
+
+    void Camera::lookAt(const glm::vec3& target, const glm::vec3& up) {
+        // Get current position in local space
+        glm::vec3 pos = getLocalPosition();
+
+        // Calculate view matrix directly
+        glm::mat4 view = glm::lookAt(pos, target, up);
+
+        // Extract rotation from the view matrix
+        // This is more reliable than trying to calculate the quaternion ourselves
+        glm::mat3 rotMat(view);
+        m_rotation = glm::quat(rotMat);
+
+        // Note: Quaternion from view matrix might need conjugation
+        // depending on how it's used later
+        m_rotation = glm::conjugate(m_rotation);
+
+        m_viewDirty = true;
+
+        Logger::get().info("lookAt: pos={},{},{}, target={},{},{}",
+            pos.x, pos.y, pos.z, target.x, target.y, target.z);
+    }
+
+    void Camera::lookAt(const WorldPosition& target, const glm::vec3& up) {
+        // Calculate world-space vector from camera to target
+        glm::dvec3 targetPos = target.getCombined();
+        glm::dvec3 cameraPos = m_position.getCombined();
+
+        // Convert to float (for local space operations)
+        glm::vec3 direction = glm::normalize(glm::vec3(targetPos - cameraPos));
+
+        // Create rotation quaternion
+        m_rotation = glm::quatLookAt(direction, up);
+        m_viewDirty = true;
+    }
+
+    glm::vec3 Camera::getLocalPosition() const {
+        // Convert 64-bit position to local-space float position
+        // This is a simplified version - a real implementation would
+        // have to consider the reference point for local space
+        glm::vec3 combinedPos;
+
+        if (m_position.integer == glm::i64vec3(0)) {
+            // If integer part is zero, use fractional directly
+            combinedPos = m_position.fractional;
+        }
+        else {
+            // Otherwise use a local-space approximation
+            // (This could be more sophisticated based on a reference point)
+            combinedPos = glm::vec3(
+                static_cast<float>(m_position.integer.x) + m_position.fractional.x,
+                static_cast<float>(m_position.integer.y) + m_position.fractional.y,
+                static_cast<float>(m_position.integer.z) + m_position.fractional.z
+            );
+        }
+        return combinedPos;
+    }
+
+    glm::vec3 Camera::getForward() const {
+        return m_rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+    }
+
+    glm::vec3 Camera::getRight() const {
+        return m_rotation * glm::vec3(1.0f, 0.0f, 0.0f);
+    }
+
+    glm::vec3 Camera::getUp() const {
+        return m_rotation * glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+
+    const glm::mat4& Camera::getViewMatrix() {
+        if (m_viewDirty) {
+            updateViewMatrix();
+            Logger::get().info("View matrix updated");
+        }
+        return m_viewMatrix;
+    }
+
+    const glm::mat4& Camera::getProjectionMatrix() {
+        if (m_projDirty) {
+            updateProjectionMatrix();
+        }
+        return m_projectionMatrix;
+    }
+
+    const glm::mat4& Camera::getViewProjectionMatrix() {
+        if (m_viewDirty || m_projDirty || m_vpDirty) {
+            updateViewProjectionMatrix();
+        }
+        return m_viewProjectionMatrix;
+    }
+
+    void Camera::updateViewMatrix() {
+        m_viewMatrix = calculateViewMatrix();
+
+        Logger::get().info("View Matrix[3]: {}, {}, {}",
+            m_viewMatrix[3][0], m_viewMatrix[3][1], m_viewMatrix[3][2]);
+
+
+
+        m_viewDirty = false;
+        m_vpDirty = true;
+    }
+
+    void Camera::updateProjectionMatrix() {
+        // Use reverse depth for better precision
+        m_projectionMatrix = glm::perspectiveZO(m_fovRadians, m_aspectRatio, m_farZ, m_nearZ);
+
+        // Fix Vulkan's coordinate system (flip Y)
+        m_projectionMatrix[1][1] *= -1;
+
+        m_projDirty = false;
+        m_vpDirty = true;
+    }
+
+    void Camera::updateViewProjectionMatrix() {
+        if (m_viewDirty) {
+            updateViewMatrix();
+        }
+        if (m_projDirty) {
+            updateProjectionMatrix();
+        }
+
+        m_viewProjectionMatrix = m_projectionMatrix * m_viewMatrix;
+        m_vpDirty = false;
+    }
+
+    glm::mat4 Camera::calculateViewMatrix() {
+        glm::vec3 pos = getLocalPosition();
+
+        // Create view matrix based on position and rotation
+        glm::vec3 forward = getForward();
+        glm::vec3 target = pos + forward; // Look in the direction of forward vector
+
+        return glm::lookAt(pos, target, glm::vec3(0.0f, 1.0f, 0.0f));
+    }
+
+
+    void Camera::normalizePosition() {
+        // Handle overflow/underflow in fractional part
+        // If any component is >= 1.0 or < 0.0, adjust integer part
+
+        // X component
+        if (m_position.fractional.x >= 1.0f) {
+            int64_t increment = static_cast<int64_t>(m_position.fractional.x);
+            m_position.integer.x += increment;
+            m_position.fractional.x -= static_cast<float>(increment);
+        }
+        else if (m_position.fractional.x < 0.0f) {
+            int64_t decrement = static_cast<int64_t>(-m_position.fractional.x) + 1;
+            m_position.integer.x -= decrement;
+            m_position.fractional.x += static_cast<float>(decrement);
+        }
+
+        // Y component
+        if (m_position.fractional.y >= 1.0f) {
+            int64_t increment = static_cast<int64_t>(m_position.fractional.y);
+            m_position.integer.y += increment;
+            m_position.fractional.y -= static_cast<float>(increment);
+        }
+        else if (m_position.fractional.y < 0.0f) {
+            int64_t decrement = static_cast<int64_t>(-m_position.fractional.y) + 1;
+            m_position.integer.y -= decrement;
+            m_position.fractional.y += static_cast<float>(decrement);
+        }
+
+        // Z component
+        if (m_position.fractional.z >= 1.0f) {
+            int64_t increment = static_cast<int64_t>(m_position.fractional.z);
+            m_position.integer.z += increment;
+            m_position.fractional.z -= static_cast<float>(increment);
+        }
+        else if (m_position.fractional.z < 0.0f) {
+            int64_t decrement = static_cast<int64_t>(-m_position.fractional.z) + 1;
+            m_position.integer.z -= decrement;
+            m_position.fractional.z += static_cast<float>(decrement);
+        }
+    }
+
+    Frustum Camera::getViewFrustum() {
+        Frustum frustum;
+        extractFrustumPlanes(frustum.planes);
+
+        // Calculate frustum corners
+        // ... (implementation for calculating the 8 corners)
+
+        return frustum;
+    }
+
+    void Camera::extractFrustumPlanes(glm::vec4 planes[6]) {
+        // Get the view-projection matrix
+        const glm::mat4& vp = getViewProjectionMatrix();
+
+        // Extract the six frustum planes
+        // Left plane
+        planes[Frustum::LEFT].x = vp[0][3] + vp[0][0];
+        planes[Frustum::LEFT].y = vp[1][3] + vp[1][0];
+        planes[Frustum::LEFT].z = vp[2][3] + vp[2][0];
+        planes[Frustum::LEFT].w = vp[3][3] + vp[3][0];
+
+        // Right plane
+        planes[Frustum::RIGHT].x = vp[0][3] - vp[0][0];
+        planes[Frustum::RIGHT].y = vp[1][3] - vp[1][0];
+        planes[Frustum::RIGHT].z = vp[2][3] - vp[2][0];
+        planes[Frustum::RIGHT].w = vp[3][3] - vp[3][0];
+
+        // Bottom plane
+        planes[Frustum::BOTTOM].x = vp[0][3] + vp[0][1];
+        planes[Frustum::BOTTOM].y = vp[1][3] + vp[1][1];
+        planes[Frustum::BOTTOM].z = vp[2][3] + vp[2][1];
+        planes[Frustum::BOTTOM].w = vp[3][3] + vp[3][1];
+
+        // Top plane
+        planes[Frustum::TOP].x = vp[0][3] - vp[0][1];
+        planes[Frustum::TOP].y = vp[1][3] - vp[1][1];
+        planes[Frustum::TOP].z = vp[2][3] - vp[2][1];
+        planes[Frustum::TOP].w = vp[3][3] - vp[3][1];
+
+        // Near plane
+        planes[Frustum::NEAR].x = vp[0][3] + vp[0][2];
+        planes[Frustum::NEAR].y = vp[1][3] + vp[1][2];
+        planes[Frustum::NEAR].z = vp[2][3] + vp[2][2];
+        planes[Frustum::NEAR].w = vp[3][3] + vp[3][2];
+
+        // Far plane
+        planes[Frustum::FAR].x = vp[0][3] - vp[0][2];
+        planes[Frustum::FAR].y = vp[1][3] - vp[1][2];
+        planes[Frustum::FAR].z = vp[2][3] - vp[2][2];
+        planes[Frustum::FAR].w = vp[3][3] - vp[3][2];
+
+        // Normalize all planes
+        for (int i = 0; i < Frustum::PLANE_COUNT; i++) {
+            float length = sqrtf(planes[i].x * planes[i].x +
+                planes[i].y * planes[i].y +
+                planes[i].z * planes[i].z);
+            planes[i] /= length;
+        }
+    }
+
+    glm::mat4 Camera::getJitteredProjectionMatrix(const glm::vec2& jitter) {
+        // Create jittered projection matrix for temporal anti-aliasing
+        glm::mat4 proj = glm::perspective(m_fovRadians, m_aspectRatio, m_nearZ, m_farZ);
+
+        // Apply jitter
+        proj[2][0] += jitter.x;
+        proj[2][1] += jitter.y;
+
+        // Fix Vulkan's coordinate system (flip Y)
+        proj[1][1] *= -1;
+
+        return proj;
+    }
+
+    void Camera::update(float deltaTime) {
+        if (m_viewDirty || m_projDirty || m_vpDirty) {
+            if (m_viewDirty) updateViewMatrix();
+            if (m_projDirty) updateProjectionMatrix();
+            if (m_vpDirty) updateViewProjectionMatrix();
+        }
+        Logger::get().info("View matrix: \n {} {} {} {} \n {} {} {} {} \n {} {} {} {} \n {} {} {} {}", m_viewMatrix[0][0], m_viewMatrix[0][1], m_viewMatrix[0][2], m_viewMatrix[0][3], m_viewMatrix[1][0], m_viewMatrix[1][1], m_viewMatrix[1][2], m_viewMatrix[1][3], m_viewMatrix[2][0], m_viewMatrix[2][1], m_viewMatrix[2][2], m_viewMatrix[2][3], m_viewMatrix[3][0], m_viewMatrix[3][1], m_viewMatrix[3][2], m_viewMatrix[3][3]);
+
+        Logger::get().info("Projection matrix: \n {} {} {} {} \n {} {} {} {} \n {} {} {} {} \n {} {} {} {}", m_projectionMatrix[0][0], m_projectionMatrix[0][1], m_projectionMatrix[0][2], m_projectionMatrix[0][3], m_projectionMatrix[1][0], m_projectionMatrix[1][1], m_projectionMatrix[1][2], m_projectionMatrix[1][3], m_projectionMatrix[2][0], m_projectionMatrix[2][1], m_projectionMatrix[2][2], m_projectionMatrix[2][3], m_projectionMatrix[3][0], m_projectionMatrix[3][1], m_projectionMatrix[3][2], m_projectionMatrix[3][3]);
+    }
+
+    // Frustum implementation
+    bool Frustum::containsPoint(const glm::vec3& point) const {
+        for (int i = 0; i < PLANE_COUNT; i++) {
+            if (planes[i].x * point.x +
+                planes[i].y * point.y +
+                planes[i].z * point.z +
+                planes[i].w <= 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool Frustum::containsSphere(const glm::vec3& center, float radius) const {
+        for (int i = 0; i < PLANE_COUNT; i++) {
+            float distance = planes[i].x * center.x +
+                planes[i].y * center.y +
+                planes[i].z * center.z +
+                planes[i].w;
+
+            if (distance <= -radius) {
+                return false;  // Sphere is completely outside this plane
+            }
+        }
+        return true;  // Sphere is at least partially inside all planes
+    }
+
+    bool Frustum::containsAABB(const glm::vec3& min, const glm::vec3& max) const {
+        // For each frustum plane
+        for (int i = 0; i < PLANE_COUNT; i++) {
+            // Find the positive vertex (P-vertex)
+            glm::vec3 p;
+
+            // For each component of the normal, select min or max based on sign
+            p.x = (planes[i].x >= 0.0f) ? min.x : max.x;
+            p.y = (planes[i].y >= 0.0f) ? min.y : max.y;
+            p.z = (planes[i].z >= 0.0f) ? min.z : max.z;
+
+            // If the positive vertex is outside, the box is outside the frustum
+            if (planes[i].x * p.x +
+                planes[i].y * p.y +
+                planes[i].z * p.z +
+                planes[i].w < 0) {
+                return false;
+            }
+        }
+
+        return true;  // AABB is at least partially inside all planes
+    }
+
+    bool Frustum::intersectsFrustum(const Frustum& other) const {
+        // This is a simplified test for cluster vs view frustum
+        // Fully implemented, you'd want to use separating axis theorem
+
+        // First, check if any of the corners of one frustum are inside the other
+        for (int i = 0; i < 8; i++) {
+            if (other.containsPoint(corners[i])) {
+                return true;
+            }
+            if (containsPoint(other.corners[i])) {
+                return true;
+            }
+        }
+
+        // Then check if any of the edges of one frustum intersect any of the faces of the other
+        // (Implementation omitted for brevity)
+
+        return false;
+    }
+
+
+    // Cluster grid dimensions (typically 16x16x24)
+    struct ClusterConfig {
+        uint32_t xSlices;      // Horizontal slice count (e.g., 16)
+        uint32_t ySlices;      // Vertical slice count (e.g., 16)
+        uint32_t zSlices;      // Depth slice count (e.g., 24)
+        float nearPlane;       // Camera near clip distance
+        float farPlane;        // Camera far clip distance
+        bool logarithmicZ;     // Whether to use logarithmic Z distribution
+    };
+
+    // Single light for cluster-based lighting
+    struct ClusterLight {
+        alignas(16) glm::vec3 position;   // World-space position
+        float radius;                     // Light radius/range
+        alignas(16) glm::vec3 color;      // RGB color
+        float intensity;                  // Light intensity/brightness
+        int32_t type;                     // 0=point, 1=spot, 2=area, etc.
+        float spotAngle;                  // Cone angle for spotlights
+        float spotSoftness;               // Spot light edge softness
+        float padding;                    // For alignment
+    };
+
+    // Main cluster data management class
+    class ClusterManager {
+    private:
+        // Configuration
+        ClusterConfig m_config;
+
+        // Device references
+        VkDevice m_device;
+        VkPhysicalDevice m_physicalDevice;
+
+        // Storage buffers
+        std::unique_ptr<Buffer> m_lightBuffer;         // All scene lights
+        std::unique_ptr<Buffer> m_lightIndexBuffer;    // Light indices per cluster
+        std::unique_ptr<Buffer> m_lightGridBuffer;     // Grid with offset/count into index buffer
+        std::unique_ptr<Buffer> m_clusterAABBBuffer;   // AABB for each cluster (debug)
+
+        // Compute pipeline for light assignment
+        std::unique_ptr<PipelineResource> m_computePipeline;
+        std::unique_ptr<PipelineLayoutResource> m_computePipelineLayout;
+        std::unique_ptr<DescriptorSetResource> m_computeDescriptorSet;
+
+        // Light data
+        std::vector<ClusterLight> m_lights;
+        uint32_t m_activeLightCount = 0;
+
+        // Methods for cluster computation
+        void buildClusterFrustums(const Camera& camera);
+        void assignLightsToClustersFrustumMethod(VkCommandBuffer cmdBuffer);
+
+    public:
+        ClusterManager(VkDevice device, VkPhysicalDevice physicalDevice, const ClusterConfig& config);
+        ~ClusterManager();
+
+        // Setup and initialization
+        bool initialize();
+
+        // Light management
+        uint32_t addLight(const ClusterLight& light);
+        void updateLight(uint32_t index, const ClusterLight& light);
+        void removeLight(uint32_t index);
+
+        // Per-frame update
+        void update(VkCommandBuffer cmdBuffer, const Camera& camera);
+
+        // Bind resources for rendering
+        void bindResources(VkCommandBuffer cmdBuffer, VkPipelineLayout pipelineLayout, uint32_t setIndex);
+
+        // Debug visualization
+        void debugDrawClusters(VkCommandBuffer cmdBuffer, const Camera& camera);
+    };
+
+
     const char* getDescriptorTypeName(VkDescriptorType type) {
         switch (type) {
         case VK_DESCRIPTOR_TYPE_SAMPLER: return "SAMPLER";
@@ -3936,7 +4576,7 @@ namespace tremor::gfx {
     class VulkanBackend : public RenderBackend {
     public:
 
-
+        tremor::gfx::Camera cam;
 
 		SwapChain::CreateInfo ci{};
 
@@ -4000,17 +4640,15 @@ namespace tremor::gfx {
             auto currentTime = std::chrono::high_resolution_clock::now();
             float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
+            cam.update(0.0f);
+
             UniformBufferObject ubo{};
 
             // Create a simple model matrix (rotate the quad over time)
             ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(45.0f), glm::vec3(2.0f, 0.0f, 1.0f));
 
             // Create a view matrix (look at the quad from a slight distance)
-            ubo.view = glm::lookAt(
-                glm::vec3(0.0f, 0.0f, 4.0f),  // Move camera further back
-                glm::vec3(0.0f, 0.0f, 0.0f),
-                glm::vec3(0.0f, 1.0f, 0.0f)
-            );
+            ubo.view = cam.getViewMatrix();
 
             // Create a projection matrix (perspective projection)
             // Get the window size for aspect ratio
@@ -4018,10 +4656,8 @@ namespace tremor::gfx {
             SDL_GetWindowSize(w, &width, &height);
             float aspect = width / (float)height;
 
-            ubo.proj = glm::perspective(glm::radians(45.0f), aspect, 0.01f, 100.0f);
+            ubo.proj = cam.getProjectionMatrix();
 
-            // Flip Y coordinate for Vulkan
-            ubo.proj[1][1] *= -1;
 
             // Set camera position (same as view matrix eye position)
             ubo.cameraPos = glm::vec3(0.0f, 0.0f, 4.0f);
@@ -4750,7 +5386,7 @@ namespace tremor::gfx {
                 depthStencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
                 depthStencilAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
                 depthStencilAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                depthStencilAttachment.clearValue.depthStencil = { 1.0f, 0 };
+                depthStencilAttachment.clearValue.depthStencil = { 0.0f, 0 };
 
                 // Add to the renderingInfo
                 renderingInfo.depthStencilAttachment = depthStencilAttachment;
@@ -4774,7 +5410,7 @@ namespace tremor::gfx {
                 // Clear values for each attachment
                 std::array<VkClearValue, 2> clearValues{};
                 clearValues[0].color = { {1.0f, 0.0f, 0.3f, 1.0f} };  // Dark blue
-                clearValues[1].depthStencil = { 1.0f, 0 };
+                clearValues[1].depthStencil = { 0.0f, 0 };
 
                 renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
                 renderPassInfo.pClearValues = clearValues.data();
@@ -4946,6 +5582,11 @@ private:
             createUniformBuffer();
             createLightBuffer();
             createMaterialBuffer();
+
+			cam = tremor::gfx::Camera(60, 16.0f / 9.0f, 0.1f, 100.0f);
+
+            cam.setPosition(glm::vec3(0.0f, 0.0f, 5.0f));
+			cam.lookAt(glm::vec3(0.0f, 0.0f, 0.0f));
 
             if (vkDevice.get()->capabilities().dynamicRendering) {
                 dr = std::make_unique<DynamicRenderer>();
@@ -6042,7 +6683,7 @@ private:
                 pipelineState.depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
                 pipelineState.depthStencilState.depthTestEnable = VK_TRUE;
                 pipelineState.depthStencilState.depthWriteEnable = VK_TRUE;
-                pipelineState.depthStencilState.depthCompareOp = VK_COMPARE_OP_LESS;
+                pipelineState.depthStencilState.depthCompareOp = VK_COMPARE_OP_GREATER;
                 pipelineState.depthStencilState.depthBoundsTestEnable = VK_FALSE;
                 pipelineState.depthStencilState.stencilTestEnable = VK_FALSE;
 

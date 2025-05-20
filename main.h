@@ -269,3 +269,7 @@ private:
 #define TREMOR_LOG_WARNING(...) ::Tremor::Logger::get().warning(__VA_ARGS__)
 #define TREMOR_LOG_ERROR(...) ::Tremor::Logger::get().error(__VA_ARGS__)
 #define TREMOR_LOG_CRITICAL(...) ::Tremor::Logger::get().critical(__VA_ARGS__)
+
+#undef NEAR
+#undef FAR
+//#UNDEF WHEREVER_YOU_ARE
