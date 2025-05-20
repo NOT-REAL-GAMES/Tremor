@@ -1223,6 +1223,8 @@ namespace tremor::gfx {
         ShaderCompiler() {
             m_compiler = std::make_unique<shaderc::Compiler>();
             m_options = std::make_unique<shaderc::CompileOptions>();
+
+            m_options.get()->SetTargetSpirv(shaderc_spirv_version_1_6);
         }
 
         // Compile GLSL or HLSL source to SPIR-V
@@ -3357,7 +3359,6 @@ namespace tremor::gfx {
         SDL_Window* w;
 
         std::unique_ptr<VulkanResourceManager> res;
-        std::unique_ptr<Buffer> m_materialBuffer;
 
         // Collection of loaded shaders for the current pipeline
         std::vector<std::shared_ptr<ShaderModule>> m_pipelineShaders;
@@ -3496,6 +3497,61 @@ namespace tremor::gfx {
             Logger::get().info("Light buffer created successfully");
             return true;
 
+        }
+
+        std::unique_ptr<Buffer> m_materialBuffer;
+
+
+        // Add this struct to your class
+        struct MaterialUBO {
+            alignas(16) glm::vec4 baseColor;
+            float metallic;
+            float roughness;
+            float ao;
+            float emissiveFactor;
+            alignas(16) glm::vec3 emissiveColor;
+            float padding;
+
+            // Flags for available textures
+            int hasAlbedoMap;
+            int hasNormalMap;
+            int hasMetallicRoughnessMap;
+            int hasEmissiveMap;
+            int hasOcclusionMap;
+        };
+
+        // Add this function to create and initialize the material buffer
+        bool createMaterialBuffer() {
+            // Create the material uniform buffer
+            VkDeviceSize bufferSize = sizeof(MaterialUBO);
+            m_materialBuffer = std::make_unique<Buffer>(
+                device,
+                physicalDevice,
+                bufferSize,
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            // Initialize with default PBR material values
+            MaterialUBO material{};
+            material.baseColor = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);  // White base color
+            material.metallic = 0.0f;                                // Non-metallic by default
+            material.roughness = 0.5f;                               // Medium roughness
+            material.ao = 1.0f;                                      // Full ambient occlusion
+            material.emissiveFactor = 0.0f;                          // No emission by default
+            material.emissiveColor = glm::vec3(1.0f, 1.0f, 1.0f);    // White emission color
+            material.padding = 0.0f;                                 // Padding for alignment
+
+            // No textures by default
+            material.hasAlbedoMap = 0;
+            material.hasNormalMap = 0;
+            material.hasMetallicRoughnessMap = 0;
+            material.hasEmissiveMap = 0;
+            material.hasOcclusionMap = 0;
+
+            m_materialBuffer->update(&material, sizeof(material));
+            Logger::get().info("Material buffer created successfully");
+            return true;
         }
 
 
@@ -4284,6 +4340,8 @@ private:
             createDepthResources();
             createUniformBuffer();
             createLightBuffer();
+            createMaterialBuffer();
+
             if (vkDevice.get()->capabilities().dynamicRendering) {
                 dr = std::make_unique<DynamicRenderer>();
                 Logger::get().info("Dynamic renderer created.");
@@ -5026,6 +5084,10 @@ private:
                     buffer = m_lightBuffer->getBuffer();
                     range = sizeof(LightUBO);
                 }
+                else if (ubo.name.find("MaterialUBO") != std::string::npos) {
+                    buffer = m_materialBuffer->getBuffer();
+                    range = sizeof(MaterialUBO);
+                }
                 else {
                     Logger::get().warning("Unknown UBO: {}", ubo.name);
                     continue;
@@ -5048,6 +5110,8 @@ private:
                 write.pBufferInfo = &bufferInfos.back();
                 descriptorWrites.push_back(write);
             }
+
+
 
             // Process samplers
             for (const auto& binding : combinedReflection.getResourceBindings()) {
@@ -5210,6 +5274,9 @@ private:
                     allocInfo.descriptorSetCount = static_cast<uint32_t>(rawSetLayouts.size());
                     allocInfo.pSetLayouts = rawSetLayouts.data();
 
+                    std::vector<std::pair<VkWriteDescriptorSet, size_t>> descriptorWritesWithIndices;
+
+
                     std::vector<VkDescriptorSet> rawSets(rawSetLayouts.size());
                     VkResult allocResult = vkAllocateDescriptorSets(device, &allocInfo, rawSets.data());
                     if (allocResult != VK_SUCCESS) {
@@ -5245,11 +5312,9 @@ private:
                     // Pre-allocate all vectors to prevent reallocation during descriptor update
                     std::vector<VkDescriptorBufferInfo> bufferInfos;
                     std::vector<VkDescriptorImageInfo> imageInfos;
-                    std::vector<VkWriteDescriptorSet> descriptorWrites;
 
                     bufferInfos.reserve(bufferInfoCount);
                     imageInfos.reserve(imageInfoCount);
-                    descriptorWrites.reserve(bufferInfoCount + imageInfoCount);
 
                     // Process UBOs with stable vector locations
                     for (const auto& ubo : combinedReflection.getUniformBuffers()) {
@@ -5274,6 +5339,16 @@ private:
                             range = sizeof(LightUBO);
                             Logger::get().info("Setting up UBO: {} with size {} bytes", ubo.name, range);
                         }
+                        else if (ubo.name == "MaterialUBO") {
+                            if (!m_materialBuffer) {
+                                Logger::get().warning("MaterialUBO requested but buffer not created");
+                                continue;
+                            }
+                            buffer = m_materialBuffer->getBuffer();
+                            range = sizeof(MaterialUBO);
+                            Logger::get().info("Setting up UBO: {} with size {} bytes", ubo.name, range);
+                        }
+
                         else {
                             Logger::get().warning("Unknown UBO: {}", ubo.name);
                             continue;
@@ -5288,6 +5363,8 @@ private:
                             Logger::get().error("UBO references set {} which doesn't exist", ubo.set);
                             continue;
                         }
+
+                        size_t bufferInfoIndex = bufferInfos.size();
 
                         // Add buffer info to the STABLE pre-allocated vector
                         bufferInfos.push_back({
@@ -5305,9 +5382,9 @@ private:
                         write.dstArrayElement = 0;
                         write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
                         write.descriptorCount = 1;
-                        write.pBufferInfo = &bufferInfos.back();
+                        write.pBufferInfo = nullptr;
 
-                        descriptorWrites.push_back(write);
+                        descriptorWritesWithIndices.push_back({ write, bufferInfoIndex });
                     }
 
                     // Process image samplers with stable vector locations
@@ -5322,6 +5399,8 @@ private:
                                 Logger::get().error("Texture sampler or image view is null");
                                 continue;
                             }
+
+                            size_t imageInfoIndex = bufferInfos.size();
 
                             // Add image info to the STABLE pre-allocated vector
                             imageInfos.push_back({
@@ -5338,11 +5417,26 @@ private:
                             write.dstArrayElement = 0;
                             write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                             write.descriptorCount = 1;
-                            write.pImageInfo = &imageInfos.back();
+                            write.pImageInfo = nullptr;
 
-                            descriptorWrites.push_back(write);
+                            descriptorWritesWithIndices.push_back({ write, imageInfoIndex });
                         }
                     }
+
+                    std::vector<VkWriteDescriptorSet> descriptorWrites;
+                    descriptorWrites.reserve(descriptorWritesWithIndices.size());
+
+                    for (const auto& [write, index] : descriptorWritesWithIndices) {
+                        VkWriteDescriptorSet finalWrite = write;
+                        if (write.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+                            finalWrite.pBufferInfo = &bufferInfos[index];
+                        }
+                        else if (write.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+                            finalWrite.pImageInfo = &imageInfos[index];
+                        }
+                        descriptorWrites.push_back(finalWrite);
+                    }
+
 
                     // Update all descriptors at once
                     if (!descriptorWrites.empty()) {
