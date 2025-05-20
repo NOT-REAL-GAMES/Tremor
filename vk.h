@@ -4133,7 +4133,7 @@ namespace tremor::gfx {
             material.padding = 0.0f;                                 // Padding for alignment
 
             // No textures by default
-            material.hasAlbedoMap = 0;
+            material.hasAlbedoMap = 1;
             material.hasNormalMap = 0;
             material.hasMetallicRoughnessMap = 0;
             material.hasEmissiveMap = 0;
