@@ -116,11 +116,50 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
 }
 namespace tremor::gfx { 
 
-
+    const char* getDescriptorTypeName(VkDescriptorType type) {
+        switch (type) {
+        case VK_DESCRIPTOR_TYPE_SAMPLER: return "SAMPLER";
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: return "COMBINED_IMAGE_SAMPLER";
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE: return "SAMPLED_IMAGE";
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: return "STORAGE_IMAGE";
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: return "UNIFORM_TEXEL_BUFFER";
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER: return "STORAGE_TEXEL_BUFFER";
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: return "UNIFORM_BUFFER";
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: return "STORAGE_BUFFER";
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC: return "UNIFORM_BUFFER_DYNAMIC";
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC: return "STORAGE_BUFFER_DYNAMIC";
+        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT: return "INPUT_ATTACHMENT";
+        default: return "UNKNOWN";
+        }
+    }
 
     class ShaderReflection {
     public:
-        std::unordered_map<VkShaderStageFlags, std::unique_ptr<spirv_cross::CompilerGLSL>> m_compilers;
+
+        enum class ShaderStageType {
+            Vertex,
+            Fragment,
+            Compute,
+            Geometry,
+            TessControl,
+            TessEvaluation
+            // Add others as needed
+        };
+
+        // Convert from VkShaderStageFlags to ShaderStageType
+        ShaderStageType getStageType(VkShaderStageFlags flags) {
+            if (flags & VK_SHADER_STAGE_VERTEX_BIT) return ShaderStageType::Vertex;
+            if (flags & VK_SHADER_STAGE_FRAGMENT_BIT) return ShaderStageType::Fragment;
+            if (flags & VK_SHADER_STAGE_COMPUTE_BIT) return ShaderStageType::Compute;
+            if (flags & VK_SHADER_STAGE_GEOMETRY_BIT) return ShaderStageType::Geometry;
+            if (flags & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) return ShaderStageType::TessControl;
+            if (flags & VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT) return ShaderStageType::TessEvaluation;
+            return ShaderStageType::Vertex; // Default
+        }
+
+        // Change the map to use the enum
+        std::unordered_map<VkShaderStageFlags, std::vector<uint32_t>> m_spirvCode;
+
 
         struct ResourceBinding {
             uint32_t set;
@@ -160,54 +199,51 @@ namespace tremor::gfx {
 
 
         // Then update the getUBOMembers method
+        // Then modify getUBOMembers to create a compiler on demand
         std::vector<UBOMember> getUBOMembers(const UniformBuffer& ubo) const {
-            
-            spirv_cross::CompilerGLSL* compiler = nullptr;
-            
+            // Try to find SPIRV code for any stage that this UBO uses
             const VkShaderStageFlags stagesToTry[] = {
                 VK_SHADER_STAGE_VERTEX_BIT,
                 VK_SHADER_STAGE_FRAGMENT_BIT,
-                VK_SHADER_STAGE_COMPUTE_BIT,
-                // Add other stages as needed
+                VK_SHADER_STAGE_COMPUTE_BIT
+                // Add others as needed
             };
-            
+
             for (VkShaderStageFlags stage : stagesToTry) {
-                // Check if this stage is part of the UBO's stages
                 if (ubo.stageFlags & stage) {
-                    auto it = m_compilers.find(stage);
-                    if (it != m_compilers.end()) {
-                        compiler = it->second.get();
-                        break;
+                    auto it = m_spirvCode.find(stage);
+                    if (it != m_spirvCode.end()) {
+                        // Create a compiler for this stage's SPIRV code
+                        spirv_cross::CompilerGLSL compiler(it->second);
+
+                        // Extract UBO members
+                        std::vector<UBOMember> members;
+                        const spirv_cross::SPIRType& type = compiler.get_type(ubo.baseTypeId);
+
+                        for (uint32_t i = 0; i < type.member_types.size(); i++) {
+                            UBOMember member;
+                            member.name = compiler.get_member_name(ubo.baseTypeId, i);
+                            member.offset = compiler.type_struct_member_offset(type, i);
+                            member.size = compiler.get_declared_struct_member_size(type, i);
+
+                            // Get member type information
+                            const spirv_cross::SPIRType& memberType = compiler.get_type(type.member_types[i]);
+                            member.typeInfo.baseType = memberType.basetype;
+                            member.typeInfo.vecSize = memberType.vecsize;
+                            member.typeInfo.columns = memberType.columns;
+                            member.typeInfo.arrayDims = std::vector<uint32_t>(memberType.array.begin(), memberType.array.end());
+
+                            members.push_back(member);
+                        }
+
+                        return members;
                     }
                 }
             }
 
-            if (!compiler) {
-                Logger::get().error("No compiler found for shader stage {}", ubo.stageFlags);
-                return {};
-            }
-
-            std::vector<UBOMember> members;
-
-            const spirv_cross::SPIRType& type = compiler->get_type(ubo.baseTypeId);
-
-            for (uint32_t i = 0; i < type.member_types.size(); i++) {
-                UBOMember member;
-                member.name = compiler->get_member_name(ubo.baseTypeId, i);
-                member.offset = compiler->type_struct_member_offset(type, i);
-                member.size = compiler->get_declared_struct_member_size(type, i);
-
-                // Get member type information
-                const spirv_cross::SPIRType& memberType = compiler->get_type(type.member_types[i]);
-                member.typeInfo.baseType = memberType.basetype;
-                member.typeInfo.vecSize = memberType.vecsize;
-                member.typeInfo.columns = memberType.columns;
-                member.typeInfo.arrayDims = std::vector<uint32_t>(memberType.array.begin(), memberType.array.end());
-                members.push_back(member);
-            }
-
-            return members;
+            return {}; // No compiler found for any relevant stage
         }
+
 
         struct PushConstantRange {
             VkShaderStageFlags stageFlags;
@@ -218,33 +254,38 @@ namespace tremor::gfx {
         ShaderReflection() = default;
 
         void reflect(const std::vector<uint32_t>& spirvCode, VkShaderStageFlags stageFlags) {
+            // Convert flags to enum
+            // Store the SPIRV code for this stage
+            m_spirvCode[stageFlags] = spirvCode;
+
+            // Create a local compiler for reflection (not stored)
             spirv_cross::CompilerGLSL compiler(spirvCode);
             spirv_cross::ShaderResources resources = compiler.get_shader_resources();
-
-
             Logger::get().info("Shader reflection found: {} uniform buffers, {} sampled images",
                 resources.uniform_buffers.size(), resources.sampled_images.size());
 
-            // Print all resources by name
-            for (const auto& resource : resources.sampled_images) {
-                ResourceBinding binding;
-                binding.set = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
-                binding.binding = compiler.get_decoration(resource.id, spv::DecorationBinding);
-                binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-
-                // Check if this is an array
-                spirv_cross::SPIRType type = compiler.get_type(resource.type_id);
-                binding.count = type.array.empty() ? 1 : type.array[0];
-
-                // Ensure stage flags are not zero
-                binding.stageFlags = stageFlags;
-                binding.name = resource.name;
-
-				Logger::get().info("Resource: {} (set {}, binding {})", binding.name, binding.set, binding.binding);
-
-                m_resourceBindings.push_back(binding);
-            }
-
+            // REMOVE THIS ENTIRE SECTION - This is the first occurrence that's causing duplication
+            // ----------------------------------------------------------------------------------
+            // // Print all resources by name
+            // for (const auto& resource : resources.sampled_images) {
+            //     ResourceBinding binding;
+            //     binding.set = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
+            //     binding.binding = compiler.get_decoration(resource.id, spv::DecorationBinding);
+            //     binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            //
+            //     // Check if this is an array
+            //     spirv_cross::SPIRType type = compiler.get_type(resource.type_id);
+            //     binding.count = type.array.empty() ? 1 : type.array[0];
+            //
+            //     // Ensure stage flags are not zero
+            //     binding.stageFlags = stageFlags;
+            //     binding.name = resource.name;
+            //
+            //     Logger::get().info("Resource: {} (set {}, binding {})", binding.name, binding.set, binding.binding);
+            //
+            //     m_resourceBindings.push_back(binding);
+            // }
+            // ----------------------------------------------------------------------------------
 
             // Process uniform buffers
             for (const auto& resource : resources.uniform_buffers) {
@@ -304,7 +345,7 @@ namespace tremor::gfx {
                 m_resourceBindings.push_back(binding);
             }
 
-            // Process combined image samplers
+            // Process combined image samplers - THIS IS THE CORRECT ONE TO KEEP
             for (const auto& resource : resources.sampled_images) {
                 ResourceBinding binding;
                 binding.set = compiler.get_decoration(resource.id, spv::DecorationDescriptorSet);
@@ -317,6 +358,10 @@ namespace tremor::gfx {
 
                 binding.stageFlags = stageFlags;
                 binding.name = resource.name;
+
+                // If you want to keep the logging, move it here
+                Logger::get().info("Resource: {} (set {}, binding {})", binding.name, binding.set, binding.binding);
+
                 m_resourceBindings.push_back(binding);
             }
 
@@ -3345,8 +3390,553 @@ namespace tremor::gfx {
         layoutInfo.pBindings = bindings.data();
     }
 
+    class DescriptorAllocator {
+    public:
+        // Main initialization with sensible defaults for various descriptor types
+        DescriptorAllocator(VkDevice device, uint32_t maxSets = 1000)
+            : m_device(device) {
+            // Create descriptor pool with capacity for all common descriptor types
+            std::vector<VkDescriptorPoolSize> poolSizes = {
+                {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 100},
+                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 100},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 100},
+                {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 100}
+            };
+
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT; 
+            poolInfo.maxSets = maxSets;
+            poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+            poolInfo.pPoolSizes = poolSizes.data();
+
+            vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_pool);
+        }
+
+        ~DescriptorAllocator() {
+            if (m_pool != VK_NULL_HANDLE) {
+                vkDestroyDescriptorPool(m_device, m_pool, nullptr);
+            }
+        }
+
+        // Allocate a descriptor set with the given layout
+        VkDescriptorSet allocate(VkDescriptorSetLayout layout) {
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = m_pool;
+            allocInfo.descriptorSetCount = 1;
+            allocInfo.pSetLayouts = &layout;
+
+            VkDescriptorSet set;
+            VkResult result = vkAllocateDescriptorSets(m_device, &allocInfo, &set);
+
+            if (result == VK_ERROR_OUT_OF_POOL_MEMORY) {
+                // Pool is full, create a new one
+                resetPool();
+                // Try again
+                result = vkAllocateDescriptorSets(m_device, &allocInfo, &set);
+            }
+
+            if (result != VK_SUCCESS) {
+                Logger::get().error("Failed to allocate descriptor set: {}", static_cast<int>(result));
+                return VK_NULL_HANDLE;
+            }
+
+            return set;
+        }
+
+        // Reset the pool to reuse memory
+        void resetPool() {
+            vkResetDescriptorPool(m_device, m_pool, 0);
+        }
+
+    private:
+        VkDevice m_device;
+        VkDescriptorPool m_pool = VK_NULL_HANDLE;
+    };
+
+    // Layout cache to avoid recreating the same layouts
+    class DescriptorLayoutCache {
+    public:
+        DescriptorLayoutCache(VkDevice device) : m_device(device) {}
+
+        ~DescriptorLayoutCache() {
+            for (auto& pair : m_layouts) {
+                vkDestroyDescriptorSetLayout(m_device, pair.second, nullptr);
+            }
+        }
+
+        // Get or create a descriptor set layout
+        VkDescriptorSetLayout getLayout(const std::vector<VkDescriptorSetLayoutBinding>& bindings) {
+            // Create a hash for the bindings
+            size_t hash = 0;
+            for (const auto& binding : bindings) {
+                // Combine hash with binding parameters
+                hash = hash_combine(hash, binding.binding);
+                hash = hash_combine(hash, binding.descriptorType);
+                hash = hash_combine(hash, binding.descriptorCount);
+                hash = hash_combine(hash, binding.stageFlags);
+            }
+
+            // Check if layout already exists
+            auto it = m_layouts.find(hash);
+            if (it != m_layouts.end()) {
+                return it->second;
+            }
+
+            // Create a new layout
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+            layoutInfo.pBindings = bindings.data();
+
+            VkDescriptorSetLayout layout;
+            vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &layout);
+
+            // Cache and return
+            m_layouts[hash] = layout;
+            return layout;
+        }
+
+    private:
+        // Hash combining function
+        size_t hash_combine(size_t seed, size_t value) const {
+            return seed ^ (value + 0x9e3779b9 + (seed << 6) + (seed >> 2));
+        }
+
+        VkDevice m_device;
+        std::unordered_map<size_t, VkDescriptorSetLayout> m_layouts;
+    };
+
+    // High-level descriptor writer for easier updates
+    class DescriptorWriter {
+
+
+    public:        
+        struct WriteInfo {
+            uint32_t binding;
+            VkDescriptorType type;
+            int32_t bufferIndex;
+            int32_t imageIndex;
+        };
+
+        DescriptorLayoutCache& m_layoutCache;
+        DescriptorAllocator& m_allocator;
+        VkDevice m_device;
+
+        DescriptorWriter(DescriptorLayoutCache& layoutCache, DescriptorAllocator& allocator)
+            : m_layoutCache(layoutCache), m_allocator(allocator) {
+        }
+        std::vector<VkDescriptorSetLayoutBinding> m_bindings;
+        std::vector<VkDescriptorBufferInfo> m_bufferInfos;
+        std::vector<VkDescriptorImageInfo> m_imageInfos;
+        std::vector<WriteInfo> m_writes;
+
+
+        // Add buffer binding
+        DescriptorWriter& writeBuffer(uint32_t binding, VkBuffer buffer,
+            VkDeviceSize offset, VkDeviceSize range,
+            VkDescriptorType type, VkShaderStageFlags stageFlags) {
+            // Add binding to layout bindings
+            VkDescriptorSetLayoutBinding layoutBinding{};
+            layoutBinding.binding = binding;
+            layoutBinding.descriptorType = type;
+            layoutBinding.descriptorCount = 1;
+            layoutBinding.stageFlags = stageFlags;
+
+            m_bindings.push_back(layoutBinding);
+
+            // Add write info
+            VkDescriptorBufferInfo bufferInfo{};
+            bufferInfo.buffer = buffer;
+            bufferInfo.offset = offset;
+            bufferInfo.range = range;
+
+            m_bufferInfos.push_back(bufferInfo);
+
+            // Keep track of the write
+            m_writes.push_back({ binding, type, static_cast<int32_t>(m_bufferInfos.size() - 1), -1 });
+
+            return *this;
+        }
+
+        // Add image binding
+        DescriptorWriter& writeImage(uint32_t binding, VkImageView imageView, VkSampler sampler,
+            VkImageLayout layout, VkDescriptorType type,
+            VkShaderStageFlags stageFlags) {
+            // Add binding to layout bindings
+            VkDescriptorSetLayoutBinding layoutBinding{};
+            layoutBinding.binding = binding;
+            layoutBinding.descriptorType = type;
+            layoutBinding.descriptorCount = 1;
+            layoutBinding.stageFlags = stageFlags;
+
+            m_bindings.push_back(layoutBinding);
+
+            // Add write info
+            VkDescriptorImageInfo imageInfo{};
+            imageInfo.imageView = imageView;
+            imageInfo.sampler = sampler;
+            imageInfo.imageLayout = layout;
+
+            m_imageInfos.push_back(imageInfo);
+
+            // Keep track of the write
+            m_writes.push_back({ binding, type, -1, static_cast<int32_t>(m_imageInfos.size() - 1) });
+
+            return *this;
+        }
+
+        // Build and update a descriptor set
+        bool build(VkDescriptorSet& set) {
+            // Create layout from bindings
+            VkDescriptorSetLayout layout = m_layoutCache.getLayout(m_bindings);
+
+            // Allocate the descriptor set
+            set = m_allocator.allocate(layout);
+            if (set == VK_NULL_HANDLE) {
+                return false;
+            }
+
+            // Update the descriptor set
+            return update(set);
+        }
+
+        // Update an existing descriptor set
+        bool update(VkDescriptorSet set) {
+            std::vector<VkWriteDescriptorSet> writes;
+            writes.reserve(m_writes.size());
+
+            for (const auto& write : m_writes) {
+                VkWriteDescriptorSet descriptorWrite{};
+                descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                descriptorWrite.dstSet = set;
+                descriptorWrite.dstBinding = write.binding;
+                descriptorWrite.dstArrayElement = 0;
+                descriptorWrite.descriptorType = write.type;
+                descriptorWrite.descriptorCount = 1;
+
+                if (write.bufferIndex != -1) {
+                    descriptorWrite.pBufferInfo = &m_bufferInfos[write.bufferIndex];
+                }
+                else if (write.imageIndex != -1) {
+                    descriptorWrite.pImageInfo = &m_imageInfos[write.imageIndex];
+                }
+
+                writes.push_back(descriptorWrite);
+            }
+
+            vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+            return true;
+        }
+
+    };
+
+    class DescriptorBuilder {
+    public:
+        DescriptorBuilder(VkDevice device, const ShaderReflection& reflection,
+            std::unique_ptr<DescriptorPoolResource>& pool)
+            : m_device(device), m_reflection(reflection), m_descriptorPool(pool) {
+        }
+
+        void takeDescriptorSets(std::vector<std::unique_ptr<DescriptorSetResource>>& outSets) {
+            outSets.clear();
+            for (auto& set : m_descriptorSets) {
+                outSets.push_back(std::move(set));
+            }
+            m_descriptorSets.clear();
+        }
+
+
+        // Initialize from shader reflection
+        bool buildFromReflection() {
+            // First, create set layouts from reflection
+            createDescriptorSetLayouts();
+
+            // Then allocate descriptor sets
+            if (!allocateDescriptorSets()) {
+                return false;
+            }
+
+            // Finally, update the descriptor sets based on reflection data
+            return updateDescriptorSetsFromReflection();
+        }
+
+        // Get the descriptor sets
+        const std::vector<std::unique_ptr<DescriptorSetResource>>& getDescriptorSets() const {
+            return std::move(m_descriptorSets);
+        }
+
+        // Register a uniform buffer for automatic binding
+        DescriptorBuilder& registerUniformBuffer(const std::string& name, Buffer* buffer,
+            size_t size) {
+            m_registeredBuffers[name] = { buffer, size };
+            return *this;
+        }
+
+        DescriptorBuilder& registerTexture(const std::string& name, ImageViewResource* imageView,
+            SamplerResource* sampler) {
+            m_registeredTextures[name] = { imageView, sampler };
+            return *this;
+        }
+
+        DescriptorBuilder& setDefaultTexture(ImageViewResource* imageView, SamplerResource* sampler) {
+            m_defaultImageView = imageView;
+            m_defaultSampler = sampler;
+            return *this;
+        }
+
+    private:
+        struct BufferInfo {
+            Buffer* buffer;
+            size_t size;
+        };
+
+        struct TextureInfo {
+            ImageViewResource* imageView;
+            SamplerResource* sampler;
+        };
+
+        bool createDescriptorSetLayouts() {
+            // Use reflection data to create layouts
+            std::unordered_map<uint32_t, std::vector<VkDescriptorSetLayoutBinding>> setBindings;
+
+            // Add UBO bindings
+            for (const auto& ubo : m_reflection.getUniformBuffers()) {
+                VkDescriptorSetLayoutBinding binding{};
+                binding.binding = ubo.binding;
+                binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                binding.descriptorCount = 1;
+                binding.stageFlags = ubo.stageFlags;
+
+                setBindings[ubo.set].push_back(binding);
+            }
+
+            // Add resource bindings (textures, etc.)
+            for (const auto& resource : m_reflection.getResourceBindings()) {
+                VkDescriptorSetLayoutBinding binding{};
+                binding.binding = resource.binding;
+                binding.descriptorType = resource.descriptorType;
+                binding.descriptorCount = 1;
+                binding.stageFlags = resource.stageFlags;
+
+                setBindings[resource.set].push_back(binding);
+            }
+
+            // Create layouts for each set
+            m_setLayouts.clear();
+            for (const auto& [set, bindings] : setBindings) {
+                VkDescriptorSetLayoutCreateInfo layoutInfo{};
+                layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+                layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+                layoutInfo.pBindings = bindings.data();
+
+                VkDescriptorSetLayout layout;
+                if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
+                    Logger::get().error("Failed to create descriptor set layout for set {}", set);
+                    return false;
+                }
+
+                m_setLayouts[set] = layout;
+            }
+
+            return true;
+        }
+
+        bool allocateDescriptorSets() {
+            // Skip if no layouts
+            if (m_setLayouts.empty()) {
+                return true;
+            }
+
+            // Approach 1: Only include valid layouts without gaps
+            std::vector<VkDescriptorSetLayout> rawLayouts;
+            std::vector<uint32_t> setIndices;  // Keep track of which set each layout corresponds to
+
+            for (const auto& [set, layout] : m_setLayouts) {
+                if (layout != VK_NULL_HANDLE) {  // Ensure layout is valid
+                    rawLayouts.push_back(layout);
+                    setIndices.push_back(set);
+                }
+            }
+
+            // Allocate descriptor sets for valid layouts
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = m_descriptorPool->handle();
+            allocInfo.descriptorSetCount = static_cast<uint32_t>(rawLayouts.size());
+            allocInfo.pSetLayouts = rawLayouts.data();
+
+            std::vector<VkDescriptorSet> rawSets(rawLayouts.size());
+            if (vkAllocateDescriptorSets(m_device, &allocInfo, rawSets.data()) != VK_SUCCESS) {
+                Logger::get().error("Failed to allocate descriptor sets");
+                return false;
+            }
+
+            // Create descriptor set wrappers, placing them at their correct set indices
+            m_descriptorSets.resize(setIndices.empty() ? 0 : *std::max_element(setIndices.begin(), setIndices.end()) + 1);
+            for (size_t i = 0; i < rawSets.size(); i++) {
+                m_descriptorSets[setIndices[i]] = std::make_unique<DescriptorSetResource>(m_device, rawSets[i]);
+            }
+
+            return true;
+        }
+
+
+        bool updateDescriptorSetsFromReflection() {
+            // Pre-allocate infos
+            std::vector<VkDescriptorBufferInfo> bufferInfos;
+            std::vector<VkDescriptorImageInfo> imageInfos;
+            std::vector<std::pair<VkWriteDescriptorSet, size_t>> descriptorWritesWithIndices;
+
+            // Process UBOs
+            for (const auto& ubo : m_reflection.getUniformBuffers()) {
+                // Find the buffer for this UBO
+                BufferInfo bufferInfo = { nullptr, 0 };
+
+                // Try to find registered buffer by name
+                auto it = m_registeredBuffers.find(ubo.name);
+                if (it != m_registeredBuffers.end()) {
+                    bufferInfo = it->second;
+                }
+                else {
+                    Logger::get().warning("UBO {} not registered, skipping", ubo.name);
+                    continue;
+                }
+
+                if (!bufferInfo.buffer) {
+                    Logger::get().warning("Buffer for UBO {} is null, skipping", ubo.name);
+                    continue;
+                }
+
+                if (ubo.set >= m_descriptorSets.size()) {
+                    Logger::get().error("UBO references set {} which doesn't exist", ubo.set);
+                    continue;
+                }
+
+                // Add buffer info
+                size_t bufferInfoIndex = bufferInfos.size();
+                bufferInfos.push_back({
+                    bufferInfo.buffer->getBuffer(),
+                    0,
+                    bufferInfo.size
+                    });
+
+                // Create write descriptor
+                VkWriteDescriptorSet write{};
+                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                write.dstSet = m_descriptorSets[ubo.set]->handle();
+                write.dstBinding = ubo.binding;
+                write.dstArrayElement = 0;
+                write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                write.descriptorCount = 1;
+                write.pBufferInfo = nullptr; // Will set later
+
+                descriptorWritesWithIndices.push_back({ write, bufferInfoIndex });
+                Logger::get().info("Set up UBO: {} with size {} bytes", ubo.name, bufferInfo.size);
+            }
+
+            // Process resources (textures, etc.)
+            for (const auto& resource : m_reflection.getResourceBindings()) {
+                if (resource.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+                    // Find the texture for this resource
+                    TextureInfo textureInfo = { nullptr, nullptr };
+
+                    // Try to find registered texture by name
+                    auto it = m_registeredTextures.find(resource.name);
+                    if (it != m_registeredTextures.end()) {
+                        textureInfo = it->second;
+                    }
+                    else {
+                        // Use default texture
+                        if (m_defaultImageView && m_defaultSampler) {
+                            textureInfo = { m_defaultImageView, m_defaultSampler };
+                            Logger::get().info("Using default texture for {}", resource.name);
+                        }
+                        else {
+                            Logger::get().warning("Texture {} not registered and no default texture, skipping", resource.name);
+                            continue;
+                        }
+                    }
+
+                    if (!textureInfo.imageView || !textureInfo.sampler) {
+                        Logger::get().warning("Image view or sampler for texture {} is null, skipping", resource.name);
+                        continue;
+                    }
+
+                    if (resource.set >= m_descriptorSets.size()) {
+                        Logger::get().error("Resource references set {} which doesn't exist", resource.set);
+                        continue;
+                    }
+
+                    // Add image info
+                    size_t imageInfoIndex = imageInfos.size();
+                    imageInfos.push_back({
+                        textureInfo.sampler->handle(),
+                        textureInfo.imageView->handle(),
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                        });
+
+                    // Create write descriptor
+                    VkWriteDescriptorSet write{};
+                    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    write.dstSet = m_descriptorSets[resource.set]->handle();
+                    write.dstBinding = resource.binding;
+                    write.dstArrayElement = 0;
+                    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    write.descriptorCount = 1;
+                    write.pImageInfo = nullptr; // Will set later
+
+                    descriptorWritesWithIndices.push_back({ write, imageInfoIndex });
+                    Logger::get().info("Set up texture: {}", resource.name);
+                }
+                // Add support for other descriptor types here as needed
+            }
+
+            // Create final descriptor writes with correct pointers
+            std::vector<VkWriteDescriptorSet> descriptorWrites;
+            descriptorWrites.reserve(descriptorWritesWithIndices.size());
+
+            for (const auto& [write, index] : descriptorWritesWithIndices) {
+                VkWriteDescriptorSet finalWrite = write;
+                if (write.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+                    finalWrite.pBufferInfo = &bufferInfos[index];
+                }
+                else if (write.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+                    finalWrite.pImageInfo = &imageInfos[index];
+                }
+                descriptorWrites.push_back(finalWrite);
+            }
+
+            // Update descriptors
+            if (!descriptorWrites.empty()) {
+                vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(descriptorWrites.size()),
+                    descriptorWrites.data(), 0, nullptr);
+                Logger::get().info("Updated {} descriptor writes", descriptorWrites.size());
+            }
+
+            return true;
+        }
+
+        VkDevice m_device;
+        const ShaderReflection& m_reflection;
+        std::unique_ptr<DescriptorPoolResource>& m_descriptorPool;
+
+        std::unordered_map<uint32_t, VkDescriptorSetLayout> m_setLayouts;
+        std::vector<std::unique_ptr<DescriptorSetResource>> m_descriptorSets;
+
+        std::unordered_map<std::string, BufferInfo> m_registeredBuffers;
+        std::unordered_map<std::string, TextureInfo> m_registeredTextures;
+
+        ImageViewResource* m_defaultImageView = nullptr;
+        SamplerResource* m_defaultSampler = nullptr;
+    };
+
     class VulkanBackend : public RenderBackend {
     public:
+
+
 
 		SwapChain::CreateInfo ci{};
 
@@ -4219,27 +4809,40 @@ namespace tremor::gfx {
 
 
             // Bind the descriptor set for the texture
-            if (m_descriptorSet.get()) {
+            if (!m_descriptorSets.empty()) {
                 try {
                     Logger::get().info("Binding descriptor set");
-                    vkCmdBindDescriptorSets(
-                        m_commandBuffers[currentFrame],
-                        VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        *m_pipelineLayout,
-                        0, // first set
-                        1, // descriptor set count
-                        &m_descriptorSet->handle(),
-                        0, // dynamic offset count
-                        nullptr // dynamic offsets
-                    );
-                    Logger::get().info("Descriptor set bound successfully");
+
+                    // Create a vector of raw descriptor sets
+                    std::vector<VkDescriptorSet> rawSets;
+                    rawSets.reserve(m_descriptorSets.size());
+
+                    for (const auto& set : m_descriptorSets) {
+                        if (set) { // Ensure the pointer is valid
+                            rawSets.push_back(set->handle());
+                        }
+                    }
+
+                    if (!rawSets.empty()) {
+                        vkCmdBindDescriptorSets(
+                            m_commandBuffers[currentFrame],
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            *m_pipelineLayout,
+                            0, // first set
+                            static_cast<uint32_t>(rawSets.size()),
+                            rawSets.data(),
+                            0, // dynamic offset count
+                            nullptr // dynamic offsets
+                        );
+                        Logger::get().info("Descriptor sets bound successfully");
+                    }
                 }
                 catch (const std::exception& e) {
                     Logger::get().error("Exception during descriptor set binding: {}", e.what());
                     return; // Early return to avoid crash
                 }
             }
-            
+
 
             // Draw triangle if buffers are available
             if (m_vertexBuffer) {
@@ -4328,6 +4931,8 @@ private:
 
         bool initialize(SDL_Window* window) override {
         
+            ShaderReflection combinedReflection;
+            m_combinedReflection = combinedReflection;
 
             w = window;
 
@@ -4355,7 +4960,6 @@ private:
 			createTestTexture();            
 
 			createDescriptorSetLayouts();
-            createAndUpdateDescriptorSets();
 
             createGraphicsPipeline();
             createSyncObjects();
@@ -5029,126 +5633,15 @@ private:
         }
 
         bool createAndUpdateDescriptorSets() {
-            // Get the combined reflection data again (or store it from before)
-            ShaderReflection combinedReflection;
-            // ... add shaders to reflection ...
-
-            // Allocate descriptor sets for all layouts
-            std::vector<VkDescriptorSetLayout> rawLayouts;
-            for (const auto& layout : m_descriptorSetLayouts) {
-                if (layout) {
-                    rawLayouts.push_back(layout->handle());
-                }
-            }
-
-            if (rawLayouts.empty()) {
-                Logger::get().warning("No descriptor layouts found");
-                return true; // Not an error, just no descriptors needed
-            }
-
-            VkDescriptorSetAllocateInfo allocInfo{};
-            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            allocInfo.descriptorPool = *m_descriptorPool;
-            allocInfo.descriptorSetCount = static_cast<uint32_t>(rawLayouts.size());
-            allocInfo.pSetLayouts = rawLayouts.data();
-
-            m_descriptorSets.resize(rawLayouts.size());
-            std::vector<VkDescriptorSet> rawSets(rawLayouts.size());
-
-            if (vkAllocateDescriptorSets(device, &allocInfo, rawSets.data()) != VK_SUCCESS) {
-                Logger::get().error("Failed to allocate descriptor sets");
-                return false;
-            }
-
-            // Create RAII wrappers
-            for (size_t i = 0; i < rawSets.size(); i++) {
-                m_descriptorSets[i] = std::make_unique<DescriptorSetResource>(device, rawSets[i]);
-            }
-
-            // Update descriptor sets based on reflection data
-            std::vector<VkWriteDescriptorSet> descriptorWrites;
-            std::vector<VkDescriptorBufferInfo> bufferInfos;
-            std::vector<VkDescriptorImageInfo> imageInfos;
-
-            // Process UBOs
-            for (const auto& ubo : combinedReflection.getUniformBuffers()) {
-                // Find the correct buffer based on UBO name
-                VkBuffer buffer = VK_NULL_HANDLE;
-                VkDeviceSize range = 0;
-
-                if (ubo.name == "UniformBufferObject") {
-                    buffer = m_uniformBuffer->getBuffer();
-                    range = sizeof(UniformBufferObject);
-                }
-                else if (ubo.name == "LightUBO") {
-                    buffer = m_lightBuffer->getBuffer();
-                    range = sizeof(LightUBO);
-                }
-                else if (ubo.name.find("MaterialUBO") != std::string::npos) {
-                    buffer = m_materialBuffer->getBuffer();
-                    range = sizeof(MaterialUBO);
-                }
-                else {
-                    Logger::get().warning("Unknown UBO: {}", ubo.name);
-                    continue;
-                }
-
-                // Setup buffer info and descriptor write
-                VkDescriptorBufferInfo bufferInfo{};
-                bufferInfo.buffer = buffer;
-                bufferInfo.offset = 0;
-                bufferInfo.range = range;
-                bufferInfos.push_back(bufferInfo);
-
-                VkWriteDescriptorSet write{};
-                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                write.dstSet = *m_descriptorSets[ubo.set];
-                write.dstBinding = ubo.binding;
-                write.dstArrayElement = 0;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                write.descriptorCount = 1;
-                write.pBufferInfo = &bufferInfos.back();
-                descriptorWrites.push_back(write);
-            }
-
-
-
-            // Process samplers
-            for (const auto& binding : combinedReflection.getResourceBindings()) {
-                if (binding.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-                    // Setup image info
-                    VkDescriptorImageInfo imageInfo{};
-                    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-                    // Choose appropriate texture based on binding name or other criteria
-                    imageInfo.imageView = *m_missingTextureImageView; // Default
-                    imageInfo.sampler = *m_textureSampler;
-                    imageInfos.push_back(imageInfo);
-
-                    VkWriteDescriptorSet write{};
-                    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                    write.dstSet = *m_descriptorSets[binding.set];
-                    write.dstBinding = binding.binding;
-                    write.dstArrayElement = 0;
-                    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    write.descriptorCount = 1;
-                    write.pImageInfo = &imageInfos.back();
-                    descriptorWrites.push_back(write);
-                }
-            }
-
-            // Update all descriptors at once
-            if (!descriptorWrites.empty()) {
-                vkUpdateDescriptorSets(device,
-                    static_cast<uint32_t>(descriptorWrites.size()),
-                    descriptorWrites.data(), 0, nullptr);
-            }
-
             return true;
         }
 
         bool createGraphicsPipeline() {
             try {
+                m_resourceBindings = m_combinedReflection.getResourceBindings();
+                m_uniformBuffers = m_combinedReflection.getUniformBuffers();
+
+
                 // ===== 1. LOAD SHADERS =====
                 Logger::get().info("Loading and compiling shaders...");
                 m_pipelineShaders.clear();
@@ -5256,6 +5749,13 @@ private:
 
                 m_pipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayoutHandle);
 
+                auto descriptorAllocator = std::make_unique<DescriptorAllocator>(device);
+                auto descriptorLayoutCache = std::make_unique<DescriptorLayoutCache>(device);
+
+                DescriptorWriter writer(*descriptorLayoutCache, *descriptorAllocator);
+
+
+
                 // ===== 6. CREATE DESCRIPTOR POOL =====
                 Logger::get().info("Creating descriptor pool...");
                 m_descriptorPool = combinedReflection.createDescriptorPool(device);
@@ -5264,6 +5764,7 @@ private:
                     return false;
                 }
 
+                /*
                 // ===== 7. ALLOCATE DESCRIPTOR SETS =====
                 Logger::get().info("Allocating descriptor sets...");
                 if (!rawSetLayouts.empty()) {
@@ -5455,6 +5956,28 @@ private:
                         m_descriptorSet = std::make_unique<DescriptorSetResource>(device, m_descriptorSets[0]->handle());
                     }
                 }
+                */
+
+                DescriptorBuilder builder(device, combinedReflection, m_descriptorPool);
+
+                builder.registerUniformBuffer("UniformBufferObject", m_uniformBuffer.get(), sizeof(UniformBufferObject))
+                    .registerUniformBuffer("LightUBO", m_lightBuffer.get(), sizeof(LightUBO))
+                    .registerUniformBuffer("MaterialUBO", m_materialBuffer.get(), sizeof(MaterialUBO))
+                    //.registerTexture("albedoMap", m_albedoTexture, m_textureSampler)
+                    //.registerTexture("normalMap", m_normalTexture, m_textureSampler)
+                    .setDefaultTexture(m_missingTextureImageView.get(), m_textureSampler.get());
+
+                if (!builder.buildFromReflection()) {
+                    Logger::get().error("Failed to build descriptor sets");
+                    return false;
+                }
+
+                builder.takeDescriptorSets(m_descriptorSets);
+
+                
+
+                Logger::get().info("Descriptor sets created successfully");
+
 
                 // ===== 9. CONFIGURE PIPELINE STATE =====
                 Logger::get().info("Configuring pipeline state...");
@@ -5657,6 +6180,55 @@ private:
         std::unique_ptr<DescriptorPoolResource> m_descriptorPool;
         std::unique_ptr<DescriptorSetResource> m_descriptorSet;
 
+        std::vector<tremor::gfx::ShaderReflection::UniformBuffer> m_uniformBuffers;
+        std::vector<tremor::gfx::ShaderReflection::ResourceBinding> m_resourceBindings;
+
+        ShaderReflection m_combinedReflection;
+
+
+        void logAllDescriptorInfo() {
+            Logger::get().info("==== DESCRIPTOR SYSTEM DIAGNOSTIC ====");
+
+            // Log all resource bindings
+            Logger::get().info("Resource Bindings ({})", m_resourceBindings.size());
+            for (size_t i = 0; i < m_resourceBindings.size(); i++) {
+                const auto& binding = m_resourceBindings[i];
+                Logger::get().info("[{}] Set: {}, Binding: {}, Type: {}, Name: {}, Stages: 0x{:X}",
+                    i, binding.set, binding.binding, getDescriptorTypeName(binding.descriptorType), binding.name, binding.stageFlags);
+            }
+
+            // Log UBOs
+            Logger::get().info("Uniform Buffers ({})",  m_uniformBuffers.size());
+            for (const auto& ubo : m_uniformBuffers) {
+                Logger::get().info("UBO: {}, Set: {}, Binding: {}, Size: {}",
+                    ubo.name, ubo.set, ubo.binding, ubo.size);
+            }
+
+            // Log descriptor pool
+            if (m_descriptorPool) {
+                Logger::get().info("Descriptor Pool created: Yes");
+            }
+            else {
+                Logger::get().error("Descriptor Pool created: No");
+            }
+
+            // Log descriptor set layouts
+            Logger::get().info("Descriptor Set Layouts: {}", m_descriptorSetLayouts.size());
+            for (size_t i = 0; i < m_descriptorSetLayouts.size(); i++) {
+                Logger::get().info("Layout {}: {}", i,
+                    m_descriptorSetLayouts[i] ? "Valid" : "NULL");
+            }
+
+            // Log descriptor sets
+            Logger::get().info("Descriptor Sets: {}", m_descriptorSets.size());
+            for (size_t i = 0; i < m_descriptorSets.size(); i++) {
+                Logger::get().info("Set {}: {}", i,
+                    m_descriptorSets[i] ? "Valid" : "NULL");
+            }
+
+            Logger::get().info("===================================");
+        }
+
         // Helper method to load shader modules
         VkShaderModule loadShader(const std::string& filename) {
             // Read the file
@@ -5707,6 +6279,11 @@ private:
         std::unique_ptr<PipelineLayoutResource> m_pipelineLayout;
         std::unique_ptr<PipelineResource> m_graphicsPipeline;
 
+
+
     };
+
+
+    
 
 }

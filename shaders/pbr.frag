@@ -342,4 +342,5 @@ void main() {
     
     // Output final color
     outColor = vec4(finalColor, albedo.a);
+    //outColor = vec4(1.0,0.0,0.4125,1.0);
 }
