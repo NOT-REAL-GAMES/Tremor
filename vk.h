@@ -4003,7 +4003,7 @@ namespace tremor::gfx {
             UniformBufferObject ubo{};
 
             // Create a simple model matrix (rotate the quad over time)
-            ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(45.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(45.0f), glm::vec3(2.0f, 0.0f, 1.0f));
 
             // Create a view matrix (look at the quad from a slight distance)
             ubo.view = glm::lookAt(
