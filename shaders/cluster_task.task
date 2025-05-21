@@ -1,0 +1,77 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+// Define all structures used in buffer blocks
+struct CameraUBO {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    vec4 cameraPos;
+    uvec4 clusterDimensions;
+    vec4 zPlanes;
+    uint numLights;
+    uint numObjects;
+    uint numClusters;
+    uint padding;
+};
+
+struct ClusterData {
+    uint lightOffset;
+    uint lightCount;
+    uint objectOffset;
+    uint objectCount;
+};
+
+// Define the shared payload as a single struct
+struct TaskPayload {
+    uint clusterIndices[32];
+    uint clusterCount;
+    uint workgroupOffset;
+};
+
+// Declare a single taskPayloadShared variable
+taskPayloadSharedEXT TaskPayload payload;
+
+// UBO binding
+layout(set = 0, binding = 0) uniform UBO {
+    CameraUBO ubo;
+};
+
+// Cluster buffer binding
+layout(set = 0, binding = 1) readonly buffer Clusters {
+    ClusterData clusters[];
+};
+
+void main() {
+    // Initialize shared data
+    if (gl_LocalInvocationIndex == 0) {
+        payload.clusterCount = 0;
+        payload.workgroupOffset = gl_WorkGroupID.x * 32;
+    }
+    
+    barrier();
+    
+    // Each thread processes one cluster
+    uint clusterIndex = gl_WorkGroupID.x * 32 + gl_LocalInvocationIndex;
+    
+    // Make sure we don't go out of bounds
+    if (clusterIndex < ubo.numClusters) {
+        // Skip empty clusters
+        if (clusters[clusterIndex].objectCount > 0) {
+            // Add to visible clusters
+            uint index = atomicAdd(payload.clusterCount, 1);
+            if (index < 32) {
+                payload.clusterIndices[index] = clusterIndex;
+            }
+        }
+    }
+    
+    barrier();
+    
+    // Only the first thread emits mesh tasks
+    if (gl_LocalInvocationIndex == 0) {
+        uint meshWorkgroups = min(payload.clusterCount, 32u);
+        EmitMeshTasksEXT(meshWorkgroups, 1, 1);
+    }
+}

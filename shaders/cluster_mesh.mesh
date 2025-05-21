@@ -1,0 +1,144 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout(triangles, max_vertices = 64, max_primitives = 128) out;
+
+// Define all structures used in buffer blocks
+struct CameraUBO {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    vec4 cameraPos;
+    uvec4 clusterDimensions;
+    vec4 zPlanes;
+    uint numLights;
+    uint numObjects;
+    uint numClusters;
+    uint padding;
+};
+
+struct ClusterData {
+    uint lightOffset;
+    uint lightCount;
+    uint objectOffset;
+    uint objectCount;
+};
+
+struct ObjectData {
+    uint meshID;
+    uint materialID;
+    mat4 transform;
+    mat4 prevTransform;
+};
+
+struct LightData {
+    vec3 position;
+    float radius;
+    vec3 color;
+    float intensity;
+    int type;
+    float spotAngle;
+    float spotSoftness;
+    float padding;
+};
+
+// Define the shared payload as a single struct - must match the task shader
+struct TaskPayload {
+    uint clusterIndices[32];
+    uint clusterCount;
+    uint workgroupOffset;
+};
+
+// Declare a single taskPayloadShared variable
+taskPayloadSharedEXT TaskPayload payload;
+
+// Per-vertex outputs
+layout(location = 0) out vec3 outPosition[];
+layout(location = 1) out vec3 outNormal[];
+layout(location = 2) out vec2 outTexCoord[];
+layout(location = 3) out vec4 outColor[];
+layout(location = 4) out flat uint outObjectID[];
+
+// Per-primitive outputs
+perprimitiveEXT layout(location = 5) out uint outMaterialID[];
+
+// Buffer bindings
+layout(set = 0, binding = 0) uniform UBO {
+    CameraUBO ubo;
+};
+
+layout(set = 0, binding = 1) readonly buffer Clusters {
+    ClusterData clusters[];
+};
+
+layout(set = 0, binding = 2) readonly buffer Objects {
+    ObjectData objects[];
+};
+
+layout(set = 0, binding = 3) readonly buffer Lights {
+    LightData lights[];
+};
+
+layout(set = 0, binding = 4) readonly buffer Indices {
+    uint objectIndices[];
+};
+
+layout(set = 0, binding = 5) readonly buffer MeshData {
+    vec4 meshVertexData[];
+    uint meshIndexData[];
+    uvec4 meshInfo[];
+};
+
+// Shared memory for processing
+shared uint s_clusterIndex;
+shared uint s_objectCount;
+
+void main() {
+    // Initialize shared data
+    if (gl_LocalInvocationIndex == 0) {
+        // Get task shader payload data
+        uint taskIndex = gl_WorkGroupID.x;
+        if (taskIndex < payload.clusterCount) {
+            s_clusterIndex = payload.clusterIndices[taskIndex];
+            s_objectCount = clusters[s_clusterIndex].objectCount;
+        } else {
+            s_objectCount = 0;
+        }
+    }
+    
+    barrier();
+    
+    // Early exit if no objects
+    if (s_objectCount == 0) {
+        if (gl_LocalInvocationIndex == 0) {
+            SetMeshOutputsEXT(0, 0);
+        }
+        return;
+    }
+    
+    // Output a simple triangle for demonstration
+    if (gl_LocalInvocationIndex == 0) {
+        // We'll output a single triangle (3 vertices)
+        SetMeshOutputsEXT(3, 1);
+        
+        // Simple triangle vertices
+        gl_MeshVerticesEXT[0].gl_Position = vec4(0.0, 0.5, 0.0, 1.0);
+        gl_MeshVerticesEXT[1].gl_Position = vec4(-0.5, -0.5, 0.0, 1.0);
+        gl_MeshVerticesEXT[2].gl_Position = vec4(0.5, -0.5, 0.0, 1.0);
+        
+        // Define triangle indices
+        gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
+        
+        // Set vertex attributes
+        for (int i = 0; i < 3; i++) {
+            outPosition[i] = vec3(gl_MeshVerticesEXT[i].gl_Position);
+            outNormal[i] = vec3(0.0, 0.0, 1.0);
+            outTexCoord[i] = vec2(float(i & 1), float((i >> 1) & 1));
+            outColor[i] = vec4(1.0, 0.0, 0.0, 1.0);  // Red color
+            outObjectID[i] = 0;
+        }
+        
+        // Set material ID for the triangle
+        outMaterialID[0] = 0;
+    }
+}

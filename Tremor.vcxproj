@@ -176,6 +176,9 @@
   <ItemGroup>
     <None Include="shaders\clussy.mesh" />
     <None Include="shaders\clussy.task" />
+    <None Include="shaders\cluster_frag.frag" />
+    <None Include="shaders\cluster_mesh.mesh" />
+    <None Include="shaders\cluster_task.task" />
     <None Include="shaders\minimal.frag" />
     <None Include="shaders\minimal.mesh" />
     <None Include="shaders\minimal.task" />

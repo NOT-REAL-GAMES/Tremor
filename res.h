@@ -367,8 +367,6 @@ namespace tremor::gfx {
         Texture() = default;
 
         // Friendship with backend for creation
-        friend class VulkanBackend;
-        friend class D3D12Backend;
     };
 
     /*// Buffer resource
@@ -401,8 +399,6 @@ namespace tremor::gfx {
         Shader() = default;
 
         // Friendship with backend for creation
-        friend class VulkanBackend;
-        friend class D3D12Backend;
     };
 
     // Specializations for different backend implementations
@@ -433,7 +429,6 @@ namespace tremor::gfx {
 
         
         // Allow backend to create this resource
-        friend class VulkanBackend;
     };
 
     // Similarly for VulkanBuffer, VulkanShader, etc.

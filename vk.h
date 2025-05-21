@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "main.h"
 #include "RenderBackendBase.h"
 #include "res.h"
@@ -114,664 +114,250 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
         Logger::get().error("Exception during buffer copy: {}", e.what());
     }
 }
-namespace tremor::gfx { 
 
-    // Forward declaration for camera planes
-    struct Frustum;
+namespace tremor::gfx {
 
-    class Camera {
+    class Buffer {
     public:
-        // Constructors
-        Camera();
-        Camera(float fovDegrees, float aspectRatio, float nearZ, float farZ);
+        Buffer() = default;
 
-        // World position with 64-bit coordinates for your large world
-        // Stores integer and fractional parts separately for precision
-        struct WorldPosition {
-            glm::i64vec3 integer;       // Integer part (128th mm precision)
-            glm::vec3 fractional;       // Fractional part (0.0-1.0)
+        Buffer(VkDevice device, VkPhysicalDevice physicalDevice,
+            VkDeviceSize size, VkBufferUsageFlags usage,
+            VkMemoryPropertyFlags memoryProps)
+            : m_device(device), m_size(size) {
 
-            // Helper to get combined position (for relatively close objects)
-            glm::dvec3 getCombined() const {
-                return glm::dvec3(integer) + glm::dvec3(fractional);
+            // Create buffer
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = size;
+            bufferInfo.usage = usage;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+            VkBuffer bufferHandle = VK_NULL_HANDLE;
+            if (vkCreateBuffer(device, &bufferInfo, nullptr, &bufferHandle) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create buffer");
             }
-        };
+            m_buffer = BufferResource(device, bufferHandle);
 
-        // Basic camera properties
-        void setPosition(const WorldPosition& position) { m_position = position; m_viewDirty = true; }
-        void setPosition(const glm::vec3& position);    // Convenience for local space
+            // Get memory requirements
+            VkMemoryRequirements memRequirements;
+            vkGetBufferMemoryRequirements(device, m_buffer, &memRequirements);
 
-        void setRotation(const glm::quat& rotation) { m_rotation = rotation; m_viewDirty = true; }
-        void setRotation(float pitch, float yaw, float roll);
+            // Allocate memory
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memRequirements.size;
+            allocInfo.memoryTypeIndex = findMemoryType(
+                physicalDevice, memRequirements.memoryTypeBits, memoryProps);
 
-        void setFov(float fovDegrees) { m_fovRadians = glm::radians(fovDegrees); m_projDirty = true; }
-        void setAspectRatio(float aspectRatio) { m_aspectRatio = aspectRatio; m_projDirty = true; }
-        void setClipPlanes(float nearZ, float farZ) { m_nearZ = nearZ; m_farZ = farZ; m_projDirty = true; }
+            VkDeviceMemory memoryHandle = VK_NULL_HANDLE;
+            if (vkAllocateMemory(device, &allocInfo, nullptr, &memoryHandle) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to allocate buffer memory");
+            }
+            m_memory = DeviceMemoryResource(device, memoryHandle);
 
-        // Camera movement
-        void move(const glm::vec3& delta);             // Move relative to camera orientation
-        void moveWorld(const glm::vec3& delta);        // Move in world coordinates
-        void rotate(float pitchDelta, float yawDelta, float rollDelta = 0.0f);
+            // Bind memory to buffer
+            vkBindBufferMemory(device, m_buffer, m_memory, 0);
+        }
 
-        // Look at a target (in local space)
-        void lookAt(const glm::vec3& target, const glm::vec3& up = glm::vec3(0.0f, 1.0f, 0.0f));
+        // Map memory and update buffer data
+        void update(const void* data, VkDeviceSize size, VkDeviceSize offset = 0) {
+            if (!m_memory) {
+                Logger::get().error("Attempting to update buffer with invalid memory");
+                return;
+            }
 
-        // Look at a target (in world space)
-        void lookAt(const WorldPosition& target, const glm::vec3& up = glm::vec3(0.0f, 1.0f, 0.0f));
+            if (size > m_size) {
+                Logger::get().error("Buffer update size ({}) exceeds buffer size ({})", size, m_size);
+                return;
+            }
 
-        // Get current properties
-        const WorldPosition& getPosition() const { return m_position; }
-        glm::vec3 getLocalPosition() const;            // Position relative to origin
-        glm::quat getRotation() const { return m_rotation; }
+            void* mappedData = nullptr;
+            VkResult result = vkMapMemory(m_device, m_memory, offset, size, 0, &mappedData);
 
-        float getFovDegrees() const { return glm::degrees(m_fovRadians); }
-        float getFovRadians() const { return m_fovRadians; }
-        float getAspectRatio() const { return m_aspectRatio; }
-        float getNearClip() const { return m_nearZ; }
-        float getFarClip() const { return m_farZ; }
+            if (result != VK_SUCCESS) {
+                Logger::get().error("Failed to map buffer memory: {}", (int)result);
+                return;
+            }
 
-        // Directional vectors
-        glm::vec3 getForward() const;
-        glm::vec3 getRight() const;
-        glm::vec3 getUp() const;
+            memcpy(mappedData, data, static_cast<size_t>(size));
+            vkUnmapMemory(m_device, m_memory);
+        }
 
-        // Get transformation matrices
-        const glm::mat4& getViewMatrix();
-        const glm::mat4& getProjectionMatrix();
-        const glm::mat4& getViewProjectionMatrix();
 
-        // Get view-space frustum for culling
-        Frustum getViewFrustum();
-
-        // Extract frustum planes for culling
-        void extractFrustumPlanes(glm::vec4 planes[6]);
-
-        // For clustered rendering
-        float getNearPlane() const { return m_nearZ; }
-        float getFarPlane() const { return m_farZ; }
-
-        // Get jittered projection matrix for TAA
-        glm::mat4 getJitteredProjectionMatrix(const glm::vec2& jitter);
-
-        // Update per-frame (handles animations, stabilization, etc.)
-        void update(float deltaTime);
+        // Accessors
+        VkBuffer getBuffer() const { return m_buffer; }
+        VkDeviceSize getSize() const { return m_size; }
 
     private:
-        // Camera position and orientation
-        WorldPosition m_position;
-        glm::quat m_rotation;
+        VkDevice m_device = VK_NULL_HANDLE;
+        BufferResource m_buffer;
+        DeviceMemoryResource m_memory;
+        VkDeviceSize m_size = 0;
 
-        // Projection parameters
-        float m_fovRadians;
-        float m_aspectRatio;
-        float m_nearZ;
-        float m_farZ;
+        // Helper function to find memory type
+        uint32_t findMemoryType(VkPhysicalDevice physicalDevice,
+            uint32_t typeFilter,
+            VkMemoryPropertyFlags properties) {
+            VkPhysicalDeviceMemoryProperties memProperties;
+            vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
 
-        // Cached matrices
-        glm::mat4 m_viewMatrix;
-        glm::mat4 m_projectionMatrix;
-        glm::mat4 m_viewProjectionMatrix;
+            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+                if ((typeFilter & (1 << i)) &&
+                    (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                    return i;
+                }
+            }
 
-        // Dirty flags for matrix updates
-        bool m_viewDirty;
-        bool m_projDirty;
-        bool m_vpDirty;
-
-        // Update matrices if needed
-        void updateViewMatrix();
-        void updateProjectionMatrix();
-        void updateViewProjectionMatrix();
-
-        // Handle precision for large world coordinates
-        glm::mat4 calculateViewMatrix();
-
-        // Helper for 64-bit world coordinates
-        void normalizePosition();
+            throw std::runtime_error("Failed to find suitable memory type");
+        }
     };
 
-    // Frustum for culling
-    struct Frustum {
-        enum PlaneID {
-            NEAR = 0,
-            FAR,
-            LEFT,
-            RIGHT,
-            TOP,
-            BOTTOM,
-            PLANE_COUNT
+
+    // Helper function to infer shader type from filename
+    inline ShaderType inferShaderTypeFromFilename(const std::string& filename) {
+        if (filename.find(".vert") != std::string::npos) return ShaderType::Vertex;
+        if (filename.find(".frag") != std::string::npos) return ShaderType::Fragment;
+        if (filename.find(".comp") != std::string::npos) return ShaderType::Compute;
+        if (filename.find(".geom") != std::string::npos) return ShaderType::Geometry;
+        if (filename.find(".tesc") != std::string::npos) return ShaderType::TessControl;
+        if (filename.find(".tese") != std::string::npos) return ShaderType::TessEvaluation;
+        if (filename.find(".mesh") != std::string::npos) return ShaderType::Mesh;
+        if (filename.find(".task") != std::string::npos) return ShaderType::Task;
+        if (filename.find(".rgen") != std::string::npos) return ShaderType::RayGen;
+        if (filename.find(".rmiss") != std::string::npos) return ShaderType::RayMiss;
+        if (filename.find(".rchit") != std::string::npos) return ShaderType::RayClosestHit;
+        if (filename.find(".rahit") != std::string::npos) return ShaderType::RayAnyHit;
+        if (filename.find(".rint") != std::string::npos) return ShaderType::RayIntersection;
+        if (filename.find(".rcall") != std::string::npos) return ShaderType::Callable;
+
+        // Default to vertex if unknown
+        return ShaderType::Vertex;
+    }
+
+
+    class ShaderCompiler {
+    public:
+        // Options for shader compilation
+        struct CompileOptions {
+            bool optimize = true;
+            bool generateDebugInfo = false;
+            std::vector<std::string> includePaths;
+            std::unordered_map<std::string, std::string> macros;
         };
 
-        // Planes stored as ax + by + cz + d = 0 where (a,b,c) is the normal
-        // and d is the distance from origin
-        glm::vec4 planes[PLANE_COUNT];
+        // Initialize the compiler
+        ShaderCompiler() {
+            m_compiler = std::make_unique<shaderc::Compiler>();
+            m_options = std::make_unique<shaderc::CompileOptions>();
 
-        // Frustum corners
-        glm::vec3 corners[8];
-
-        // Test methods for culling
-        bool containsPoint(const glm::vec3& point) const;
-        bool containsSphere(const glm::vec3& center, float radius) const;
-        bool containsAABB(const glm::vec3& min, const glm::vec3& max) const;
-
-        // Advanced tests for clustered rendering
-        bool intersectsFrustum(const Frustum& other) const;
-    };
-
-
-
-    Camera::Camera()
-        : m_fovRadians(glm::radians(60.0f))
-        , m_aspectRatio(16.0f / 9.0f)
-        , m_nearZ(0.1f)
-        , m_farZ(1000.0f)
-        , m_viewDirty(true)
-        , m_projDirty(true)
-        , m_vpDirty(true) {
-
-        // Default position at origin
-        m_position.integer = glm::i64vec3(0);
-        m_position.fractional = glm::vec3(0.0f);
-
-        // Default orientation
-        m_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-    }
-
-    Camera::Camera(float fovDegrees, float aspectRatio, float nearZ, float farZ)
-        : m_fovRadians(glm::radians(fovDegrees))
-        , m_aspectRatio(aspectRatio)
-        , m_nearZ(nearZ)
-        , m_farZ(farZ)
-        , m_viewDirty(true)
-        , m_projDirty(true)
-        , m_vpDirty(true) {
-
-        // Default position at origin
-        m_position.integer = glm::i64vec3(0);
-        m_position.fractional = glm::vec3(0.0f);
-
-        // Default orientation
-        m_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-    }
-
-    void Camera::setPosition(const glm::vec3& position) {
-        Logger::get().info("Camera::setPosition: position={},{},{}",
-            position.x, position.y, position.z);
-        m_position.integer = glm::i64vec3(0);
-        m_position.fractional = position;
-        normalizePosition();
-        m_viewDirty = true;
-    }
-
-    void Camera::setRotation(float pitch, float yaw, float roll) {
-        // Create quaternion from Euler angles (in radians)
-        glm::quat quatPitch = glm::angleAxis(glm::radians(pitch), glm::vec3(1.0f, 0.0f, 0.0f));
-        glm::quat quatYaw = glm::angleAxis(glm::radians(yaw), glm::vec3(0.0f, 1.0f, 0.0f));
-        glm::quat quatRoll = glm::angleAxis(glm::radians(roll), glm::vec3(0.0f, 0.0f, 1.0f));
-
-        m_rotation = quatYaw * quatPitch * quatRoll;
-        m_viewDirty = true;
-    }
-
-    void Camera::move(const glm::vec3& delta) {
-        // Convert delta to world space
-        glm::vec3 worldDelta = m_rotation * delta;
-
-        // Add to fractional part
-        m_position.fractional += worldDelta;
-
-        // Handle potential overflow/underflow
-        normalizePosition();
-        m_viewDirty = true;
-    }
-
-    void Camera::moveWorld(const glm::vec3& delta) {
-        // Add directly to fractional part
-        m_position.fractional += delta;
-
-        // Handle potential overflow/underflow
-        normalizePosition();
-        m_viewDirty = true;
-    }
-
-    void Camera::rotate(float pitchDelta, float yawDelta, float rollDelta) {
-        // Create delta rotation quaternion
-        glm::quat quatPitch = glm::angleAxis(glm::radians(pitchDelta), glm::vec3(1.0f, 0.0f, 0.0f));
-        glm::quat quatYaw = glm::angleAxis(glm::radians(yawDelta), glm::vec3(0.0f, 1.0f, 0.0f));
-        glm::quat quatRoll = glm::angleAxis(glm::radians(rollDelta), glm::vec3(0.0f, 0.0f, 1.0f));
-
-        // Apply rotation (yaw * pitch * roll order)
-        glm::quat deltaRotation = quatYaw * quatPitch * quatRoll;
-        m_rotation = m_rotation * deltaRotation;
-
-        // Normalize to prevent drift
-        m_rotation = glm::normalize(m_rotation);
-        m_viewDirty = true;
-    }
-
-    void Camera::lookAt(const glm::vec3& target, const glm::vec3& up) {
-        // Get current position in local space
-        glm::vec3 pos = getLocalPosition();
-
-        // Calculate view matrix directly
-        glm::mat4 view = glm::lookAt(pos, target, up);
-
-        // Extract rotation from the view matrix
-        // This is more reliable than trying to calculate the quaternion ourselves
-        glm::mat3 rotMat(view);
-        m_rotation = glm::quat(rotMat);
-
-        // Note: Quaternion from view matrix might need conjugation
-        // depending on how it's used later
-        m_rotation = glm::conjugate(m_rotation);
-
-        m_viewDirty = true;
-
-        Logger::get().info("lookAt: pos={},{},{}, target={},{},{}",
-            pos.x, pos.y, pos.z, target.x, target.y, target.z);
-    }
-
-    void Camera::lookAt(const WorldPosition& target, const glm::vec3& up) {
-        // Calculate world-space vector from camera to target
-        glm::dvec3 targetPos = target.getCombined();
-        glm::dvec3 cameraPos = m_position.getCombined();
-
-        // Convert to float (for local space operations)
-        glm::vec3 direction = glm::normalize(glm::vec3(targetPos - cameraPos));
-
-        // Create rotation quaternion
-        m_rotation = glm::quatLookAt(direction, up);
-        m_viewDirty = true;
-    }
-
-    glm::vec3 Camera::getLocalPosition() const {
-        // Convert 64-bit position to local-space float position
-        // This is a simplified version - a real implementation would
-        // have to consider the reference point for local space
-        glm::vec3 combinedPos;
-
-        if (m_position.integer == glm::i64vec3(0)) {
-            // If integer part is zero, use fractional directly
-            combinedPos = m_position.fractional;
-        }
-        else {
-            // Otherwise use a local-space approximation
-            // (This could be more sophisticated based on a reference point)
-            combinedPos = glm::vec3(
-                static_cast<float>(m_position.integer.x) + m_position.fractional.x,
-                static_cast<float>(m_position.integer.y) + m_position.fractional.y,
-                static_cast<float>(m_position.integer.z) + m_position.fractional.z
-            );
-        }
-        return combinedPos;
-    }
-
-    glm::vec3 Camera::getForward() const {
-        return m_rotation * glm::vec3(0.0f, 0.0f, -1.0f);
-    }
-
-    glm::vec3 Camera::getRight() const {
-        return m_rotation * glm::vec3(1.0f, 0.0f, 0.0f);
-    }
-
-    glm::vec3 Camera::getUp() const {
-        return m_rotation * glm::vec3(0.0f, 1.0f, 0.0f);
-    }
-
-    const glm::mat4& Camera::getViewMatrix() {
-        if (m_viewDirty) {
-            updateViewMatrix();
-            Logger::get().info("View matrix updated");
-        }
-        return m_viewMatrix;
-    }
-
-    const glm::mat4& Camera::getProjectionMatrix() {
-        if (m_projDirty) {
-            updateProjectionMatrix();
-        }
-        return m_projectionMatrix;
-    }
-
-    const glm::mat4& Camera::getViewProjectionMatrix() {
-        if (m_viewDirty || m_projDirty || m_vpDirty) {
-            updateViewProjectionMatrix();
-        }
-        return m_viewProjectionMatrix;
-    }
-
-    void Camera::updateViewMatrix() {
-        m_viewMatrix = calculateViewMatrix();
-
-        Logger::get().info("View Matrix[3]: {}, {}, {}",
-            m_viewMatrix[3][0], m_viewMatrix[3][1], m_viewMatrix[3][2]);
-
-
-
-        m_viewDirty = false;
-        m_vpDirty = true;
-    }
-
-    void Camera::updateProjectionMatrix() {
-        // Use reverse depth for better precision
-        m_projectionMatrix = glm::perspectiveZO(m_fovRadians, m_aspectRatio, m_farZ, m_nearZ);
-
-        // Fix Vulkan's coordinate system (flip Y)
-        m_projectionMatrix[1][1] *= -1;
-
-        m_projDirty = false;
-        m_vpDirty = true;
-    }
-
-    void Camera::updateViewProjectionMatrix() {
-        if (m_viewDirty) {
-            updateViewMatrix();
-        }
-        if (m_projDirty) {
-            updateProjectionMatrix();
+            m_options.get()->SetTargetSpirv(shaderc_spirv_version_1_6);
         }
 
-        m_viewProjectionMatrix = m_projectionMatrix * m_viewMatrix;
-        m_vpDirty = false;
-    }
+        // Compile GLSL or HLSL source to SPIR-V
+        std::vector<uint32_t> compileToSpv(
+            const std::string& source,
+            ShaderType type,
+            const std::string& filename,
+            int flags = 0) {
 
-    glm::mat4 Camera::calculateViewMatrix() {
-        glm::vec3 pos = getLocalPosition();
+            // Set up options
+            //m_options->SetOptimizationLevel(options.optimize ?
+            //    shaderc_optimization_level_performance :
+            //    shaderc_optimization_level_zero);
 
-        // Create view matrix based on position and rotation
-        glm::vec3 forward = getForward();
-        glm::vec3 target = pos + forward; // Look in the direction of forward vector
+            //if (options.generateDebugInfo) {
+            //    m_options->SetGenerateDebugInfo();
+            //}
 
-        return glm::lookAt(pos, target, glm::vec3(0.0f, 1.0f, 0.0f));
-    }
+            // Add macros
+            //for (const auto& [name, value] : options.macros) {
+            //    m_options->AddMacroDefinition(name, value);
+            //}
 
+            // Add include directories
+            // Requires implementing a custom include resolver if needed
 
-    void Camera::normalizePosition() {
-        // Handle overflow/underflow in fractional part
-        // If any component is >= 1.0 or < 0.0, adjust integer part
+            // Determine shader stage
+            shaderc_shader_kind kind = getShaderKind(type);
 
-        // X component
-        if (m_position.fractional.x >= 1.0f) {
-            int64_t increment = static_cast<int64_t>(m_position.fractional.x);
-            m_position.integer.x += increment;
-            m_position.fractional.x -= static_cast<float>(increment);
-        }
-        else if (m_position.fractional.x < 0.0f) {
-            int64_t decrement = static_cast<int64_t>(-m_position.fractional.x) + 1;
-            m_position.integer.x -= decrement;
-            m_position.fractional.x += static_cast<float>(decrement);
-        }
+            // Compile
+            shaderc::SpvCompilationResult result = m_compiler->CompileGlslToSpv(
+                source, kind, filename.c_str(), *m_options);
 
-        // Y component
-        if (m_position.fractional.y >= 1.0f) {
-            int64_t increment = static_cast<int64_t>(m_position.fractional.y);
-            m_position.integer.y += increment;
-            m_position.fractional.y -= static_cast<float>(increment);
-        }
-        else if (m_position.fractional.y < 0.0f) {
-            int64_t decrement = static_cast<int64_t>(-m_position.fractional.y) + 1;
-            m_position.integer.y -= decrement;
-            m_position.fractional.y += static_cast<float>(decrement);
-        }
-
-        // Z component
-        if (m_position.fractional.z >= 1.0f) {
-            int64_t increment = static_cast<int64_t>(m_position.fractional.z);
-            m_position.integer.z += increment;
-            m_position.fractional.z -= static_cast<float>(increment);
-        }
-        else if (m_position.fractional.z < 0.0f) {
-            int64_t decrement = static_cast<int64_t>(-m_position.fractional.z) + 1;
-            m_position.integer.z -= decrement;
-            m_position.fractional.z += static_cast<float>(decrement);
-        }
-    }
-
-    Frustum Camera::getViewFrustum() {
-        Frustum frustum;
-        extractFrustumPlanes(frustum.planes);
-
-        // Calculate frustum corners
-        // ... (implementation for calculating the 8 corners)
-
-        return frustum;
-    }
-
-    void Camera::extractFrustumPlanes(glm::vec4 planes[6]) {
-        // Get the view-projection matrix
-        const glm::mat4& vp = getViewProjectionMatrix();
-
-        // Extract the six frustum planes
-        // Left plane
-        planes[Frustum::LEFT].x = vp[0][3] + vp[0][0];
-        planes[Frustum::LEFT].y = vp[1][3] + vp[1][0];
-        planes[Frustum::LEFT].z = vp[2][3] + vp[2][0];
-        planes[Frustum::LEFT].w = vp[3][3] + vp[3][0];
-
-        // Right plane
-        planes[Frustum::RIGHT].x = vp[0][3] - vp[0][0];
-        planes[Frustum::RIGHT].y = vp[1][3] - vp[1][0];
-        planes[Frustum::RIGHT].z = vp[2][3] - vp[2][0];
-        planes[Frustum::RIGHT].w = vp[3][3] - vp[3][0];
-
-        // Bottom plane
-        planes[Frustum::BOTTOM].x = vp[0][3] + vp[0][1];
-        planes[Frustum::BOTTOM].y = vp[1][3] + vp[1][1];
-        planes[Frustum::BOTTOM].z = vp[2][3] + vp[2][1];
-        planes[Frustum::BOTTOM].w = vp[3][3] + vp[3][1];
-
-        // Top plane
-        planes[Frustum::TOP].x = vp[0][3] - vp[0][1];
-        planes[Frustum::TOP].y = vp[1][3] - vp[1][1];
-        planes[Frustum::TOP].z = vp[2][3] - vp[2][1];
-        planes[Frustum::TOP].w = vp[3][3] - vp[3][1];
-
-        // Near plane
-        planes[Frustum::NEAR].x = vp[0][3] + vp[0][2];
-        planes[Frustum::NEAR].y = vp[1][3] + vp[1][2];
-        planes[Frustum::NEAR].z = vp[2][3] + vp[2][2];
-        planes[Frustum::NEAR].w = vp[3][3] + vp[3][2];
-
-        // Far plane
-        planes[Frustum::FAR].x = vp[0][3] - vp[0][2];
-        planes[Frustum::FAR].y = vp[1][3] - vp[1][2];
-        planes[Frustum::FAR].z = vp[2][3] - vp[2][2];
-        planes[Frustum::FAR].w = vp[3][3] - vp[3][2];
-
-        // Normalize all planes
-        for (int i = 0; i < Frustum::PLANE_COUNT; i++) {
-            float length = sqrtf(planes[i].x * planes[i].x +
-                planes[i].y * planes[i].y +
-                planes[i].z * planes[i].z);
-            planes[i] /= length;
-        }
-    }
-
-    glm::mat4 Camera::getJitteredProjectionMatrix(const glm::vec2& jitter) {
-        // Create jittered projection matrix for temporal anti-aliasing
-        glm::mat4 proj = glm::perspective(m_fovRadians, m_aspectRatio, m_nearZ, m_farZ);
-
-        // Apply jitter
-        proj[2][0] += jitter.x;
-        proj[2][1] += jitter.y;
-
-        // Fix Vulkan's coordinate system (flip Y)
-        proj[1][1] *= -1;
-
-        return proj;
-    }
-
-    void Camera::update(float deltaTime) {
-        if (m_viewDirty || m_projDirty || m_vpDirty) {
-            if (m_viewDirty) updateViewMatrix();
-            if (m_projDirty) updateProjectionMatrix();
-            if (m_vpDirty) updateViewProjectionMatrix();
-        }
-        Logger::get().info("View matrix: \n {} {} {} {} \n {} {} {} {} \n {} {} {} {} \n {} {} {} {}", m_viewMatrix[0][0], m_viewMatrix[0][1], m_viewMatrix[0][2], m_viewMatrix[0][3], m_viewMatrix[1][0], m_viewMatrix[1][1], m_viewMatrix[1][2], m_viewMatrix[1][3], m_viewMatrix[2][0], m_viewMatrix[2][1], m_viewMatrix[2][2], m_viewMatrix[2][3], m_viewMatrix[3][0], m_viewMatrix[3][1], m_viewMatrix[3][2], m_viewMatrix[3][3]);
-
-        Logger::get().info("Projection matrix: \n {} {} {} {} \n {} {} {} {} \n {} {} {} {} \n {} {} {} {}", m_projectionMatrix[0][0], m_projectionMatrix[0][1], m_projectionMatrix[0][2], m_projectionMatrix[0][3], m_projectionMatrix[1][0], m_projectionMatrix[1][1], m_projectionMatrix[1][2], m_projectionMatrix[1][3], m_projectionMatrix[2][0], m_projectionMatrix[2][1], m_projectionMatrix[2][2], m_projectionMatrix[2][3], m_projectionMatrix[3][0], m_projectionMatrix[3][1], m_projectionMatrix[3][2], m_projectionMatrix[3][3]);
-    }
-
-    // Frustum implementation
-    bool Frustum::containsPoint(const glm::vec3& point) const {
-        for (int i = 0; i < PLANE_COUNT; i++) {
-            if (planes[i].x * point.x +
-                planes[i].y * point.y +
-                planes[i].z * point.z +
-                planes[i].w <= 0) {
-                return false;
+            // Check for errors
+            if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
+                Logger::get().error("Shader compilation failed: {}", result.GetErrorMessage());
+                return {}; // Return empty vector on error
             }
-        }
-        return true;
-    }
 
-    bool Frustum::containsSphere(const glm::vec3& center, float radius) const {
-        for (int i = 0; i < PLANE_COUNT; i++) {
-            float distance = planes[i].x * center.x +
-                planes[i].y * center.y +
-                planes[i].z * center.z +
-                planes[i].w;
-
-            if (distance <= -radius) {
-                return false;  // Sphere is completely outside this plane
-            }
-        }
-        return true;  // Sphere is at least partially inside all planes
-    }
-
-    bool Frustum::containsAABB(const glm::vec3& min, const glm::vec3& max) const {
-        // For each frustum plane
-        for (int i = 0; i < PLANE_COUNT; i++) {
-            // Find the positive vertex (P-vertex)
-            glm::vec3 p;
-
-            // For each component of the normal, select min or max based on sign
-            p.x = (planes[i].x >= 0.0f) ? min.x : max.x;
-            p.y = (planes[i].y >= 0.0f) ? min.y : max.y;
-            p.z = (planes[i].z >= 0.0f) ? min.z : max.z;
-
-            // If the positive vertex is outside, the box is outside the frustum
-            if (planes[i].x * p.x +
-                planes[i].y * p.y +
-                planes[i].z * p.z +
-                planes[i].w < 0) {
-                return false;
-            }
+            // Return SPIR-V binary
+            std::vector<uint32_t> spirv(result.cbegin(), result.cend());
+            return spirv;
         }
 
-        return true;  // AABB is at least partially inside all planes
-    }
+        // Compile a shader file to SPIR-V
+        std::vector<uint32_t> compileFileToSpv(
+            const std::string& filename,
+            ShaderType type,
+            const CompileOptions& options = {}) {
 
-    bool Frustum::intersectsFrustum(const Frustum& other) const {
-        // This is a simplified test for cluster vs view frustum
-        // Fully implemented, you'd want to use separating axis theorem
+            // Read file content
+            std::ifstream file(filename);
+            if (!file.is_open()) {
+                Logger::get().error("Failed to open shader file: {}", filename);
+                return {};
+            }
 
-        // First, check if any of the corners of one frustum are inside the other
-        for (int i = 0; i < 8; i++) {
-            if (other.containsPoint(corners[i])) {
-                return true;
-            }
-            if (containsPoint(other.corners[i])) {
-                return true;
-            }
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            file.close();
+
+            // Compile the source
+            return compileToSpv(buffer.str(), type, filename);
         }
 
-        // Then check if any of the edges of one frustum intersect any of the faces of the other
-        // (Implementation omitted for brevity)
-
-        return false;
-    }
-
-
-    // Cluster grid dimensions (typically 16x16x24)
-    struct ClusterConfig {
-        uint32_t xSlices;      // Horizontal slice count (e.g., 16)
-        uint32_t ySlices;      // Vertical slice count (e.g., 16)
-        uint32_t zSlices;      // Depth slice count (e.g., 24)
-        float nearPlane;       // Camera near clip distance
-        float farPlane;        // Camera far clip distance
-        bool logarithmicZ;     // Whether to use logarithmic Z distribution
-    };
-
-    // Single light for cluster-based lighting
-    struct ClusterLight {
-        alignas(16) glm::vec3 position;   // World-space position
-        float radius;                     // Light radius/range
-        alignas(16) glm::vec3 color;      // RGB color
-        float intensity;                  // Light intensity/brightness
-        int32_t type;                     // 0=point, 1=spot, 2=area, etc.
-        float spotAngle;                  // Cone angle for spotlights
-        float spotSoftness;               // Spot light edge softness
-        float padding;                    // For alignment
-    };
-
-    // Main cluster data management class
-    class ClusterManager {
     private:
-        // Configuration
-        ClusterConfig m_config;
+        // Convert ShaderType to shaderc shader kind
+        shaderc_shader_kind getShaderKind(ShaderType type) {
+            switch (type) {
+            case ShaderType::Vertex:
+                return shaderc_vertex_shader;
+            case ShaderType::Fragment:
+                return shaderc_fragment_shader;
+            case ShaderType::Compute:
+                return shaderc_compute_shader;
+            case ShaderType::Geometry:
+                return shaderc_geometry_shader;
+            case ShaderType::TessControl:
+                return shaderc_tess_control_shader;
+            case ShaderType::TessEvaluation:
+                return shaderc_tess_evaluation_shader;
+            case ShaderType::Mesh:
+                return shaderc_mesh_shader;
+            case ShaderType::Task:
+                return shaderc_task_shader;
+            case ShaderType::RayGen:
+                return shaderc_raygen_shader;
+            case ShaderType::RayMiss:
+                return shaderc_miss_shader;
+            case ShaderType::RayClosestHit:
+                return shaderc_closesthit_shader;
+            case ShaderType::RayAnyHit:
+                return shaderc_anyhit_shader;
+            case ShaderType::RayIntersection:
+                return shaderc_intersection_shader;
+            case ShaderType::Callable:
+                return shaderc_callable_shader;
+            default:
+                return shaderc_vertex_shader;
+            }
+        }
 
-        // Device references
-        VkDevice m_device;
-        VkPhysicalDevice m_physicalDevice;
-
-        // Storage buffers
-        std::unique_ptr<Buffer> m_lightBuffer;         // All scene lights
-        std::unique_ptr<Buffer> m_lightIndexBuffer;    // Light indices per cluster
-        std::unique_ptr<Buffer> m_lightGridBuffer;     // Grid with offset/count into index buffer
-        std::unique_ptr<Buffer> m_clusterAABBBuffer;   // AABB for each cluster (debug)
-
-        // Compute pipeline for light assignment
-        std::unique_ptr<PipelineResource> m_computePipeline;
-        std::unique_ptr<PipelineLayoutResource> m_computePipelineLayout;
-        std::unique_ptr<DescriptorSetResource> m_computeDescriptorSet;
-
-        // Light data
-        std::vector<ClusterLight> m_lights;
-        uint32_t m_activeLightCount = 0;
-
-        // Methods for cluster computation
-        void buildClusterFrustums(const Camera& camera);
-        void assignLightsToClustersFrustumMethod(VkCommandBuffer cmdBuffer);
-
-    public:
-        ClusterManager(VkDevice device, VkPhysicalDevice physicalDevice, const ClusterConfig& config);
-        ~ClusterManager();
-
-        // Setup and initialization
-        bool initialize();
-
-        // Light management
-        uint32_t addLight(const ClusterLight& light);
-        void updateLight(uint32_t index, const ClusterLight& light);
-        void removeLight(uint32_t index);
-
-        // Per-frame update
-        void update(VkCommandBuffer cmdBuffer, const Camera& camera);
-
-        // Bind resources for rendering
-        void bindResources(VkCommandBuffer cmdBuffer, VkPipelineLayout pipelineLayout, uint32_t setIndex);
-
-        // Debug visualization
-        void debugDrawClusters(VkCommandBuffer cmdBuffer, const Camera& camera);
+        std::unique_ptr<shaderc::Compiler> m_compiler;
+        std::unique_ptr<shaderc::CompileOptions> m_options;
     };
 
-
-    const char* getDescriptorTypeName(VkDescriptorType type) {
-        switch (type) {
-        case VK_DESCRIPTOR_TYPE_SAMPLER: return "SAMPLER";
-        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: return "COMBINED_IMAGE_SAMPLER";
-        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE: return "SAMPLED_IMAGE";
-        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: return "STORAGE_IMAGE";
-        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: return "UNIFORM_TEXEL_BUFFER";
-        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER: return "STORAGE_TEXEL_BUFFER";
-        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: return "UNIFORM_BUFFER";
-        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: return "STORAGE_BUFFER";
-        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC: return "UNIFORM_BUFFER_DYNAMIC";
-        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC: return "STORAGE_BUFFER_DYNAMIC";
-        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT: return "INPUT_ATTACHMENT";
-        default: return "UNKNOWN";
-        }
-    }
 
     class ShaderReflection {
     public:
@@ -1357,7 +943,7 @@ namespace tremor::gfx {
         const std::vector<VertexAttribute>& getVertexAttributes() const { return m_vertexAttributes; }
 
     private:
-        
+
 
         // Helper to determine VkFormat from SPIR-V type
         VkFormat getFormatFromType(const spirv_cross::SPIRType& type) const {
@@ -1420,6 +1006,2648 @@ namespace tremor::gfx {
         mutable VkPipelineVertexInputStateCreateInfo m_vertexInputState;
     };
 
+
+    class ShaderModule {
+    public:
+
+        const std::vector<uint32_t>& getSPIRVCode() const { return m_spirvCode; }
+
+        // Default constructor
+        ShaderModule() = default;
+
+        // Constructor with device and raw module
+        ShaderModule(VkDevice device, VkShaderModule rawModule, ShaderType type = ShaderType::Vertex)
+            : m_device(device), m_type(type), m_entryPoint("main") {
+            if (rawModule != VK_NULL_HANDLE) {
+                m_module = std::make_unique<ShaderModuleResource>(device, rawModule);
+                Logger::get().info("Shader module created with raw handle");
+                if (m_spirvCode.size() > 0) {
+                    m_reflection = std::make_unique<ShaderReflection>();
+                    m_reflection->reflect(m_spirvCode, getShaderStageFlagBits());
+                }
+            }
+        }
+
+        // Destructor - resource is automatically cleaned up by RAII
+        ~ShaderModule() = default;
+
+        std::unique_ptr<ShaderReflection> m_reflection;
+
+        const ShaderReflection* getReflection() const { return m_reflection.get(); }
+        ShaderReflection* getReflection() { return m_reflection.get(); }
+
+        // Load from precompiled SPIR-V file
+        static std::unique_ptr<ShaderModule> loadFromFile(VkDevice device, const std::string& filename,
+            ShaderType type = ShaderType::Vertex,
+            const std::string& entryPoint = "main") {
+            // Read file...
+            std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+            if (!file.is_open()) {
+                Logger::get().error("Failed to open shader file: {}", filename);
+                return nullptr;
+            }
+
+            size_t fileSize = static_cast<size_t>(file.tellg());
+            std::vector<char> shaderCode(fileSize);
+
+            file.seekg(0);
+            file.read(shaderCode.data(), fileSize);
+            file.close();
+
+            // Create module
+            VkShaderModuleCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            createInfo.codeSize = fileSize;
+            createInfo.pCode = reinterpret_cast<const uint32_t*>(shaderCode.data());
+
+            VkShaderModule shaderModule = VK_NULL_HANDLE;
+            if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+                Logger::get().error("Failed to create shader module from file: {}", filename);
+                return nullptr;
+            }
+
+            // Create ShaderModule object
+            auto result = std::make_unique<ShaderModule>();
+            result->m_device = device;
+            result->m_module = std::make_unique<ShaderModuleResource>(device, shaderModule);
+            result->m_type = type;
+            result->m_entryPoint = entryPoint;
+            result->m_filename = filename;
+
+            // ADD THIS: Store the SPIRV code for reflection
+            result->m_spirvCode.resize(fileSize / sizeof(uint32_t));
+            memcpy(result->m_spirvCode.data(), shaderCode.data(), fileSize);
+
+            // ADD THIS: Initialize reflection
+            result->m_reflection = std::make_unique<ShaderReflection>();
+            result->m_reflection->reflect(result->m_spirvCode, result->getShaderStageFlagBits());
+
+            return result;
+        }
+
+        // Create shader stage info for pipeline creation
+        VkPipelineShaderStageCreateInfo createShaderStageInfo() const {
+            VkPipelineShaderStageCreateInfo stageInfo{};
+            stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stageInfo.stage = getShaderStageFlagBits();
+            stageInfo.module = m_module ? m_module->handle() : VK_NULL_HANDLE;
+            stageInfo.pName = m_entryPoint.c_str();
+            return stageInfo;
+        }
+
+        // Get the raw Vulkan handle directly
+        VkShaderModule getHandle() const {
+            return m_module ? m_module->handle() : VK_NULL_HANDLE;
+        }
+
+        // Check if valid
+        bool isValid() const {
+            return m_module && m_module->handle() != VK_NULL_HANDLE;
+        }
+
+        // Explicit conversion operator
+        explicit operator bool() const {
+            return isValid();
+        }
+
+        // Access methods
+        ShaderType getType() const { return m_type; }
+        const std::string& getEntryPoint() const { return m_entryPoint; }
+        const std::string& getFilename() const { return m_filename; }
+
+        // Compile and load from GLSL/HLSL source
+        static std::unique_ptr<ShaderModule> compileFromSource(
+            VkDevice device,
+            const std::string& source,
+            ShaderType type,
+            const std::string& filename = "unnamed_shader",
+            const std::string& entryPoint = "main",
+            const ShaderCompiler::CompileOptions& options = {}) {
+
+            // Compile to SPIR-V
+            static ShaderCompiler compiler;
+            auto spirv = compiler.compileToSpv(source, type, filename);
+
+            if (spirv.empty()) {
+                // Compilation failed
+                return nullptr;
+            }
+
+            // Create shader module
+            VkShaderModuleCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            createInfo.codeSize = spirv.size() * sizeof(uint32_t);
+            createInfo.pCode = spirv.data();
+
+            VkShaderModule shaderModule = VK_NULL_HANDLE;
+            if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+                Logger::get().error("Failed to create shader module from compiled source");
+                return nullptr;
+            }
+
+            // Create ShaderModule object
+            auto result = std::make_unique<ShaderModule>();
+            result->m_device = device;
+            result->m_module = std::make_unique<ShaderModuleResource>(device, shaderModule);
+            result->m_type = type;
+            result->m_entryPoint = entryPoint;
+            result->m_filename = filename;
+            result->m_spirvCode = std::move(spirv);
+
+            return result;
+        }
+
+        // Compile and load from GLSL/HLSL file
+        static std::unique_ptr<ShaderModule> compileFromFile(
+            VkDevice device,
+            const std::string& filename,
+            const std::string& entryPoint = "main",
+            int flags = 0) {
+
+            // Detect shader type from filename
+            ShaderType type = inferShaderTypeFromFilename(filename);
+
+            // Compile file to SPIR-V
+            static ShaderCompiler compiler;
+            auto spirv = compiler.compileFileToSpv(filename, type);
+
+            if (spirv.empty()) {
+                // Compilation failed
+                return nullptr;
+            }
+
+            // Create shader module
+            VkShaderModuleCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            createInfo.codeSize = spirv.size() * sizeof(uint32_t);
+            createInfo.pCode = spirv.data();
+
+            VkShaderModule shaderModule = VK_NULL_HANDLE;
+            if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+                Logger::get().error("Failed to create shader module from compiled file: {}", filename);
+                return nullptr;
+            }
+
+            // Create ShaderModule object
+            auto result = std::make_unique<ShaderModule>();
+            result->m_device = device;
+            result->m_module = std::make_unique<ShaderModuleResource>(device, shaderModule);
+            result->m_type = type;
+            result->m_entryPoint = entryPoint;
+            result->m_filename = filename;
+            result->m_spirvCode = std::move(spirv);
+
+            // ADD THIS: Initialize reflection
+            result->m_reflection = std::make_unique<ShaderReflection>();
+            result->m_reflection->reflect(result->m_spirvCode, result->getShaderStageFlagBits());
+
+            return result;
+        }
+
+    private:
+        std::vector<uint32_t> m_spirvCode; // Store SPIR-V code
+
+        // Convert shader type to Vulkan stage flag
+        VkShaderStageFlagBits getShaderStageFlagBits() const {
+            switch (m_type) {
+            case ShaderType::Vertex:         return VK_SHADER_STAGE_VERTEX_BIT;
+            case ShaderType::Fragment:       return VK_SHADER_STAGE_FRAGMENT_BIT;
+            case ShaderType::Compute:        return VK_SHADER_STAGE_COMPUTE_BIT;
+            case ShaderType::Geometry:       return VK_SHADER_STAGE_GEOMETRY_BIT;
+            case ShaderType::TessControl:    return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+            case ShaderType::TessEvaluation: return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+            case ShaderType::Mesh:           return VK_SHADER_STAGE_MESH_BIT_EXT;
+            case ShaderType::Task:           return VK_SHADER_STAGE_TASK_BIT_EXT;
+            case ShaderType::RayGen:         return VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+            case ShaderType::RayMiss:        return VK_SHADER_STAGE_MISS_BIT_KHR;
+            case ShaderType::RayClosestHit:  return VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+            case ShaderType::RayAnyHit:      return VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+            case ShaderType::RayIntersection:return VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
+            case ShaderType::Callable:       return VK_SHADER_STAGE_CALLABLE_BIT_KHR;
+            default:                         return VK_SHADER_STAGE_VERTEX_BIT;
+            }
+        }
+
+    private:
+        VkDevice m_device = VK_NULL_HANDLE;
+        std::unique_ptr<ShaderModuleResource> m_module;
+        ShaderType m_type = ShaderType::Vertex;
+        std::string m_entryPoint = "main";
+        std::string m_filename;
+    };
+
+
+    // Forward declarations
+    class Camera;
+    class RenderContext;
+
+    // Forward declaration for camera planes
+    struct Frustum {
+        enum PlaneID {
+            NEAR = 0,
+            FAR,
+            LEFT,
+            RIGHT,
+            TOP,
+            BOTTOM,
+            PLANE_COUNT
+        };
+
+        // Planes stored as ax + by + cz + d = 0 where (a,b,c) is the normal
+        // and d is the distance from origin
+        glm::vec4 planes[PLANE_COUNT];
+
+        // Frustum corners
+        glm::vec3 corners[8];
+
+        // Test methods for culling
+        bool containsPoint(const glm::vec3& point) const;
+        bool containsSphere(const glm::vec3& center, float radius) const;
+        bool containsAABB(const glm::vec3& min, const glm::vec3& max) const;
+
+        // Advanced tests for clustered rendering
+        bool intersectsFrustum(const Frustum& other) const;
+    };
+
+
+
+    class Camera {
+    public:
+        // Constructors
+        Camera();
+        Camera(float fovDegrees, float aspectRatio, float nearZ, float farZ);
+
+        // World position with 64-bit coordinates for your large world
+        // Stores integer and fractional parts separately for precision
+        struct WorldPosition {
+            glm::i64vec3 integer;       // Integer part (128th mm precision)
+            glm::vec3 fractional;       // Fractional part (0.0-1.0)
+
+            // Helper to get combined position (for relatively close objects)
+            glm::dvec3 getCombined() const {
+                return glm::dvec3(integer) + glm::dvec3(fractional);
+            }
+        };
+
+        // Basic camera properties
+        void setPosition(const WorldPosition& position) { m_position = position; m_viewDirty = true; }
+        void setPosition(const glm::vec3& position);    // Convenience for local space
+
+        void setRotation(const glm::quat& rotation) { m_rotation = rotation; m_viewDirty = true; }
+        void setRotation(float pitch, float yaw, float roll);
+
+        void setFov(float fovDegrees) { m_fovRadians = glm::radians(fovDegrees); m_projDirty = true; }
+        void setAspectRatio(float aspectRatio) { m_aspectRatio = aspectRatio; m_projDirty = true; }
+        void setClipPlanes(float nearZ, float farZ) { m_nearZ = nearZ; m_farZ = farZ; m_projDirty = true; }
+
+        // Camera movement
+        void move(const glm::vec3& delta);             // Move relative to camera orientation
+        void moveWorld(const glm::vec3& delta);        // Move in world coordinates
+        void rotate(float pitchDelta, float yawDelta, float rollDelta = 0.0f);
+
+        // Look at a target (in local space)
+        void lookAt(const glm::vec3& target, const glm::vec3& up = glm::vec3(0.0f, 1.0f, 0.0f));
+
+        // Look at a target (in world space)
+        void lookAt(const WorldPosition& target, const glm::vec3& up = glm::vec3(0.0f, 1.0f, 0.0f));
+
+        // Get current properties
+        const WorldPosition& getPosition() const { return m_position; }
+        glm::vec3 getLocalPosition() const;            // Position relative to origin
+        glm::quat getRotation() const { return m_rotation; }
+
+        float getFovDegrees() const { return glm::degrees(m_fovRadians); }
+        float getFovRadians() const { return m_fovRadians; }
+        float getAspectRatio() const { return m_aspectRatio; }
+        float getNearClip() const { return m_nearZ; }
+        float getFarClip() const { return m_farZ; }
+
+        // Directional vectors
+        glm::vec3 getForward() const;
+        glm::vec3 getRight() const;
+        glm::vec3 getUp() const;
+
+        // Get transformation matrices
+        const glm::mat4& getViewMatrix() const;
+        const glm::mat4& getProjectionMatrix() const;
+        const glm::mat4& getViewProjectionMatrix() const;
+
+        // Get view-space frustum for culling
+        Frustum getViewFrustum();
+
+        // Extract frustum planes for culling
+        void extractFrustumPlanes(glm::vec4 planes[6]);
+
+        // For clustered rendering
+        float getNearPlane() const { return m_nearZ; }
+        float getFarPlane() const { return m_farZ; }
+
+        // Get jittered projection matrix for TAA
+        glm::mat4 getJitteredProjectionMatrix(const glm::vec2& jitter);
+
+        // Update per-frame (handles animations, stabilization, etc.)
+        void update(float deltaTime);
+
+    private:
+        // Camera position and orientation
+        WorldPosition m_position;
+        glm::quat m_rotation;
+
+        // Projection parameters
+        float m_fovRadians;
+        float m_aspectRatio;
+        float m_nearZ;
+        float m_farZ;
+
+        // Cached matrices
+        glm::mat4 m_viewMatrix;
+        glm::mat4 m_projectionMatrix;
+        glm::mat4 m_viewProjectionMatrix;
+
+        // Dirty flags for matrix updates
+        bool m_viewDirty;
+        bool m_projDirty;
+        bool m_vpDirty;
+
+        // Update matrices if needed
+        void updateViewMatrix();
+        void updateProjectionMatrix();
+        void updateViewProjectionMatrix();
+
+        // Handle precision for large world coordinates
+        glm::mat4 calculateViewMatrix();
+
+        // Helper for 64-bit world coordinates
+        void normalizePosition();
+    };
+
+
+    // ===============================
+    // Octree Implementation for 64-bit coordinates
+    // ===============================
+
+
+    // Represents a cluster in our 3D grid
+    struct Cluster {
+        uint32_t lightOffset;
+        uint32_t lightCount;
+        uint32_t objectOffset;
+        uint32_t objectCount;
+    };
+
+    // A light with all properties needed for shading
+    struct Light {
+        glm::vec4 position;    // w component is radius
+        glm::vec4 color;       // w component is intensity
+        glm::vec4 parameters;  // x: type (0=point, 1=spot, 2=directional)
+        // y: spotAngle (if applicable)
+        // z: falloffExponent
+        // w: castsShadows (0=no, 1=yes)
+    };
+
+    // Information about an object to be rendered
+
+
+
+    // Forward declaration for 64-bit quantized vector
+    struct Vec3Q;
+
+    // Standard floating-point AABB
+    struct AABBF {
+        glm::vec3 min;
+        glm::vec3 max;
+
+        AABBF() : min(0.0f), max(0.0f) {}
+        AABBF(const glm::vec3& min, const glm::vec3& max) : min(min), max(max) {}
+
+        // Check if this AABB contains a point
+        bool contains(const glm::vec3& point) const {
+            return point.x >= min.x && point.x <= max.x &&
+                point.y >= min.y && point.y <= max.y &&
+                point.z >= min.z && point.z <= max.z;
+        }
+
+        // Check if this AABB intersects another AABB
+        bool intersects(const AABBF& other) const {
+            return !(other.min.x > max.x || other.max.x < min.x ||
+                other.min.y > max.y || other.max.y < min.y ||
+                other.min.z > max.z || other.max.z < min.z);
+        }
+
+        // Get the center point of this AABB
+        glm::vec3 getCenter() const {
+            return min + (max - min) * 0.5f;
+        }
+
+        // Get the dimensions of this AABB
+        glm::vec3 getDimensions() const {
+            return max - min;
+        }
+
+        // Check if this AABB is valid (min <= max)
+        bool isValid() const {
+            return min.x <= max.x && min.y <= max.y && min.z <= max.z;
+        }
+
+        // Get the volume of this AABB
+        float getVolume() const {
+            glm::vec3 dimensions = getDimensions();
+            return dimensions.x * dimensions.y * dimensions.z;
+        }
+
+        // Expand this AABB to include a point
+        void expand(const glm::vec3& point) {
+            min = glm::min(min, point);
+            max = glm::max(max, point);
+        }
+
+        // Expand this AABB to include another AABB
+        void expand(const AABBF& other) {
+            min = glm::min(min, other.min);
+            max = glm::max(max, other.max);
+        }
+
+        // Transform this AABB by a matrix
+        AABBF transform(const glm::mat4& matrix) const {
+            // Start with the translation
+            glm::vec3 newMin = glm::vec3(matrix[3]);
+            glm::vec3 newMax = newMin;
+
+            // For each axis of the AABB
+            for (int i = 0; i < 3; i++) {
+                // For each component of the matrix
+                for (int j = 0; j < 3; j++) {
+                    float e = matrix[i][j] * min[j];
+                    float f = matrix[i][j] * max[j];
+
+                    if (e < f) {
+                        newMin[i] += e;
+                        newMax[i] += f;
+                    }
+                    else {
+                        newMin[i] += f;
+                        newMax[i] += e;
+                    }
+                }
+            }
+
+            return AABBF(newMin, newMax);
+        }
+    };
+
+    // 64-bit quantized vector for positions (1/128 millimeter precision)
+    struct Vec3Q {
+        int64_t x, y, z;
+
+        Vec3Q() : x(0), y(0), z(0) {}
+        Vec3Q(int64_t x, int64_t y, int64_t z) : x(x), y(y), z(z) {}
+
+        // Conversion from floating point to quantized
+        static Vec3Q fromFloat(const glm::vec3& v) {
+            // Convert from meters to 1/128 mm
+            // 1 unit = 1/128 millimeter = 0.0078125 mm
+            constexpr double scale = 128000.0; // 128 units per mm * 1000 mm per meter
+            return {
+                static_cast<int64_t>(v.x * scale),
+                static_cast<int64_t>(v.y * scale),
+                static_cast<int64_t>(v.z * scale)
+            };
+        }
+
+        // Conversion from quantized to floating point
+        glm::vec3 toFloat() const {
+            constexpr double invScale = 1.0 / 128000.0;
+            return glm::vec3(
+                static_cast<float>(x * invScale),
+                static_cast<float>(y * invScale),
+                static_cast<float>(z * invScale)
+            );
+        }
+
+        // Basic vector operations
+        Vec3Q operator+(const Vec3Q& other) const {
+            return Vec3Q(x + other.x, y + other.y, z + other.z);
+        }
+
+        Vec3Q operator-(const Vec3Q& other) const {
+            return Vec3Q(x - other.x, y - other.y, z - other.z);
+        }
+
+        Vec3Q operator*(int64_t scalar) const {
+            return Vec3Q(x * scalar, y * scalar, z * scalar);
+        }
+
+        Vec3Q operator/(int64_t scalar) const {
+            return Vec3Q(x / scalar, y / scalar, z / scalar);
+        }
+
+        // Comparisons (useful for sorting in spatial data structures)
+        bool operator==(const Vec3Q& other) const {
+            return x == other.x && y == other.y && z == other.z;
+        }
+
+        bool operator!=(const Vec3Q& other) const {
+            return !(*this == other);
+        }
+    };
+
+    // Quantized Axis-Aligned Bounding Box for 64-bit coordinates
+    struct AABBQ {
+        Vec3Q min;
+        Vec3Q max;
+
+        AABBQ() : min(), max() {}
+        AABBQ(const Vec3Q& min, const Vec3Q& max) : min(min), max(max) {}
+
+        // Create from floating point AABB
+        static AABBQ fromFloat(const AABBF& aabb) {
+            return { Vec3Q::fromFloat(aabb.min), Vec3Q::fromFloat(aabb.max) };
+        }
+
+        static AABBQ fromFloat(const glm::vec3& minF, const glm::vec3& maxF) {
+            return { Vec3Q::fromFloat(minF), Vec3Q::fromFloat(maxF) };
+        }
+
+        // Convert to floating point AABB
+        AABBF toFloat() const {
+            return { min.toFloat(), max.toFloat() };
+        }
+
+        // Check if this AABB contains a point
+        bool contains(const Vec3Q& point) const {
+            return point.x >= min.x && point.x <= max.x &&
+                point.y >= min.y && point.y <= max.y &&
+                point.z >= min.z && point.z <= max.z;
+        }
+
+        // Check if this AABB intersects another AABB
+        bool intersects(const AABBQ& other) const {
+            return !(other.min.x > max.x || other.max.x < min.x ||
+                other.min.y > max.y || other.max.y < min.y ||
+                other.min.z > max.z || other.max.z < min.z);
+        }
+
+        // Get the center point of this AABB
+        Vec3Q getCenter() const {
+            return Vec3Q(
+                min.x + (max.x - min.x) / 2,
+                min.y + (max.y - min.y) / 2,
+                min.z + (max.z - min.z) / 2
+            );
+        }
+
+        // Get the dimensions of this AABB
+        Vec3Q getDimensions() const {
+            return Vec3Q(
+                max.x - min.x,
+                max.y - min.y,
+                max.z - min.z
+            );
+        }
+
+        // Get the 8 corners of this AABB
+        std::array<Vec3Q, 8> getCorners() const {
+            return { {
+                Vec3Q(min.x, min.y, min.z), // 0: min
+                Vec3Q(max.x, min.y, min.z), // 1: xMax
+                Vec3Q(min.x, max.y, min.z), // 2: yMax
+                Vec3Q(max.x, max.y, min.z), // 3: xyMax
+                Vec3Q(min.x, min.y, max.z), // 4: zMax
+                Vec3Q(max.x, min.y, max.z), // 5: xzMax
+                Vec3Q(min.x, max.y, max.z), // 6: yzMax
+                Vec3Q(max.x, max.y, max.z)  // 7: max
+            } };
+        }
+
+        // Check if this AABB is valid (min <= max)
+        bool isValid() const {
+            return min.x <= max.x && min.y <= max.y && min.z <= max.z;
+        }
+
+        // Expand this AABB to include a point
+        void expand(const Vec3Q& point) {
+            min.x = std::min(min.x, point.x);
+            min.y = std::min(min.y, point.y);
+            min.z = std::min(min.z, point.z);
+            max.x = std::max(max.x, point.x);
+            max.y = std::max(max.y, point.y);
+            max.z = std::max(max.z, point.z);
+        }
+
+        // Expand this AABB to include another AABB
+        void expand(const AABBQ& other) {
+            min.x = std::min(min.x, other.min.x);
+            min.y = std::min(min.y, other.min.y);
+            min.z = std::min(min.z, other.min.z);
+            max.x = std::max(max.x, other.max.x);
+            max.y = std::max(max.y, other.max.y);
+            max.z = std::max(max.z, other.max.z);
+        }
+
+        // Create an expanded AABB (margin in quantized units)
+        AABBQ getExpanded(int64_t margin) const {
+            return AABBQ(
+                Vec3Q(min.x - margin, min.y - margin, min.z - margin),
+                Vec3Q(max.x + margin, max.y + margin, max.z + margin)
+            );
+        }
+
+        // Compute the intersection of two AABBs
+        AABBQ getIntersection(const AABBQ& other) const {
+            return AABBQ(
+                Vec3Q(
+                    std::max(min.x, other.min.x),
+                    std::max(min.y, other.min.y),
+                    std::max(min.z, other.min.z)
+                ),
+                Vec3Q(
+                    std::min(max.x, other.max.x),
+                    std::min(max.y, other.max.y),
+                    std::min(max.z, other.max.z)
+                )
+            );
+        }
+    };
+
+    // Helper functions for AABB/frustum testing
+
+    // Transform an AABB by a matrix
+    inline AABBF transformAABB(const glm::mat4& transform, const AABBF& aabb) {
+        // Get the 8 corners of the AABB
+        const glm::vec3 corners[8] = {
+            {aabb.min.x, aabb.min.y, aabb.min.z},
+            {aabb.max.x, aabb.min.y, aabb.min.z},
+            {aabb.min.x, aabb.max.y, aabb.min.z},
+            {aabb.max.x, aabb.max.y, aabb.min.z},
+            {aabb.min.x, aabb.min.y, aabb.max.z},
+            {aabb.max.x, aabb.min.y, aabb.max.z},
+            {aabb.min.x, aabb.max.y, aabb.max.z},
+            {aabb.max.x, aabb.max.y, aabb.max.z}
+        };
+
+        // Transform all corners and compute new AABB
+        AABBF result;
+        result.min = glm::vec3(FLT_MAX);
+        result.max = glm::vec3(-FLT_MAX);
+
+        for (int i = 0; i < 8; i++) {
+            glm::vec4 transformedCorner = transform * glm::vec4(corners[i], 1.0f);
+            glm::vec3 transformedPos = glm::vec3(transformedCorner) / transformedCorner.w;
+
+            result.min = glm::min(result.min, transformedPos);
+            result.max = glm::max(result.max, transformedPos);
+        }
+
+        return result;
+    }
+
+    // Test if a point is inside an AABB
+    inline bool pointInAABB(const glm::vec3& point, const AABBF& aabb) {
+        return point.x >= aabb.min.x && point.x <= aabb.max.x &&
+            point.y >= aabb.min.y && point.y <= aabb.max.y &&
+            point.z >= aabb.min.z && point.z <= aabb.max.z;
+    }
+
+    // Test if a sphere overlaps an AABB
+    inline bool sphereOverlapsAABB(const glm::vec3& center, float radius, const AABBF& aabb) {
+        // Find the closest point on the AABB to the sphere center
+        glm::vec3 closestPoint = glm::clamp(center, aabb.min, aabb.max);
+
+        // Calculate squared distance between the closest point and the sphere center
+        float distanceSquared = glm::dot(closestPoint - center, closestPoint - center);
+
+        // If the distance is less than or equal to the radius, they overlap
+        return distanceSquared <= (radius * radius);
+    }
+
+    // Test if two AABBs intersect
+    inline bool aabbIntersectsAABB(const AABBF& a, const AABBF& b) {
+        return !(b.min.x > a.max.x || b.max.x < a.min.x ||
+            b.min.y > a.max.y || b.max.y < a.min.y ||
+            b.min.z > a.max.z || b.max.z < a.min.z);
+    }
+
+    // Convert between coordinate systems
+
+    // Convert a local-space AABB to world-space
+    inline AABBF localToWorldAABB(const AABBF& localAABB, const glm::mat4& transform) {
+        return transformAABB(transform, localAABB);
+    }
+
+    // Get bounds for a mesh instance
+    inline AABBF getBoundsForMesh(uint32_t meshID, const glm::mat4& transform,
+        const std::vector<AABBF>& meshBounds) {
+        if (meshID >= meshBounds.size()) {
+            // Invalid mesh ID, return unit box at origin
+            return AABBF(glm::vec3(-0.5f), glm::vec3(0.5f));
+        }
+
+        return transformAABB(transform, meshBounds[meshID]);
+    }
+
+
+
+    template<typename T>
+    class OctreeNode {
+    public:
+        OctreeNode(const AABBQ& bounds, uint32_t depth = 0, uint32_t maxDepth = 8,
+            uint32_t maxObjects = 16, bool isRoot = false)
+            : m_bounds(bounds),
+            m_depth(depth),
+            m_maxDepth(maxDepth),
+            m_maxObjects(maxObjects),
+            m_isRoot(isRoot)
+        {            
+            
+            m_isLeaf = true; // Make sure this is set to true initially
+        }
+
+        ~OctreeNode() = default;
+
+        // Check if this node is a leaf
+        bool isLeaf() const { return m_isLeaf; }
+
+        // Get the bounds of this node
+        const AABBQ& getBounds() const { return m_bounds; }
+
+        // Get all objects in this node (not including children)
+        const std::vector<T>& getObjects() const { return m_objects; }
+
+        // Get a specific child node
+        const OctreeNode* getChild(int index) const {
+            if (index < 0 || index >= 8) {
+                return nullptr;
+            }
+            return m_children[index].get();
+        }
+
+        // Add an object to this node
+        void insert(const T& object, const AABBQ& objectBounds);
+
+        // Remove an object from this node
+        bool remove(const T& object, const AABBQ& objectBounds);
+
+        // Update an object's position
+        bool update(const T& object, const AABBQ& oldBounds, const AABBQ& newBounds);
+
+        // Query objects within a bounding box
+        void query(const AABBQ& queryBounds, std::vector<T>& results) const;
+
+        // Query objects that intersect with a frustum
+        void query(const Frustum& frustum, std::vector<T>& results) const;
+
+        size_t estimateTotalObjects() const;
+
+    private:
+        // Split this node into 8 children
+        void split();
+
+        // Determine which child a given bounds belongs to
+        int getChildIndex(const AABBQ& objectBounds) const;
+
+    private:
+        AABBQ m_bounds;                                  // Bounds of this node
+        uint32_t m_depth;                                // Depth in the octree
+        uint32_t m_maxDepth;                             // Maximum depth allowed
+        uint32_t m_maxObjects;                           // Maximum objects before splitting
+        bool m_isRoot = false;                           // Whether this is a root node
+        bool m_isLeaf;                                   // Whether this is a leaf node
+        std::vector<T> m_objects;                        // Objects in this node
+        std::vector<AABBQ> m_objectBounds;               // Bounds of each object
+        std::array<std::unique_ptr<OctreeNode>, 8> m_children; // Child nodes
+    };
+
+    template<typename T>
+    void OctreeNode<T>::insert(const T& object, const AABBQ& objectBounds) {
+        // Root-level entry logging and validation
+        if (m_isRoot) {
+            Logger::get().info("Beginning insertion into octree: bounds=({},{},{}) to ({},{},{})",
+                objectBounds.min.x, objectBounds.min.y, objectBounds.min.z,
+                objectBounds.max.x, objectBounds.max.y, objectBounds.max.z);
+
+            if (m_isLeaf) {
+                Logger::get().info("Root node is still leaf! Splitting...");
+                split();
+            }
+
+            // Special world-bounds check at root level
+            if (!m_bounds.intersects(objectBounds)) {
+                Logger::get().error("Object completely outside world bounds - rejected!");
+                return;
+            }
+        }
+        else {
+            // Regular node entry logging
+            Logger::get().debug("Checking node at depth {} for insertion", m_depth);
+        }
+
+        // Check if the object's bounds intersect with this node
+        if (!m_bounds.intersects(objectBounds)) {
+            Logger::get().warning("Object is outside this node's bounds");
+            return; // Object is outside this node's bounds
+        }
+
+        // If this is a leaf node with space, add the object here
+        if (m_isLeaf && m_objects.size() < m_maxObjects) {
+            m_objects.push_back(object);
+            m_objectBounds.push_back(objectBounds);
+
+            if (m_isRoot) {
+                Logger::get().info("Object inserted directly into root node ({} objects total)",
+                    m_objects.size());
+            }
+            else {
+                Logger::get().info("Object inserted successfully at depth {}", m_depth);
+            }
+            return;
+        }
+
+        // If we're a leaf but full, split the node
+        // Root can hold more objects before splitting if desired
+        if (m_isLeaf) {
+            if (m_isRoot) {
+                Logger::get().info("Root node full ({} objects), splitting...", m_objects.size());
+            }
+            else {
+                Logger::get().debug("Node at depth {} full, splitting...", m_depth);
+            }
+
+            // Don't split if we've reached max depth
+            if (m_depth >= m_maxDepth) {
+                // Just add the object to this node even though it's over capacity
+                Logger::get().warning("Max depth {} reached, adding object to full node", m_depth);
+                m_objects.push_back(object);
+                m_objectBounds.push_back(objectBounds);
+                return;
+            }
+
+            split();
+
+            if (m_isRoot) {
+                Logger::get().info("Root node split complete, redistributing {} objects",
+                    m_objects.size() + 1); // +1 for current object
+            }
+        }
+
+        // Determine which child(ren) the object belongs to and insert
+        int childIndex = getChildIndex(objectBounds);
+
+        if (childIndex != -1) {
+            // Object fits entirely in one child
+            if (m_children[childIndex]) {
+                Logger::get().debug("Object fits in child {}", childIndex);
+                m_children[childIndex]->insert(object, objectBounds);
+            }
+            else {
+                // This should never happen if split() worked correctly
+                Logger::get().error("Child node {} is null after split() in OctreeNode::insert", childIndex);
+
+                // Fallback: add to this node
+                m_objects.push_back(object);
+                m_objectBounds.push_back(objectBounds);
+                Logger::get().warning("Added to current node as fallback");
+            }
+        }
+        else {
+            // Object spans multiple children
+            Logger::get().debug("Object spans multiple children, checking all intersecting nodes");
+            bool inserted = false;
+
+            for (int i = 0; i < 8; i++) {
+                if (m_children[i] && m_children[i]->m_bounds.intersects(objectBounds)) {
+                    m_children[i]->insert(object, objectBounds);
+                    inserted = true;
+                }
+            }
+
+            if (!inserted) {
+                // If the object wasn't inserted in any child (unusual but possible edge case)
+                Logger::get().warning("Object spans multiple children but wasn't inserted in any");
+
+                // Add to this node as fallback
+                m_objects.push_back(object);
+                m_objectBounds.push_back(objectBounds);
+                Logger::get().info("Added to current node as fallback");
+            }
+        }
+
+        // Final confirmation at root level
+        if (m_isRoot) {
+            Logger::get().info("Insertion complete, tree now has ~{} objects total",
+                estimateTotalObjects());
+        }
+    }
+
+    // Helper method to estimate total objects in tree (call from root)
+    template<typename T>
+    size_t OctreeNode<T>::estimateTotalObjects() const {
+        size_t count = m_objects.size();
+
+        for (int i = 0; i < 8; i++) {
+            if (m_children[i]) {
+                count += m_children[i]->estimateTotalObjects();
+            }
+        }
+
+        return count;
+    }
+
+    template<typename T>
+    void OctreeNode<T>::split() {
+        if (!m_isLeaf) return;  // Already split
+
+        // Mark as non-leaf
+        m_isLeaf = false;
+
+        // Get center of this node
+        Vec3Q center = m_bounds.getCenter();
+
+        // Create eight children (octants)
+        for (int i = 0; i < 8; i++) {
+            // Determine min/max for each octant
+            Vec3Q min, max;
+
+            min.x = (i & 1) ? center.x : m_bounds.min.x;
+            min.y = (i & 2) ? center.y : m_bounds.min.y;
+            min.z = (i & 4) ? center.z : m_bounds.min.z;
+
+            max.x = (i & 1) ? m_bounds.max.x : center.x;
+            max.y = (i & 2) ? m_bounds.max.y : center.y;
+            max.z = (i & 4) ? m_bounds.max.z : center.z;
+
+            // Create child with new bounds
+            AABBQ childBounds = AABBQ(min, max);
+
+            // Create the child node with proper constructor parameters
+            m_children[i] = std::make_unique<OctreeNode<T>>(
+                childBounds,
+                m_depth + 1,  // Increment depth for child
+                m_maxDepth,   // Pass down max depth
+                m_maxObjects, // Pass down max objects per node
+                false         // NOT THE FUCKING ROOT NODE
+            );
+        }
+
+        // Redistribute existing objects to children
+        for (size_t i = 0; i < m_objects.size(); i++) {
+            for (int j = 0; j < 8; j++) {
+                // Now safe to access m_children[j] because we initialized it
+                if (m_children[j]->m_bounds.intersects(m_objectBounds[i])) {
+                    m_children[j]->insert(m_objects[i], m_objectBounds[i]);
+                }
+            }
+        }
+
+        // Clear objects from this node since they've been redistributed
+        m_objects.clear();
+        m_objectBounds.clear();
+    }
+
+    template<typename T>
+    int OctreeNode<T>::getChildIndex(const AABBQ& objectBounds) const {
+        // First check if this node is a leaf (no children yet)
+        if (m_isLeaf) {
+            return -1;
+        }
+
+        // Get center of this node
+        Vec3Q center = m_bounds.getCenter();
+
+        // Check if object is entirely within one octant
+        bool inPositiveX = objectBounds.min.x >= center.x;
+        bool inNegativeX = objectBounds.max.x < center.x;
+        bool inPositiveY = objectBounds.min.y >= center.y;
+        bool inNegativeY = objectBounds.max.y < center.y;
+        bool inPositiveZ = objectBounds.min.z >= center.z;
+        bool inNegativeZ = objectBounds.max.z < center.z;
+
+        // Must be entirely on one side of all three axes to be in a single child
+        if ((inPositiveX || inNegativeX) &&
+            (inPositiveY || inNegativeY) &&
+            (inPositiveZ || inNegativeZ)) {
+
+            int index = 0;
+            if (inPositiveX) index |= 1;
+            if (inPositiveY) index |= 2;
+            if (inPositiveZ) index |= 4;
+
+            return index;
+        }
+
+        // Object crosses center, so it spans multiple children
+        return -1;
+    }
+
+    // Main Octree class
+    template<typename T>
+    class Octree {
+    public:
+        Octree(const AABBQ& bounds, uint32_t maxDepth = 8, uint32_t maxObjects = 16)
+            : m_root(std::make_unique<OctreeNode<T>>(bounds, 0, maxDepth, maxObjects, true))
+        {
+        }
+
+
+
+        // Add an object to the octree
+        void insert(const T& object, const AABBQ& bounds) {
+            m_root->insert(object, bounds);
+        }
+
+        // Remove an object from the octree
+        bool remove(const T& object, const AABBQ& bounds) {
+            return m_root->remove(object, bounds);
+        }
+
+        // Update an object's position
+        bool update(const T& object, const AABBQ& oldBounds, const AABBQ& newBounds) {
+            return m_root->update(object, oldBounds, newBounds);
+        }
+
+        // Query objects within a bounding box
+        std::vector<T> query(const AABBQ& bounds) const {
+            std::vector<T> results;
+            m_root->query(bounds, results);
+            return results;
+        }
+
+        // Query objects that intersect with a frustum
+        std::vector<T> query(const Frustum& frustum) const {
+            std::vector<T> results;
+            m_root->query(frustum, results);
+            return results;
+        }
+
+        // Get all objects in the octree
+        std::vector<T> getAllObjects() const {
+            std::vector<T> results;
+            m_root->getAllObjects(results);
+            return results;
+        }
+
+        // Get the root node
+        const OctreeNode<T>* getRoot() const {
+            return m_root.get();
+        }
+
+    private:
+        std::unique_ptr<OctreeNode<T>> m_root;
+    };
+
+    // ===============================
+    // Clustered Renderer
+    // ===============================
+
+    // Cluster grid dimensions (typically 16x16x24)
+    struct ClusterConfig {
+        uint32_t xSlices;      // Horizontal slice count (e.g., 16)
+        uint32_t ySlices;      // Vertical slice count (e.g., 16)
+        uint32_t zSlices;      // Depth slice count (e.g., 24)
+        float nearPlane;       // Camera near clip distance
+        float farPlane;        // Camera far clip distance
+        bool logarithmicZ;     // Whether to use logarithmic Z distribution
+    };
+
+    // Light data structure for cluster-based lighting
+    struct ClusterLight {
+        alignas(16) glm::vec3 position;   // World-space position
+        float radius;                     // Light radius/range
+        alignas(16) glm::vec3 color;      // RGB color
+        float intensity;                  // Light intensity/brightness
+        int32_t type;                     // 0=point, 1=spot, 2=area, etc.
+        float spotAngle;                  // Cone angle for spotlights
+        float spotSoftness;               // Spot light edge softness
+        float padding;                    // For alignment
+    };
+
+    // Renderable object structure
+    struct RenderableObject {
+        uint32_t meshID;
+        uint32_t materialID;
+        glm::mat4 transform;
+        glm::mat4 prevTransform; // For motion vectors
+
+        // Store the quantized bounds for this object
+        AABBQ bounds;
+    };
+
+    class ClusteredRenderer {
+    public:
+        // Constructor takes the render context and configures the clustering grid
+        ClusteredRenderer(VkDevice device, VkPhysicalDevice physicalDevice, const ClusterConfig& config);
+        ~ClusteredRenderer();
+
+        // Initialize the renderer
+        bool initialize(VkFormat color, VkFormat depth);
+
+        void setCamera(Camera* camera);
+
+        // Processes the octree and builds the clusters for the current frame
+        void buildClusters(Camera* camera, const Octree<RenderableObject>& octree);
+
+        // Renders all visible objects using mesh shaders
+        void render(VkCommandBuffer cmdBuffer, Camera* camera);
+
+        // Updates light information
+        void updateLights(const std::vector<ClusterLight>& lights);
+
+    private:
+        // Creates the clustered data structures
+        void createClusterGrid();
+
+        void processOctreeNode(const OctreeNode<RenderableObject>* node, const Frustum& frustum);
+
+        // Creates the shader resources (descriptors, pipelines, etc.)
+        bool createShaderResources();
+
+        // Updates uniform buffers for the current frame
+        void updateUniformBuffers(Camera* camera);
+
+        // Culls the octree against the view frustum
+        void cullOctree(const Octree<RenderableObject>& octree, const Frustum& frustum);
+
+        // Assigns visible objects to clusters
+        void assignObjectsToClusters();
+
+        // Assigns lights to clusters
+        void assignLightsToClusters();
+
+        // Prepares the mesh shader draw commands
+        void prepareMeshShaderDrawCommands(VkCommandBuffer cmdBuffer);
+
+        // Helper method to find memory type
+        uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
+
+        // Helper method to create buffer
+        bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+            VkBuffer& buffer, VkDeviceMemory& bufferMemory);
+
+        // Helper method to map cluster grid to frustum
+        glm::vec3 worldToCluster(const glm::vec3& worldPos, const Camera camera);
+
+        // Helper to find clusters that contain an AABB
+        std::vector<uint32_t> findClustersForBounds(const AABBF& bounds, const Camera camera);
+
+    private:
+        // Vulkan handles
+        VkDevice m_device;
+        VkPhysicalDevice m_physicalDevice;
+        VkCommandPool m_commandPool;
+        VkQueue m_graphicsQueue;
+        uint32_t m_graphicsQueueFamily;
+
+        VkFormat colorFormat;
+        VkFormat depthFormat;
+
+        Camera m_camera;  // Shared ownership
+
+        // Configuration
+        ClusterConfig m_config;
+
+        // Storage for clusters
+        std::vector<Cluster> m_clusters;
+
+        // Storage for objects
+        std::vector<RenderableObject> m_visibleObjects;
+
+        // Storage for lights
+        std::vector<ClusterLight> m_lights;
+
+        // Maps of which objects/lights are in which clusters
+        std::vector<uint32_t> m_clusterLightIndices;
+        std::vector<uint32_t> m_clusterObjectIndices;
+
+        // Vulkan resources
+        std::unique_ptr<ShaderModule> m_taskShader = nullptr;
+        std::unique_ptr<ShaderModule> m_meshShader = nullptr;
+        std::unique_ptr<ShaderModule> m_fragmentShader = nullptr;
+
+        std::unique_ptr<PipelineLayoutResource> m_pipelineLayout = nullptr;
+        std::unique_ptr<PipelineResource> m_pipeline = nullptr;
+
+        // Descriptor resources
+        std::unique_ptr<DescriptorSetLayoutResource> m_descriptorSetLayout = nullptr;
+        std::unique_ptr<DescriptorPoolResource> m_descriptorPool = nullptr;
+        std::unique_ptr<DescriptorSetResource> m_descriptorSet = nullptr;
+
+        // Buffers
+        std::unique_ptr<Buffer> m_clusterBuffer = nullptr;
+        std::unique_ptr<Buffer> m_lightBuffer = nullptr;
+        std::unique_ptr<Buffer> m_objectBuffer = nullptr;
+        std::unique_ptr<Buffer> m_indexBuffer = nullptr;
+        std::unique_ptr<Buffer> m_uniformBuffer = nullptr;
+
+        // Frustum for current frame culling
+        Frustum m_frustum;
+
+        // Total number of clusters
+        uint32_t m_totalClusters;
+    };
+
+    // UBO for cluster rendering
+    struct ClusterUBO {
+        alignas(16) glm::mat4 viewMatrix;
+        alignas(16) glm::mat4 projMatrix;
+        alignas(16) glm::vec4 cameraPos;
+        alignas(16) glm::uvec4 clusterDimensions;  // x, y, z, pad
+        alignas(16) glm::vec4 zPlanes;             // near, far, clustersPerZ, pad
+        uint32_t numLights;
+        uint32_t numObjects;
+        uint32_t numClusters;
+        uint32_t padding;
+    };
+
+    // ===============================
+    // Implementation
+    // ===============================
+
+    ClusteredRenderer::ClusteredRenderer(VkDevice device, VkPhysicalDevice physicalDevice, const ClusterConfig& config)
+        : m_device(device)
+        , m_physicalDevice(physicalDevice)
+        , m_config(config)
+        , m_totalClusters(config.xSlices* config.ySlices* config.zSlices)
+    {
+    }
+
+    ClusteredRenderer::~ClusteredRenderer() {
+        // Cleanup is handled by RAII wrappers
+    }
+
+    void ClusteredRenderer::setCamera(Camera* camera) {
+        m_camera = *camera;
+    }
+
+
+    void ClusteredRenderer::createClusterGrid() {
+        // Initialize cluster storage
+        m_clusters.resize(m_totalClusters);
+
+        // Reserve space for indices
+        m_clusterLightIndices.reserve(m_totalClusters * 32); // Estimate 32 lights per cluster max
+        m_clusterObjectIndices.reserve(m_totalClusters * 64); // Estimate 64 objects per cluster max
+
+        // Create cluster buffer
+        VkDeviceSize clusterBufferSize = m_totalClusters * sizeof(Cluster);
+        m_clusterBuffer = std::make_unique<Buffer>(
+            m_device,
+            m_physicalDevice,
+            clusterBufferSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+
+        // Create index buffer for object and light indices
+        VkDeviceSize indexBufferSize = (m_clusterLightIndices.capacity() + m_clusterObjectIndices.capacity()) * sizeof(uint32_t);
+        m_indexBuffer = std::make_unique<Buffer>(
+            m_device,
+            m_physicalDevice,
+            indexBufferSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+
+        // Create uniform buffer
+        m_uniformBuffer = std::make_unique<Buffer>(
+            m_device,
+            m_physicalDevice,
+            sizeof(ClusterUBO),
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+
+        Logger::get().info("Created cluster grid with {} clusters ({}x{}x{})",
+            m_totalClusters, m_config.xSlices, m_config.ySlices, m_config.zSlices);
+    }
+
+    bool ClusteredRenderer::createShaderResources() {
+        try {
+            // Load shaders
+            m_taskShader = ShaderModule::compileFromFile(m_device, "shaders/cluster_task.task");
+            m_meshShader = ShaderModule::compileFromFile(m_device, "shaders/cluster_mesh.mesh");
+            m_fragmentShader = ShaderModule::compileFromFile(m_device, "shaders/cluster_frag.frag");
+
+            if (!m_taskShader || !m_meshShader || !m_fragmentShader) {
+                Logger::get().error("Failed to compile cluster shaders");
+                return false;
+            }
+
+            // Extract reflection data
+            ShaderReflection combinedReflection;
+            combinedReflection.merge(*m_taskShader->getReflection());
+            combinedReflection.merge(*m_meshShader->getReflection());
+            combinedReflection.merge(*m_fragmentShader->getReflection());
+
+            // Create descriptor set layout
+            m_descriptorSetLayout = combinedReflection.createDescriptorSetLayout(m_device, 0);
+            if (!m_descriptorSetLayout) {
+                Logger::get().error("Failed to create descriptor set layout");
+                return false;
+            }
+
+            // Create pipeline layout
+            std::vector<VkDescriptorSetLayout> setLayouts = { m_descriptorSetLayout->handle() };
+
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
+            pipelineLayoutInfo.pSetLayouts = setLayouts.data();
+
+            VkPipelineLayout pipelineLayoutHandle;
+            if (vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &pipelineLayoutHandle) != VK_SUCCESS) {
+                Logger::get().error("Failed to create pipeline layout");
+                return false;
+            }
+
+            m_pipelineLayout = std::make_unique<PipelineLayoutResource>(m_device, pipelineLayoutHandle);
+
+            // Create descriptor pool
+            m_descriptorPool = combinedReflection.createDescriptorPool(m_device, 10); // 10 sets max
+            if (!m_descriptorPool) {
+                Logger::get().error("Failed to create descriptor pool");
+                return false;
+            }
+
+            // Allocate descriptor set
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = m_descriptorPool->handle();
+            allocInfo.descriptorSetCount = 1;
+            allocInfo.pSetLayouts = &m_descriptorSetLayout->handle();
+
+            VkDescriptorSet descriptorSet;
+            if (vkAllocateDescriptorSets(m_device, &allocInfo, &descriptorSet) != VK_SUCCESS) {
+                Logger::get().error("Failed to allocate descriptor set");
+                return false;
+            }
+
+            m_descriptorSet = std::make_unique<DescriptorSetResource>(m_device, descriptorSet);
+
+            // Update descriptor set
+            std::array<VkWriteDescriptorSet, 5> descriptorWrites{};
+
+            // UBO
+            VkDescriptorBufferInfo uboInfo{};
+            uboInfo.buffer = m_uniformBuffer->getBuffer();
+            uboInfo.offset = 0;
+            uboInfo.range = sizeof(ClusterUBO);
+
+            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[0].dstSet = m_descriptorSet.get()->handle();
+            descriptorWrites[0].dstBinding = 0;
+            descriptorWrites[0].dstArrayElement = 0;
+            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrites[0].descriptorCount = 1;
+            descriptorWrites[0].pBufferInfo = &uboInfo;
+
+            // Cluster buffer
+            VkDescriptorBufferInfo clusterInfo{};
+            clusterInfo.buffer = m_clusterBuffer->getBuffer();
+            clusterInfo.offset = 0;
+            clusterInfo.range = VK_WHOLE_SIZE;
+
+            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[1].dstSet = m_descriptorSet.get()->handle();
+            descriptorWrites[1].dstBinding = 1;
+            descriptorWrites[1].dstArrayElement = 0;
+            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[1].descriptorCount = 1;
+            descriptorWrites[1].pBufferInfo = &clusterInfo;
+
+            // Object buffer
+            VkDescriptorBufferInfo objectInfo{};
+            objectInfo.buffer = m_objectBuffer ? m_objectBuffer.get()->getBuffer() : VK_NULL_HANDLE;
+            objectInfo.offset = 0;
+            objectInfo.range = VK_WHOLE_SIZE;
+
+            descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[2].dstSet = m_descriptorSet.get()->handle();
+            descriptorWrites[2].dstBinding = 2;
+            descriptorWrites[2].dstArrayElement = 0;
+            descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[2].descriptorCount = 1;
+            descriptorWrites[2].pBufferInfo = &objectInfo;
+
+            // Light buffer
+            VkDescriptorBufferInfo lightInfo{};
+            lightInfo.buffer = m_lightBuffer ? m_lightBuffer->getBuffer() : VK_NULL_HANDLE;
+            lightInfo.offset = 0;
+            lightInfo.range = VK_WHOLE_SIZE;
+
+            descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[3].dstSet = m_descriptorSet.get()->handle();
+            descriptorWrites[3].dstBinding = 3;
+            descriptorWrites[3].dstArrayElement = 0;
+            descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[3].descriptorCount = 1;
+            descriptorWrites[3].pBufferInfo = &lightInfo;
+
+            // Index buffer
+            VkDescriptorBufferInfo indexInfo{};
+            indexInfo.buffer = m_indexBuffer.get()->getBuffer();
+            indexInfo.offset = 0;
+            indexInfo.range = VK_WHOLE_SIZE;
+
+            descriptorWrites[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[4].dstSet = m_descriptorSet.get()->handle();
+            descriptorWrites[4].dstBinding = 4;
+            descriptorWrites[4].dstArrayElement = 0;
+            descriptorWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[4].descriptorCount = 1;
+            descriptorWrites[4].pBufferInfo = &indexInfo;
+
+            vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+
+            // Create pipeline
+            std::vector<VkPipelineShaderStageCreateInfo> shaderStages = {
+                m_taskShader->createShaderStageInfo(),
+                m_meshShader->createShaderStageInfo(),
+                m_fragmentShader->createShaderStageInfo()
+            };
+
+            // Pipeline creation will depend on whether we're using dynamic rendering or not
+            // Check for dynamic rendering capability on the device
+            bool dynamicRenderingSupported = true; // Replace with actual capability check
+
+            if (dynamicRenderingSupported) {
+                // Create pipeline with dynamic rendering
+                VkPipelineRenderingCreateInfoKHR renderingInfo{};
+                renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+                renderingInfo.colorAttachmentCount = 1;
+
+                // Set format based on your swapchain format
+                renderingInfo.pColorAttachmentFormats = &colorFormat;
+
+                // Setup depth format if used
+                renderingInfo.depthAttachmentFormat = depthFormat;
+
+                // Create graphics pipeline
+                VkGraphicsPipelineCreateInfo pipelineInfo{};
+                pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+                pipelineInfo.pNext = &renderingInfo;
+                pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+                pipelineInfo.pStages = shaderStages.data();
+                pipelineInfo.layout = m_pipelineLayout.get()->handle();
+
+                // Create pipeline state objects
+                VkPipelineViewportStateCreateInfo viewportState{};
+                viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+                viewportState.viewportCount = 1;
+                viewportState.scissorCount = 1;
+
+                VkPipelineRasterizationStateCreateInfo rasterizationState{};
+                rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+                rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
+                rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
+                rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+                rasterizationState.lineWidth = 1.0f;
+
+                VkPipelineMultisampleStateCreateInfo multisampleState{};
+                multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+                multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+                VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+                colorBlendAttachment.colorWriteMask =
+                    VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+                colorBlendAttachment.blendEnable = VK_FALSE;
+
+                VkPipelineColorBlendStateCreateInfo colorBlendState{};
+                colorBlendState.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+                colorBlendState.attachmentCount = 1;
+                colorBlendState.pAttachments = &colorBlendAttachment;
+
+                VkPipelineDepthStencilStateCreateInfo depthStencilState{};
+                depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+                depthStencilState.depthTestEnable = VK_TRUE;
+                depthStencilState.depthWriteEnable = VK_TRUE;
+                depthStencilState.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+                // Add dynamic states
+                VkDynamicState dynamicStates[] = {
+                    VK_DYNAMIC_STATE_VIEWPORT,
+                    VK_DYNAMIC_STATE_SCISSOR
+                };
+
+                VkPipelineDynamicStateCreateInfo dynamicState{};
+                dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+                dynamicState.dynamicStateCount = 2;
+                dynamicState.pDynamicStates = dynamicStates;
+
+                // Update the pipeline info
+                pipelineInfo.pViewportState = &viewportState;
+                pipelineInfo.pRasterizationState = &rasterizationState;
+                pipelineInfo.pMultisampleState = &multisampleState;
+                pipelineInfo.pColorBlendState = &colorBlendState;
+                pipelineInfo.pDepthStencilState = &depthStencilState;
+                pipelineInfo.pDynamicState = &dynamicState;
+
+                // Configure pipeline state
+                // ...
+
+                // Debug checks
+                if (shaderStages.empty()) {
+                    Logger::get().error("No shader stages for pipeline creation!");
+                    return false;
+                }
+
+                Logger::get().info("Creating pipeline with {} shader stages", shaderStages.size());
+                for (size_t i = 0; i < shaderStages.size(); i++) {
+                    Logger::get().info("Stage {}: module={}, stage={}",
+                        i, (void*)shaderStages[i].module, (int)shaderStages[i].stage);
+                }
+
+                Logger::get().info("Color format: {}", (int)colorFormat);
+                Logger::get().info("Depth format: {}", (int)depthFormat);
+                Logger::get().info("Pipeline layout: {}", (void*)pipelineInfo.layout);
+
+                // Make sure all required state structs are initialized
+                if (!pipelineInfo.pViewportState || !pipelineInfo.pRasterizationState ||
+                    !pipelineInfo.pMultisampleState || !pipelineInfo.pColorBlendState) {
+                    Logger::get().error("Missing required pipeline state objects!");
+                    return false;
+                }
+
+
+                VkPipeline pipelineHandle;
+                auto err = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipelineHandle);
+                if( err != VK_SUCCESS) {
+                    Logger::get().error("Failed to create graphics pipeline");
+                    return false;
+                }
+
+                m_pipeline = std::make_unique<PipelineResource>(m_device, pipelineHandle);
+            }
+            else {
+                // Create pipeline with traditional render pass
+                // ...
+            }
+
+            Logger::get().info("Cluster shader resources created successfully");
+            return true;
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in createShaderResources: {}", e.what());
+            return false;
+        }
+    }
+
+    void ClusteredRenderer::buildClusters(Camera* camera, const Octree<RenderableObject>& octree) {
+
+        m_clusterLightIndices.clear();
+        m_clusterObjectIndices.clear();
+        m_visibleObjects.clear();
+
+        // Extract frustum for culling
+        m_frustum = camera->getViewFrustum();
+        
+
+        // Cull octree against frustum
+        cullOctree(octree, m_frustum);
+
+        Logger::get().info("After culling: found {} visible objects", m_visibleObjects.size());
+
+
+        // Assign objects to clusters
+        assignObjectsToClusters();
+
+        // Assign lights to clusters
+        assignLightsToClusters();
+
+        // Update buffer data
+        updateUniformBuffers(camera);
+
+        // Update cluster buffer
+        if (!m_clusterBuffer || m_clusters.size() * sizeof(Cluster) > m_clusterBuffer->getSize()) {
+            // Only create new buffer if needed
+            VkDeviceSize clusterBufferSize = m_totalClusters * sizeof(Cluster);
+            m_clusterBuffer = std::make_unique<Buffer>(
+                m_device,
+                m_physicalDevice,
+                clusterBufferSize,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+        }
+        else {
+            // Just update existing buffer
+            m_clusterBuffer->update(m_clusters.data(), m_clusters.size() * sizeof(Cluster));
+        }
+
+
+
+        // Update object buffer if we have visible objects
+        if (m_visibleObjects.size() > 0) {
+            // Calculate required size
+            VkDeviceSize objectBufferSize = m_visibleObjects.size() * sizeof(RenderableObject);
+
+            // Check if we need to resize the buffer
+            bool resizeNeeded = !m_objectBuffer || m_objectBuffer->getSize() < objectBufferSize;
+
+            if (resizeNeeded) {
+                Logger::get().info("Resizing object buffer from {} to {} bytes",
+                    m_objectBuffer ? m_objectBuffer->getSize() : 0, objectBufferSize);
+
+                // Create new buffer with larger size
+                auto newBuffer = std::make_unique<Buffer>(
+                    m_device,
+                    m_physicalDevice,
+                    objectBufferSize,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                );
+
+                // Update descriptor for new buffer
+                VkDescriptorBufferInfo objectInfo{};
+                objectInfo.buffer = newBuffer->getBuffer();
+                objectInfo.offset = 0;
+                objectInfo.range = VK_WHOLE_SIZE;
+
+                VkWriteDescriptorSet write{};
+                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                write.dstSet = m_descriptorSet->handle();
+                write.dstBinding = 2;
+                write.dstArrayElement = 0;
+                write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                write.descriptorCount = 1;
+                write.pBufferInfo = &objectInfo;
+
+                vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+
+                // Copy data to new buffer
+                newBuffer->update(m_visibleObjects.data(), objectBufferSize);
+
+                // Replace old buffer with new one
+                m_objectBuffer = std::move(newBuffer);
+            }
+            else {
+                // Just update existing buffer data
+                m_objectBuffer->update(m_visibleObjects.data(), objectBufferSize);
+            }
+        }
+
+        // Update index buffer with combined object and light indices
+        size_t objectIndicesSize = m_clusterObjectIndices.size() * sizeof(uint32_t);
+        size_t lightIndicesSize = m_clusterLightIndices.size() * sizeof(uint32_t);
+        size_t totalIndicesSize = objectIndicesSize + lightIndicesSize;
+
+        if (totalIndicesSize > 0) {
+            // Check if we need to resize the index buffer
+            bool resizeNeeded = !m_indexBuffer || m_indexBuffer->getSize() < totalIndicesSize;
+
+            if (resizeNeeded) {
+                Logger::get().info("Resizing index buffer from {} to {} bytes",
+                    m_indexBuffer ? m_indexBuffer->getSize() : 0, totalIndicesSize);
+
+                // Create new buffer with larger size (add 20% extra for growth)
+                VkDeviceSize newSize = static_cast<VkDeviceSize>(totalIndicesSize * 1.2);
+                auto newBuffer = std::make_unique<Buffer>(
+                    m_device,
+                    m_physicalDevice,
+                    newSize,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                );
+
+                // Update descriptor for new buffer
+                VkDescriptorBufferInfo indexInfo{};
+                indexInfo.buffer = newBuffer->getBuffer();
+                indexInfo.offset = 0;
+                indexInfo.range = VK_WHOLE_SIZE;
+
+                VkWriteDescriptorSet write{};
+                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                write.dstSet = m_descriptorSet->handle();
+                write.dstBinding = 4; // Assuming binding 4 is for the index buffer
+                write.dstArrayElement = 0;
+                write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                write.descriptorCount = 1;
+                write.pBufferInfo = &indexInfo;
+
+                vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+
+                // Update the new buffer with combined data
+                if (objectIndicesSize > 0) {
+                    newBuffer->update(m_clusterObjectIndices.data(), objectIndicesSize, 0);
+                }
+
+                if (lightIndicesSize > 0) {
+                    newBuffer->update(m_clusterLightIndices.data(), lightIndicesSize, objectIndicesSize);
+                }
+
+                // Replace old buffer with new one
+                m_indexBuffer = std::move(newBuffer);
+            }
+            else {
+                // Update existing buffer data
+                if (objectIndicesSize > 0) {
+                    m_indexBuffer->update(m_clusterObjectIndices.data(), objectIndicesSize, 0);
+                }
+
+                if (lightIndicesSize > 0) {
+                    m_indexBuffer->update(m_clusterLightIndices.data(), lightIndicesSize, objectIndicesSize);
+                }
+            }
+        }
+
+        Logger::get().info("Built clusters with {} objects and {} lights",
+            m_visibleObjects.size(), m_lights.size());
+    }
+
+    void ClusteredRenderer::cullOctree(const Octree<RenderableObject>& octree, const Frustum& frustum) {
+        // Start with the root node
+        const OctreeNode<RenderableObject>* root = octree.getRoot();
+        if (!root) return;
+
+        // Process the root node
+        processOctreeNode(root, frustum);
+    }
+
+    void ClusteredRenderer::processOctreeNode(const OctreeNode<RenderableObject>* node, const Frustum& frustum) {
+        if (!node) return;
+
+        // Debug output about the node
+        AABBF nodeBoundsF = node->getBounds().toFloat();
+        Logger::get().info("Checking node with bounds: min=({},{},{}), max=({},{},{})",
+            nodeBoundsF.min.x, nodeBoundsF.min.y, nodeBoundsF.min.z,
+            nodeBoundsF.max.x, nodeBoundsF.max.y, nodeBoundsF.max.z);
+
+        // Check if node bounds intersect frustum
+        bool intersects = frustum.containsAABB(nodeBoundsF.min, nodeBoundsF.max);
+        Logger::get().info("Node intersects frustum: {}", intersects ? "YES" : "NO");
+
+        if (!intersects) {
+            return; // Skip this node entirely
+        }
+
+        // If this is a leaf node with objects
+        /*if (node->isLeaf()) {
+            const auto& objects = node->getObjects();
+            Logger::get().info("Leaf node has {} objects", objects.size());
+
+            for (const auto& object : objects) {
+                // Convert to float for testing
+                AABBF objBounds = object.bounds.toFloat();
+
+                // Test against frustum
+                bool visible = frustum.containsAABB(objBounds.min, objBounds.max);
+                Logger::get().info("Object bounds: min=({},{},{}), max=({},{},{}), visible: {}",
+                    objBounds.min.x, objBounds.min.y, objBounds.min.z,
+                    objBounds.max.x, objBounds.max.y, objBounds.max.z,
+                    visible ? "YES" : "NO");
+
+                if (visible) {
+                    m_visibleObjects.push_back(object);
+                }
+            }
+        }*/
+
+        if (node->isLeaf()) {
+            const auto& objects = node->getObjects();
+            Logger::get().info("Leaf node has {} objects", objects.size());
+
+            // Add ALL objects from leaf nodes (bypass frustum test)
+            for (const auto& object : objects) {
+                Logger::get().info("Adding object to visible set (bypassing frustum test)");
+                m_visibleObjects.push_back(object);
+            }
+        }
+
+        else {
+            // Recursively process child nodes
+            for (int i = 0; i < 8; i++) {
+                processOctreeNode(node->getChild(i), frustum);
+            }
+        }
+    }
+
+    void ClusteredRenderer::assignObjectsToClusters() {
+        // Clear previous assignments
+        for (auto& cluster : m_clusters) {
+            cluster.objectOffset = 0;
+            cluster.objectCount = 0;
+        }
+
+        // Temporary map of objects per cluster
+        std::vector<std::vector<uint32_t>> clusterObjects(m_totalClusters);
+
+        // Assign each visible object to clusters
+        for (size_t objIdx = 0; objIdx < m_visibleObjects.size(); objIdx++) {
+            const auto& obj = m_visibleObjects[objIdx];
+
+            // Calculate object bounds in world space
+            AABBF worldBounds = obj.bounds.toFloat();
+
+            // Transform bounds to view space
+            glm::mat4 viewMatrix = m_camera.getViewMatrix();
+            AABBF viewBounds = transformAABB(viewMatrix, worldBounds);
+
+            // Log for debugging
+            Logger::get().info("Object {} world bounds: min=({},{},{}), max=({},{},{})",
+                objIdx,
+                worldBounds.min.x, worldBounds.min.y, worldBounds.min.z,
+                worldBounds.max.x, worldBounds.max.y, worldBounds.max.z);
+
+            Logger::get().info("Object {} view bounds: min=({},{},{}), max=({},{},{})",
+                objIdx,
+                viewBounds.min.x, viewBounds.min.y, viewBounds.min.z,
+                viewBounds.max.x, viewBounds.max.y, viewBounds.max.z);
+
+            // Find clusters that contain this object
+            std::vector<uint32_t> clusters = findClustersForBounds(viewBounds, m_camera);
+            Logger::get().info("Object {} assigned to {} clusters", objIdx, clusters.size());
+
+            // Add object index to each cluster
+            for (uint32_t clusterIdx : clusters) {
+                if (clusterIdx < m_totalClusters) {
+                    clusterObjects[clusterIdx].push_back(static_cast<uint32_t>(objIdx));
+                }
+            }
+        }
+
+        // Compact the object indices
+        m_clusterObjectIndices.clear();
+        for (uint32_t i = 0; i < m_totalClusters; i++) {
+            m_clusters[i].objectOffset = static_cast<uint32_t>(m_clusterObjectIndices.size());
+            m_clusters[i].objectCount = static_cast<uint32_t>(clusterObjects[i].size());
+
+            m_clusterObjectIndices.insert(
+                m_clusterObjectIndices.end(),
+                clusterObjects[i].begin(),
+                clusterObjects[i].end()
+            );
+        }
+    }
+
+    void ClusteredRenderer::assignLightsToClusters() {
+        // Clear previous assignments
+        for (auto& cluster : m_clusters) {
+            cluster.lightOffset = 0;
+            cluster.lightCount = 0;
+        }
+
+        // Temporary map of lights per cluster
+        std::vector<std::vector<uint32_t>> clusterLights(m_totalClusters);
+
+        // Assign each light to clusters
+        for (size_t lightIdx = 0; lightIdx < m_lights.size(); lightIdx++) {
+            const auto& light = m_lights[lightIdx];
+
+            // Skip directional lights (they affect all clusters)
+            if (light.type == 2) {
+                continue;
+            }
+
+            // Calculate light bounds
+            float radius = light.radius;
+            AABBF lightBounds = {
+                glm::vec3(light.position) - glm::vec3(radius),
+                glm::vec3(light.position) + glm::vec3(radius)
+            };
+
+            // Find clusters that contain this light
+            std::vector<uint32_t> clusters = findClustersForBounds(lightBounds, m_camera);
+
+            // Add light index to each cluster
+            for (uint32_t clusterIdx : clusters) {
+                if (clusterIdx < m_totalClusters) {
+                    clusterLights[clusterIdx].push_back(static_cast<uint32_t>(lightIdx));
+                }
+            }
+        }
+
+        // Find directional lights
+        std::vector<uint32_t> directionalLights;
+        for (size_t lightIdx = 0; lightIdx < m_lights.size(); lightIdx++) {
+            if (m_lights[lightIdx].type == 2) { // Directional light
+                directionalLights.push_back(static_cast<uint32_t>(lightIdx));
+            }
+        }
+
+        // Compact the light indices
+        m_clusterLightIndices.clear();
+        for (uint32_t i = 0; i < m_totalClusters; i++) {
+            m_clusters[i].lightOffset = static_cast<uint32_t>(m_clusterLightIndices.size());
+
+            // Add cluster-specific lights
+            m_clusterLightIndices.insert(
+                m_clusterLightIndices.end(),
+                clusterLights[i].begin(),
+                clusterLights[i].end()
+            );
+
+            // Add directional lights to all clusters
+            m_clusterLightIndices.insert(
+                m_clusterLightIndices.end(),
+                directionalLights.begin(),
+                directionalLights.end()
+            );
+
+            m_clusters[i].lightCount = static_cast<uint32_t>(clusterLights[i].size() + directionalLights.size());
+        }
+    }
+
+    void ClusteredRenderer::updateUniformBuffers(Camera* camera) {
+        // Update uniform buffer with camera data
+        ClusterUBO ubo;
+
+        ubo.viewMatrix = camera->getViewMatrix();
+        ubo.projMatrix = camera->getProjectionMatrix();
+        ubo.cameraPos = glm::vec4(camera->getLocalPosition(), 1.0f);
+        ubo.clusterDimensions = glm::uvec4(m_config.xSlices, m_config.ySlices, m_config.zSlices, 0);
+        ubo.zPlanes = glm::vec4(m_config.nearPlane, m_config.farPlane, static_cast<float>(m_config.zSlices), 0.0f);
+        ubo.numLights = static_cast<uint32_t>(m_lights.size());
+        ubo.numObjects = static_cast<uint32_t>(m_visibleObjects.size());
+        ubo.numClusters = m_totalClusters;
+
+        m_uniformBuffer->update(&ubo, sizeof(ubo));
+    }
+
+    void ClusteredRenderer::render(VkCommandBuffer cmdBuffer, Camera* camera) {
+        // Bind the pipeline
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->handle());
+
+        // Bind descriptor sets
+        vkCmdBindDescriptorSets(
+            cmdBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_pipelineLayout->handle(),
+            0,
+            1,
+            &m_descriptorSet->handle(),
+            0,
+            nullptr
+        );
+
+        // Set viewport and scissor
+        // (These values would typically come from the swapchain extent)
+        VkViewport viewport{};
+        viewport.width = 1920.0f;  // Replace with actual dimensions
+        viewport.height = 1080.0f; // Replace with actual dimensions
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
+
+        VkRect2D scissor{};
+        scissor.extent = { 1920, 1080 }; // Replace with actual dimensions
+        vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
+
+        // Draw using mesh shaders
+        // Calculate the number of task shader workgroups needed
+        uint32_t taskGroupX = (m_totalClusters + 31) / 32; // 32 clusters per workgroup
+
+        // Draw using mesh shaders
+        vkCmdDrawMeshTasksEXT(
+            cmdBuffer,
+            taskGroupX, // X dimension of the grid
+            1,          // Y dimension of the grid
+            1           // Z dimension of the grid
+        );
+    }
+
+    void ClusteredRenderer::updateLights(const std::vector<ClusterLight>& lights) {
+        m_lights = lights;
+
+        // Create or resize light buffer if needed
+        VkDeviceSize lightBufferSize = m_lights.size() * sizeof(ClusterLight);
+        if (!m_lightBuffer || m_lightBuffer->getSize() < lightBufferSize) {
+            m_lightBuffer = std::make_unique<Buffer>(
+                m_device,
+                m_physicalDevice,
+                lightBufferSize,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            // Update descriptor for new buffer
+            VkDescriptorBufferInfo lightInfo{};
+            lightInfo.buffer = m_lightBuffer->getBuffer();
+            lightInfo.offset = 0;
+            lightInfo.range = VK_WHOLE_SIZE;
+
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = m_descriptorSet->handle();
+            write.dstBinding = 3;
+            write.dstArrayElement = 0;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            write.descriptorCount = 1;
+            write.pBufferInfo = &lightInfo;
+
+            vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+        }
+
+        // Update light data
+        if (m_lights.size() > 0) {
+            m_lightBuffer->update(m_lights.data(), lightBufferSize);
+        }
+    }
+
+    // Helper to find clusters that contain an AABB
+    std::vector<uint32_t> ClusteredRenderer::findClustersForBounds(const AABBF& bounds, const Camera camera) {
+        std::vector<uint32_t> result;
+
+        // Get the 8 corners of the AABB
+        std::array<glm::vec3, 8> corners = {
+            glm::vec3(bounds.min.x, bounds.min.y, bounds.min.z),
+            glm::vec3(bounds.max.x, bounds.min.y, bounds.min.z),
+            glm::vec3(bounds.min.x, bounds.max.y, bounds.min.z),
+            glm::vec3(bounds.max.x, bounds.max.y, bounds.min.z),
+            glm::vec3(bounds.min.x, bounds.min.y, bounds.max.z),
+            glm::vec3(bounds.max.x, bounds.min.y, bounds.max.z),
+            glm::vec3(bounds.min.x, bounds.max.y, bounds.max.z),
+            glm::vec3(bounds.max.x, bounds.max.y, bounds.max.z)
+        };
+
+        // Track the cluster bounds of the AABB
+        int minX = m_config.xSlices;
+        int minY = m_config.ySlices;
+        int minZ = m_config.zSlices;
+        int maxX = -1;
+        int maxY = -1;
+        int maxZ = -1;
+
+        // Convert each corner to cluster space and expand bounds
+        for (const auto& corner : corners) {
+            glm::vec3 clusterPos = worldToCluster(corner, camera);
+
+            // Add debug output for each corner
+            Logger::get().info("Corner: world=({},{},{}) → cluster=({},{},{})",
+                corner.x, corner.y, corner.z,
+                clusterPos.x, clusterPos.y, clusterPos.z);
+
+            // Update bounds, making sure values are valid cluster indices
+            int x = glm::clamp(static_cast<int>(clusterPos.x), 0, static_cast<int>(m_config.xSlices - 1));
+            int y = glm::clamp(static_cast<int>(clusterPos.y), 0, static_cast<int>(m_config.ySlices - 1));
+            int z = glm::clamp(static_cast<int>(clusterPos.z), 0, static_cast<int>(m_config.zSlices - 1));
+
+            minX = std::min(minX, x);
+            minY = std::min(minY, y);
+            minZ = std::min(minZ, z);
+            maxX = std::max(maxX, x);
+            maxY = std::max(maxY, y);
+            maxZ = std::max(maxZ, z);
+        }
+
+        // Check if we found any valid clusters
+        if (minX > maxX || minY > maxY || minZ > maxZ) {
+            Logger::get().warning("No valid clusters found for bounds min=({},{},{}), max=({},{},{})",
+                bounds.min.x, bounds.min.y, bounds.min.z,
+                bounds.max.x, bounds.max.y, bounds.max.z);
+            return result;
+        }
+
+        // Add all clusters within the bounds
+        Logger::get().info("Cluster bounds: X=[{},{}], Y=[{},{}], Z=[{},{}]",
+            minX, maxX, minY, maxY, minZ, maxZ);
+
+        // Limit cluster count to avoid excessive assignments
+        int maxClusters = 65536;  // Set a reasonable limit
+        int clusterCount = (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+
+        if (clusterCount > maxClusters) {
+            // If too many clusters, simplify by using only the most important ones
+            Logger::get().warning("Too many clusters ({}) - restricting to {} key clusters",
+                clusterCount, maxClusters);
+
+            // Just add clusters along the main diagonal as a simple approximation
+            for (int i = 0; i < maxClusters; i++) {
+                float t = i / static_cast<float>(maxClusters - 1);
+                int x = minX + static_cast<int>(t * (maxX - minX));
+                int y = minY + static_cast<int>(t * (maxY - minY));
+                int z = minZ + static_cast<int>(t * (maxZ - minZ));
+
+                uint32_t clusterIdx = z * m_config.xSlices * m_config.ySlices +
+                    y * m_config.xSlices + x;
+
+                if (clusterIdx < m_totalClusters) {
+                    result.push_back(clusterIdx);
+                }
+            }
+        }
+        else {
+            // Add all clusters in the range
+            for (int z = minZ; z <= maxZ; z++) {
+                for (int y = minY; y <= maxY; y++) {
+                    for (int x = minX; x <= maxX; x++) {
+                        uint32_t clusterIdx = z * m_config.xSlices * m_config.ySlices +
+                            y * m_config.xSlices + x;
+
+                        if (clusterIdx < m_totalClusters) {
+                            result.push_back(clusterIdx);
+                        }
+                    }
+                }
+            }
+        }
+
+        Logger::get().info("Found {} clusters for bounds", result.size());
+        return result;
+    }
+
+    // Convert world position to cluster space
+    glm::vec3 ClusteredRenderer::worldToCluster(const glm::vec3& worldPos, const Camera camera) {
+        // Transform to view space
+        glm::vec4 viewPos = camera.getViewMatrix() * glm::vec4(worldPos, 1.0f);
+
+        // Get projection matrix values needed for proper NDC calculation
+        const glm::mat4& proj = camera.getProjectionMatrix();
+        float projXX = proj[0][0];
+        float projYY = proj[1][1];
+
+        // Calculate correct NDC coordinates using projection matrix values
+        float ndcX = viewPos.x * projXX / -viewPos.z;
+        float ndcY = viewPos.y * projYY / -viewPos.z;
+
+        // Properly map NDC [-1,1] to cluster coordinates [0,slices]
+        float clusterX = (ndcX + 1.0f) * 0.5f * static_cast<float>(m_config.xSlices - 1);
+        float clusterY = (ndcY + 1.0f) * 0.5f * static_cast<float>(m_config.ySlices - 1);
+
+        // Ensure cluster coordinates are clamped to valid range
+        clusterX = glm::clamp(clusterX, 0.0f, static_cast<float>(m_config.xSlices - 1));
+        clusterY = glm::clamp(clusterY, 0.0f, static_cast<float>(m_config.ySlices - 1));
+
+        // Ensure Z is in the valid range before calculating cluster Z
+        float zViewSpace = -viewPos.z;  // Make positive for math operations
+        zViewSpace = glm::clamp(zViewSpace, camera.getNearClip(), camera.getFarClip());
+
+        // Calculate Z cluster index (logarithmic or linear)
+        float clusterZ;
+        if (m_config.logarithmicZ) {
+            float near = camera.getNearClip();
+            float far = camera.getFarClip();
+            float logRatio = logf(far / near);
+            if (logRatio < 0.0001f) logRatio = 0.0001f;  // Avoid division by zero
+
+            clusterZ = static_cast<float>(m_config.zSlices - 1) *
+                (logf(zViewSpace / near) / logRatio);
+        }
+        else {
+            // Linear mapping
+            clusterZ = static_cast<float>(m_config.zSlices - 1) *
+                ((zViewSpace - camera.getNearClip()) /
+                    (camera.getFarClip() - camera.getNearClip()));
+        }
+
+        // Ensure Z is also clamped
+        clusterZ = glm::clamp(clusterZ, 0.0f, static_cast<float>(m_config.zSlices - 1));
+
+        return glm::vec3(clusterX, clusterY, clusterZ);
+    }
+} // namespace tremor::gfx
+
+namespace tremor::gfx { 
+
+
+
+    Camera::Camera()
+        : m_fovRadians(glm::radians(60.0f))
+        , m_aspectRatio(16.0f / 9.0f)
+        , m_nearZ(0.1f)
+        , m_farZ(1000.0f)
+        , m_viewDirty(true)
+        , m_projDirty(true)
+        , m_vpDirty(true) {
+
+        // Default position at origin
+        m_position.integer = glm::i64vec3(0);
+        m_position.fractional = glm::vec3(0.0f);
+
+        // Default orientation
+        m_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    Camera::Camera(float fovDegrees, float aspectRatio, float nearZ, float farZ)
+        : m_fovRadians(glm::radians(fovDegrees))
+        , m_aspectRatio(aspectRatio)
+        , m_nearZ(nearZ)
+        , m_farZ(farZ)
+        , m_viewDirty(true)
+        , m_projDirty(true)
+        , m_vpDirty(true) {
+
+        // Default position at origin
+        m_position.integer = glm::i64vec3(0);
+        m_position.fractional = glm::vec3(0.0f);
+
+        // Default orientation
+        m_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    void Camera::setPosition(const glm::vec3& position) {
+        Logger::get().info("Camera::setPosition: position={},{},{}",
+            position.x, position.y, position.z);
+        m_position.integer = glm::i64vec3(0);
+        m_position.fractional = position;
+        normalizePosition();
+        m_viewDirty = true;
+    }
+
+    void Camera::setRotation(float pitch, float yaw, float roll) {
+        // Create quaternion from Euler angles (in radians)
+        glm::quat quatPitch = glm::angleAxis(glm::radians(pitch), glm::vec3(1.0f, 0.0f, 0.0f));
+        glm::quat quatYaw = glm::angleAxis(glm::radians(yaw), glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::quat quatRoll = glm::angleAxis(glm::radians(roll), glm::vec3(0.0f, 0.0f, 1.0f));
+
+        m_rotation = quatYaw * quatPitch * quatRoll;
+        m_viewDirty = true;
+    }
+
+    void Camera::move(const glm::vec3& delta) {
+        // Convert delta to world space
+        glm::vec3 worldDelta = m_rotation * delta;
+
+        // Add to fractional part
+        m_position.fractional += worldDelta;
+
+        // Handle potential overflow/underflow
+        normalizePosition();
+        m_viewDirty = true;
+    }
+
+    void Camera::moveWorld(const glm::vec3& delta) {
+        // Add directly to fractional part
+        m_position.fractional += delta;
+
+        // Handle potential overflow/underflow
+        normalizePosition();
+        m_viewDirty = true;
+    }
+
+    void Camera::rotate(float pitchDelta, float yawDelta, float rollDelta) {
+        // Create delta rotation quaternion
+        glm::quat quatPitch = glm::angleAxis(glm::radians(pitchDelta), glm::vec3(1.0f, 0.0f, 0.0f));
+        glm::quat quatYaw = glm::angleAxis(glm::radians(yawDelta), glm::vec3(0.0f, 1.0f, 0.0f));
+        glm::quat quatRoll = glm::angleAxis(glm::radians(rollDelta), glm::vec3(0.0f, 0.0f, 1.0f));
+
+        // Apply rotation (yaw * pitch * roll order)
+        glm::quat deltaRotation = quatYaw * quatPitch * quatRoll;
+        m_rotation = m_rotation * deltaRotation;
+
+        // Normalize to prevent drift
+        m_rotation = glm::normalize(m_rotation);
+        m_viewDirty = true;
+    }
+
+    void Camera::lookAt(const glm::vec3& target, const glm::vec3& up) {
+        // Get current position in local space
+        glm::vec3 pos = getLocalPosition();
+
+        // Calculate view matrix directly
+        glm::mat4 view = glm::lookAt(pos, target, up);
+
+        // Extract rotation from the view matrix
+        // This is more reliable than trying to calculate the quaternion ourselves
+        glm::mat3 rotMat(view);
+        m_rotation = glm::quat(rotMat);
+
+        // Note: Quaternion from view matrix might need conjugation
+        // depending on how it's used later
+        m_rotation = glm::conjugate(m_rotation);
+
+        m_viewDirty = true;
+
+        Logger::get().info("lookAt: pos={},{},{}, target={},{},{}",
+            pos.x, pos.y, pos.z, target.x, target.y, target.z);
+    }
+
+    void Camera::lookAt(const WorldPosition& target, const glm::vec3& up) {
+        // Calculate world-space vector from camera to target
+        glm::dvec3 targetPos = target.getCombined();
+        glm::dvec3 cameraPos = m_position.getCombined();
+
+        // Convert to float (for local space operations)
+        glm::vec3 direction = glm::normalize(glm::vec3(targetPos - cameraPos));
+
+        // Create rotation quaternion
+        m_rotation = glm::quatLookAt(direction, up);
+        m_viewDirty = true;
+    }
+
+    glm::vec3 Camera::getLocalPosition() const {
+        // Convert 64-bit position to local-space float position
+        // This is a simplified version - a real implementation would
+        // have to consider the reference point for local space
+        glm::vec3 combinedPos;
+
+        if (m_position.integer == glm::i64vec3(0)) {
+            // If integer part is zero, use fractional directly
+            combinedPos = m_position.fractional;
+        }
+        else {
+            // Otherwise use a local-space approximation
+            // (This could be more sophisticated based on a reference point)
+            combinedPos = glm::vec3(
+                static_cast<float>(m_position.integer.x) + m_position.fractional.x,
+                static_cast<float>(m_position.integer.y) + m_position.fractional.y,
+                static_cast<float>(m_position.integer.z) + m_position.fractional.z
+            );
+        }
+        return combinedPos;
+    }
+
+    glm::vec3 Camera::getForward() const {
+        return m_rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+    }
+
+    glm::vec3 Camera::getRight() const {
+        return m_rotation * glm::vec3(1.0f, 0.0f, 0.0f);
+    }
+
+    glm::vec3 Camera::getUp() const {
+        return m_rotation * glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+
+    const glm::mat4& Camera::getViewMatrix() const {
+        if (m_viewDirty) {
+            static_cast<Camera>(*this).updateViewMatrix();
+            Logger::get().info("View matrix updated");
+        }
+        return m_viewMatrix;
+    }
+
+    const glm::mat4& Camera::getProjectionMatrix() const {
+        if (m_projDirty) {
+            static_cast<Camera>(*this).updateProjectionMatrix();
+        }
+        return m_projectionMatrix;
+    }
+
+    const glm::mat4& Camera::getViewProjectionMatrix() const{
+        if (m_viewDirty || m_projDirty || m_vpDirty) {
+            static_cast<Camera>(*this).updateViewProjectionMatrix();
+        }
+        return m_viewProjectionMatrix;
+    }
+
+    void Camera::updateViewMatrix() {
+        m_viewMatrix = calculateViewMatrix();
+
+        Logger::get().info("View Matrix[3]: {}, {}, {}",
+            m_viewMatrix[3][0], m_viewMatrix[3][1], m_viewMatrix[3][2]);
+
+
+
+        m_viewDirty = false;
+        m_vpDirty = true;
+    }
+
+    void Camera::updateProjectionMatrix() {
+        // Use reverse depth for better precision
+        m_projectionMatrix = glm::perspectiveZO(m_fovRadians, m_aspectRatio, m_farZ, m_nearZ);
+
+        // Fix Vulkan's coordinate system (flip Y)
+        m_projectionMatrix[1][1] *= -1;
+
+        m_projDirty = false;
+        m_vpDirty = true;
+    }
+
+    void Camera::updateViewProjectionMatrix() {
+        if (m_viewDirty) {
+            updateViewMatrix();
+        }
+        if (m_projDirty) {
+            updateProjectionMatrix();
+        }
+
+        m_viewProjectionMatrix = m_projectionMatrix * m_viewMatrix;
+        m_vpDirty = false;
+    }
+
+    glm::mat4 Camera::calculateViewMatrix() {
+        glm::vec3 pos = getLocalPosition();
+
+        // Create view matrix based on position and rotation
+        glm::vec3 forward = getForward();
+        glm::vec3 target = pos + forward; // Look in the direction of forward vector
+
+        return glm::lookAt(pos, target, glm::vec3(0.0f, 1.0f, 0.0f));
+    }
+
+
+    void Camera::normalizePosition() {
+        // Handle overflow/underflow in fractional part
+        // If any component is >= 1.0 or < 0.0, adjust integer part
+
+        // X component
+        if (m_position.fractional.x >= 1.0f) {
+            int64_t increment = static_cast<int64_t>(m_position.fractional.x);
+            m_position.integer.x += increment;
+            m_position.fractional.x -= static_cast<float>(increment);
+        }
+        else if (m_position.fractional.x < 0.0f) {
+            int64_t decrement = static_cast<int64_t>(-m_position.fractional.x) + 1;
+            m_position.integer.x -= decrement;
+            m_position.fractional.x += static_cast<float>(decrement);
+        }
+
+        // Y component
+        if (m_position.fractional.y >= 1.0f) {
+            int64_t increment = static_cast<int64_t>(m_position.fractional.y);
+            m_position.integer.y += increment;
+            m_position.fractional.y -= static_cast<float>(increment);
+        }
+        else if (m_position.fractional.y < 0.0f) {
+            int64_t decrement = static_cast<int64_t>(-m_position.fractional.y) + 1;
+            m_position.integer.y -= decrement;
+            m_position.fractional.y += static_cast<float>(decrement);
+        }
+
+        // Z component
+        if (m_position.fractional.z >= 1.0f) {
+            int64_t increment = static_cast<int64_t>(m_position.fractional.z);
+            m_position.integer.z += increment;
+            m_position.fractional.z -= static_cast<float>(increment);
+        }
+        else if (m_position.fractional.z < 0.0f) {
+            int64_t decrement = static_cast<int64_t>(-m_position.fractional.z) + 1;
+            m_position.integer.z -= decrement;
+            m_position.fractional.z += static_cast<float>(decrement);
+        }
+    }
+
+    Frustum Camera::getViewFrustum() {
+        Frustum frustum;
+        extractFrustumPlanes(frustum.planes);
+
+        // Calculate frustum corners
+        // ... (implementation for calculating the 8 corners)
+
+        return frustum;
+    }
+
+    void Camera::extractFrustumPlanes(glm::vec4 planes[6]) {
+        // Get the view-projection matrix
+        const glm::mat4& vp = getViewProjectionMatrix();
+
+        // Extract the six frustum planes
+        // Left plane
+        planes[Frustum::LEFT].x = vp[0][3] + vp[0][0];
+        planes[Frustum::LEFT].y = vp[1][3] + vp[1][0];
+        planes[Frustum::LEFT].z = vp[2][3] + vp[2][0];
+        planes[Frustum::LEFT].w = vp[3][3] + vp[3][0];
+
+        // Right plane
+        planes[Frustum::RIGHT].x = vp[0][3] - vp[0][0];
+        planes[Frustum::RIGHT].y = vp[1][3] - vp[1][0];
+        planes[Frustum::RIGHT].z = vp[2][3] - vp[2][0];
+        planes[Frustum::RIGHT].w = vp[3][3] - vp[3][0];
+
+        // Bottom plane
+        planes[Frustum::BOTTOM].x = vp[0][3] + vp[0][1];
+        planes[Frustum::BOTTOM].y = vp[1][3] + vp[1][1];
+        planes[Frustum::BOTTOM].z = vp[2][3] + vp[2][1];
+        planes[Frustum::BOTTOM].w = vp[3][3] + vp[3][1];
+
+        // Top plane
+        planes[Frustum::TOP].x = vp[0][3] - vp[0][1];
+        planes[Frustum::TOP].y = vp[1][3] - vp[1][1];
+        planes[Frustum::TOP].z = vp[2][3] - vp[2][1];
+        planes[Frustum::TOP].w = vp[3][3] - vp[3][1];
+
+        // Near plane
+        planes[Frustum::NEAR].x = vp[0][3] + vp[0][2];
+        planes[Frustum::NEAR].y = vp[1][3] + vp[1][2];
+        planes[Frustum::NEAR].z = vp[2][3] + vp[2][2];
+        planes[Frustum::NEAR].w = vp[3][3] + vp[3][2];
+
+        // Far plane
+        planes[Frustum::FAR].x = vp[0][3] - vp[0][2];
+        planes[Frustum::FAR].y = vp[1][3] - vp[1][2];
+        planes[Frustum::FAR].z = vp[2][3] - vp[2][2];
+        planes[Frustum::FAR].w = vp[3][3] - vp[3][2];
+
+        // Normalize all planes
+        for (int i = 0; i < Frustum::PLANE_COUNT; i++) {
+            float length = sqrtf(planes[i].x * planes[i].x +
+                planes[i].y * planes[i].y +
+                planes[i].z * planes[i].z);
+            planes[i] /= length;
+        }
+    }
+
+    glm::mat4 Camera::getJitteredProjectionMatrix(const glm::vec2& jitter) {
+        // Create jittered projection matrix for temporal anti-aliasing
+        glm::mat4 proj = glm::perspective(m_fovRadians, m_aspectRatio, m_nearZ, m_farZ);
+
+        // Apply jitter
+        proj[2][0] += jitter.x;
+        proj[2][1] += jitter.y;
+
+        // Fix Vulkan's coordinate system (flip Y)
+        proj[1][1] *= -1;
+
+        return proj;
+    }
+
+    void Camera::update(float deltaTime) {
+        if (m_viewDirty || m_projDirty || m_vpDirty) {
+            if (m_viewDirty) updateViewMatrix();
+            if (m_projDirty) updateProjectionMatrix();
+            if (m_vpDirty) updateViewProjectionMatrix();
+        }
+        Logger::get().info("View matrix: \n {} {} {} {} \n {} {} {} {} \n {} {} {} {} \n {} {} {} {}", m_viewMatrix[0][0], m_viewMatrix[0][1], m_viewMatrix[0][2], m_viewMatrix[0][3], m_viewMatrix[1][0], m_viewMatrix[1][1], m_viewMatrix[1][2], m_viewMatrix[1][3], m_viewMatrix[2][0], m_viewMatrix[2][1], m_viewMatrix[2][2], m_viewMatrix[2][3], m_viewMatrix[3][0], m_viewMatrix[3][1], m_viewMatrix[3][2], m_viewMatrix[3][3]);
+
+        Logger::get().info("Projection matrix: \n {} {} {} {} \n {} {} {} {} \n {} {} {} {} \n {} {} {} {}", m_projectionMatrix[0][0], m_projectionMatrix[0][1], m_projectionMatrix[0][2], m_projectionMatrix[0][3], m_projectionMatrix[1][0], m_projectionMatrix[1][1], m_projectionMatrix[1][2], m_projectionMatrix[1][3], m_projectionMatrix[2][0], m_projectionMatrix[2][1], m_projectionMatrix[2][2], m_projectionMatrix[2][3], m_projectionMatrix[3][0], m_projectionMatrix[3][1], m_projectionMatrix[3][2], m_projectionMatrix[3][3]);
+    }
+
+    // Frustum implementation
+    bool Frustum::containsPoint(const glm::vec3& point) const {
+        for (int i = 0; i < PLANE_COUNT; i++) {
+            if (planes[i].x * point.x +
+                planes[i].y * point.y +
+                planes[i].z * point.z +
+                planes[i].w <= 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool Frustum::containsSphere(const glm::vec3& center, float radius) const {
+        for (int i = 0; i < PLANE_COUNT; i++) {
+            float distance = planes[i].x * center.x +
+                planes[i].y * center.y +
+                planes[i].z * center.z +
+                planes[i].w;
+
+            if (distance <= -radius) {
+                return false;  // Sphere is completely outside this plane
+            }
+        }
+        return true;  // Sphere is at least partially inside all planes
+    }
+
+    bool Frustum::containsAABB(const glm::vec3& min, const glm::vec3& max) const {
+        // For each plane, find the positive vertex (P-vertex) and test it
+        for (int i = 0; i < PLANE_COUNT; i++) {
+            // Get plane normal
+            glm::vec3 normal(planes[i].x, planes[i].y, planes[i].z);
+
+            // Determine farthest corner along the normal
+            glm::vec3 p;
+            p.x = (normal.x > 0) ? min.x : max.x;
+            p.y = (normal.y > 0) ? min.y : max.y;
+            p.z = (normal.z > 0) ? min.z : max.z;
+
+            // If this point is outside the plane, the box is outside
+            if (glm::dot(normal, p) + planes[i].w > 0) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+
+
+    bool Frustum::intersectsFrustum(const Frustum& other) const {
+        // This is a simplified test for cluster vs view frustum
+        // Fully implemented, you'd want to use separating axis theorem
+
+        // First, check if any of the corners of one frustum are inside the other
+        for (int i = 0; i < 8; i++) {
+            if (other.containsPoint(corners[i])) {
+                return true;
+            }
+            if (containsPoint(other.corners[i])) {
+                return true;
+            }
+        }
+
+        // Then check if any of the edges of one frustum intersect any of the faces of the other
+        // (Implementation omitted for brevity)
+
+        return false;
+    }
+
+
+    // Cluster grid dimensions (typically 16x16x24)
+    
+
+    // Single light for cluster-based lighting
+    
+
+    // Main cluster data management class
+
+    const char* getDescriptorTypeName(VkDescriptorType type) {
+        switch (type) {
+        case VK_DESCRIPTOR_TYPE_SAMPLER: return "SAMPLER";
+        case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: return "COMBINED_IMAGE_SAMPLER";
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE: return "SAMPLED_IMAGE";
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: return "STORAGE_IMAGE";
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: return "UNIFORM_TEXEL_BUFFER";
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER: return "STORAGE_TEXEL_BUFFER";
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: return "UNIFORM_BUFFER";
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: return "STORAGE_BUFFER";
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC: return "UNIFORM_BUFFER_DYNAMIC";
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC: return "STORAGE_BUFFER_DYNAMIC";
+        case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT: return "INPUT_ATTACHMENT";
+        default: return "UNKNOWN";
+        }
+    }
+
+
     struct PBRMaterialUBO {
         // Basic properties
         alignas(16) float baseColor[4];   // vec4 in shader
@@ -1463,102 +3691,6 @@ namespace tremor::gfx {
     };
 
     
-    // Generic Buffer class that can be used for both vertex and index buffers
-    class Buffer {
-    public:
-        Buffer() = default;
-
-        Buffer(VkDevice device, VkPhysicalDevice physicalDevice,
-            VkDeviceSize size, VkBufferUsageFlags usage,
-            VkMemoryPropertyFlags memoryProps)
-            : m_device(device), m_size(size) {
-
-            // Create buffer
-            VkBufferCreateInfo bufferInfo{};
-            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bufferInfo.size = size;
-            bufferInfo.usage = usage;
-            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-            VkBuffer bufferHandle = VK_NULL_HANDLE;
-            if (vkCreateBuffer(device, &bufferInfo, nullptr, &bufferHandle) != VK_SUCCESS) {
-                throw std::runtime_error("Failed to create buffer");
-            }
-            m_buffer = BufferResource(device, bufferHandle);
-
-            // Get memory requirements
-            VkMemoryRequirements memRequirements;
-            vkGetBufferMemoryRequirements(device, m_buffer, &memRequirements);
-
-            // Allocate memory
-            VkMemoryAllocateInfo allocInfo{};
-            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-            allocInfo.allocationSize = memRequirements.size;
-            allocInfo.memoryTypeIndex = findMemoryType(
-                physicalDevice, memRequirements.memoryTypeBits, memoryProps);
-
-            VkDeviceMemory memoryHandle = VK_NULL_HANDLE;
-            if (vkAllocateMemory(device, &allocInfo, nullptr, &memoryHandle) != VK_SUCCESS) {
-                throw std::runtime_error("Failed to allocate buffer memory");
-            }
-            m_memory = DeviceMemoryResource(device, memoryHandle);
-
-            // Bind memory to buffer
-            vkBindBufferMemory(device, m_buffer, m_memory, 0);
-        }
-
-        // Map memory and update buffer data
-        void update(const void* data, VkDeviceSize size, VkDeviceSize offset = 0) {
-            if (!m_memory) {
-                Logger::get().error("Attempting to update buffer with invalid memory");
-                return;
-            }
-
-            if (size > m_size) {
-                Logger::get().error("Buffer update size ({}) exceeds buffer size ({})", size, m_size);
-                return;
-            }
-
-            void* mappedData = nullptr;
-            VkResult result = vkMapMemory(m_device, m_memory, offset, size, 0, &mappedData);
-
-            if (result != VK_SUCCESS) {
-                Logger::get().error("Failed to map buffer memory: {}", (int)result);
-                return;
-            }
-
-            memcpy(mappedData, data, static_cast<size_t>(size));
-            vkUnmapMemory(m_device, m_memory);
-        }
-
-
-        // Accessors
-        VkBuffer getBuffer() const { return m_buffer; }
-        VkDeviceSize getSize() const { return m_size; }
-
-    private:
-        VkDevice m_device = VK_NULL_HANDLE;
-        BufferResource m_buffer;
-        DeviceMemoryResource m_memory;
-        VkDeviceSize m_size = 0;
-
-        // Helper function to find memory type
-        uint32_t findMemoryType(VkPhysicalDevice physicalDevice,
-            uint32_t typeFilter,
-            VkMemoryPropertyFlags properties) {
-            VkPhysicalDeviceMemoryProperties memProperties;
-            vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-
-            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-                if ((typeFilter & (1 << i)) &&
-                    (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-                    return i;
-                }
-            }
-
-            throw std::runtime_error("Failed to find suitable memory type");
-        }
-    };
 
     // Vertex Buffer Class
     class VertexBuffer {
@@ -1671,27 +3803,6 @@ namespace tremor::gfx {
         uint32_t m_indexCount = 0;
         VkIndexType m_indexType = VK_INDEX_TYPE_UINT32;
     };
-
-    // Helper function to infer shader type from filename
-    inline ShaderType inferShaderTypeFromFilename(const std::string& filename) {
-        if (filename.find(".vert") != std::string::npos) return ShaderType::Vertex;
-        if (filename.find(".frag") != std::string::npos) return ShaderType::Fragment;
-        if (filename.find(".comp") != std::string::npos) return ShaderType::Compute;
-        if (filename.find(".geom") != std::string::npos) return ShaderType::Geometry;
-        if (filename.find(".tesc") != std::string::npos) return ShaderType::TessControl;
-        if (filename.find(".tese") != std::string::npos) return ShaderType::TessEvaluation;
-        if (filename.find(".mesh") != std::string::npos) return ShaderType::Mesh;
-        if (filename.find(".task") != std::string::npos) return ShaderType::Task;
-        if (filename.find(".rgen") != std::string::npos) return ShaderType::RayGen;
-        if (filename.find(".rmiss") != std::string::npos) return ShaderType::RayMiss;
-        if (filename.find(".rchit") != std::string::npos) return ShaderType::RayClosestHit;
-        if (filename.find(".rahit") != std::string::npos) return ShaderType::RayAnyHit;
-        if (filename.find(".rint") != std::string::npos) return ShaderType::RayIntersection;
-        if (filename.find(".rcall") != std::string::npos) return ShaderType::Callable;
-
-        // Default to vertex if unknown
-        return ShaderType::Vertex;
-    }
 
     // First, add these as member variables if they don't exist already
     class CommandPoolResource {
@@ -1894,359 +4005,9 @@ namespace tremor::gfx {
         }
     };
 
-    class ShaderCompiler {
-    public:
-        // Options for shader compilation
-        struct CompileOptions {
-            bool optimize = true;
-            bool generateDebugInfo = false;
-            std::vector<std::string> includePaths;
-            std::unordered_map<std::string, std::string> macros;
-        };
-
-        // Initialize the compiler
-        ShaderCompiler() {
-            m_compiler = std::make_unique<shaderc::Compiler>();
-            m_options = std::make_unique<shaderc::CompileOptions>();
-
-            m_options.get()->SetTargetSpirv(shaderc_spirv_version_1_6);
-        }
-
-        // Compile GLSL or HLSL source to SPIR-V
-        std::vector<uint32_t> compileToSpv(
-            const std::string& source,
-            ShaderType type,
-            const std::string& filename,
-            int flags = 0) {
-
-            // Set up options
-            //m_options->SetOptimizationLevel(options.optimize ?
-            //    shaderc_optimization_level_performance :
-            //    shaderc_optimization_level_zero);
-
-            //if (options.generateDebugInfo) {
-            //    m_options->SetGenerateDebugInfo();
-            //}
-
-            // Add macros
-            //for (const auto& [name, value] : options.macros) {
-            //    m_options->AddMacroDefinition(name, value);
-            //}
-
-            // Add include directories
-            // Requires implementing a custom include resolver if needed
-
-            // Determine shader stage
-            shaderc_shader_kind kind = getShaderKind(type);
-
-            // Compile
-            shaderc::SpvCompilationResult result = m_compiler->CompileGlslToSpv(
-                source, kind, filename.c_str(), *m_options);
-
-            // Check for errors
-            if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
-                Logger::get().error("Shader compilation failed: {}", result.GetErrorMessage());
-                return {}; // Return empty vector on error
-            }
-
-            // Return SPIR-V binary
-            std::vector<uint32_t> spirv(result.cbegin(), result.cend());
-            return spirv;
-        }
-
-        // Compile a shader file to SPIR-V
-        std::vector<uint32_t> compileFileToSpv(
-            const std::string& filename,
-            ShaderType type,
-            const CompileOptions& options = {}) {
-
-            // Read file content
-            std::ifstream file(filename);
-            if (!file.is_open()) {
-                Logger::get().error("Failed to open shader file: {}", filename);
-                return {};
-            }
-
-            std::stringstream buffer;
-            buffer << file.rdbuf();
-            file.close();
-
-            // Compile the source
-            return compileToSpv(buffer.str(), type, filename);
-        }
-
-    private:
-        // Convert ShaderType to shaderc shader kind
-        shaderc_shader_kind getShaderKind(ShaderType type) {
-            switch (type) {
-            case ShaderType::Vertex:
-                return shaderc_vertex_shader;
-            case ShaderType::Fragment:
-                return shaderc_fragment_shader;
-            case ShaderType::Compute:
-                return shaderc_compute_shader;
-            case ShaderType::Geometry:
-                return shaderc_geometry_shader;
-            case ShaderType::TessControl:
-                return shaderc_tess_control_shader;
-            case ShaderType::TessEvaluation:
-                return shaderc_tess_evaluation_shader;
-            case ShaderType::Mesh:
-                return shaderc_mesh_shader;
-            case ShaderType::Task:
-                return shaderc_task_shader;
-            case ShaderType::RayGen:
-                return shaderc_raygen_shader;
-            case ShaderType::RayMiss:
-                return shaderc_miss_shader;
-            case ShaderType::RayClosestHit:
-                return shaderc_closesthit_shader;
-            case ShaderType::RayAnyHit:
-                return shaderc_anyhit_shader;
-            case ShaderType::RayIntersection:
-                return shaderc_intersection_shader;
-            case ShaderType::Callable:
-                return shaderc_callable_shader;
-            default:
-                return shaderc_vertex_shader;
-            }
-        }
-
-        std::unique_ptr<shaderc::Compiler> m_compiler;
-        std::unique_ptr<shaderc::CompileOptions> m_options;
-    };
 
 
 
-    class ShaderModule {
-    public:
-
-        const std::vector<uint32_t>& getSPIRVCode() const { return m_spirvCode; }
-
-        // Default constructor
-        ShaderModule() = default;
-
-        // Constructor with device and raw module
-        ShaderModule(VkDevice device, VkShaderModule rawModule, ShaderType type = ShaderType::Vertex)
-            : m_device(device), m_type(type), m_entryPoint("main") {
-            if (rawModule != VK_NULL_HANDLE) {
-                m_module = std::make_unique<ShaderModuleResource>(device, rawModule);
-				Logger::get().info("Shader module created with raw handle");
-                if (m_spirvCode.size() > 0) {
-                    m_reflection = std::make_unique<ShaderReflection>();
-                    m_reflection->reflect(m_spirvCode, getShaderStageFlagBits());
-                }
-            }
-        }
-
-        // Destructor - resource is automatically cleaned up by RAII
-        ~ShaderModule() = default;
-
-        std::unique_ptr<ShaderReflection> m_reflection;
-
-        const ShaderReflection* getReflection() const { return m_reflection.get(); }
-        ShaderReflection* getReflection() { return m_reflection.get(); }
-
-        // Load from precompiled SPIR-V file
-        static std::unique_ptr<ShaderModule> loadFromFile(VkDevice device, const std::string& filename,
-            ShaderType type = ShaderType::Vertex,
-            const std::string& entryPoint = "main") {
-            // Read file...
-            std::ifstream file(filename, std::ios::ate | std::ios::binary);
-
-            if (!file.is_open()) {
-                Logger::get().error("Failed to open shader file: {}", filename);
-                return nullptr;
-            }
-
-            size_t fileSize = static_cast<size_t>(file.tellg());
-            std::vector<char> shaderCode(fileSize);
-
-            file.seekg(0);
-            file.read(shaderCode.data(), fileSize);
-            file.close();
-
-            // Create module
-            VkShaderModuleCreateInfo createInfo{};
-            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-            createInfo.codeSize = fileSize;
-            createInfo.pCode = reinterpret_cast<const uint32_t*>(shaderCode.data());
-
-            VkShaderModule shaderModule = VK_NULL_HANDLE;
-            if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-                Logger::get().error("Failed to create shader module from file: {}", filename);
-                return nullptr;
-            }
-
-            // Create ShaderModule object
-            auto result = std::make_unique<ShaderModule>();
-            result->m_device = device;
-            result->m_module = std::make_unique<ShaderModuleResource>(device, shaderModule);
-            result->m_type = type;
-            result->m_entryPoint = entryPoint;
-            result->m_filename = filename;
-
-            // ADD THIS: Store the SPIRV code for reflection
-            result->m_spirvCode.resize(fileSize / sizeof(uint32_t));
-            memcpy(result->m_spirvCode.data(), shaderCode.data(), fileSize);
-
-            // ADD THIS: Initialize reflection
-            result->m_reflection = std::make_unique<ShaderReflection>();
-            result->m_reflection->reflect(result->m_spirvCode, result->getShaderStageFlagBits());
-
-            return result;
-        }
-
-        // Create shader stage info for pipeline creation
-        VkPipelineShaderStageCreateInfo createShaderStageInfo() const {
-            VkPipelineShaderStageCreateInfo stageInfo{};
-            stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            stageInfo.stage = getShaderStageFlagBits();
-            stageInfo.module = m_module ? m_module->handle() : VK_NULL_HANDLE;
-            stageInfo.pName = m_entryPoint.c_str();
-            return stageInfo;
-        }
-
-        // Get the raw Vulkan handle directly
-        VkShaderModule getHandle() const {
-            return m_module ? m_module->handle() : VK_NULL_HANDLE;
-        }
-
-        // Check if valid
-        bool isValid() const {
-            return m_module && m_module->handle() != VK_NULL_HANDLE;
-        }
-
-        // Explicit conversion operator
-        explicit operator bool() const {
-            return isValid();
-        }
-
-        // Access methods
-        ShaderType getType() const { return m_type; }
-        const std::string& getEntryPoint() const { return m_entryPoint; }
-        const std::string& getFilename() const { return m_filename; }
-
-        // Compile and load from GLSL/HLSL source
-        static std::unique_ptr<ShaderModule> compileFromSource(
-            VkDevice device,
-            const std::string& source,
-            ShaderType type,
-            const std::string& filename = "unnamed_shader",
-            const std::string& entryPoint = "main",
-            const ShaderCompiler::CompileOptions& options = {}) {
-
-            // Compile to SPIR-V
-            static ShaderCompiler compiler;
-            auto spirv = compiler.compileToSpv(source, type, filename);
-
-            if (spirv.empty()) {
-                // Compilation failed
-                return nullptr;
-            }
-
-            // Create shader module
-            VkShaderModuleCreateInfo createInfo{};
-            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-            createInfo.codeSize = spirv.size() * sizeof(uint32_t);
-            createInfo.pCode = spirv.data();
-
-            VkShaderModule shaderModule = VK_NULL_HANDLE;
-            if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-                Logger::get().error("Failed to create shader module from compiled source");
-                return nullptr;
-            }
-
-            // Create ShaderModule object
-            auto result = std::make_unique<ShaderModule>();
-            result->m_device = device;
-            result->m_module = std::make_unique<ShaderModuleResource>(device, shaderModule);
-            result->m_type = type;
-            result->m_entryPoint = entryPoint;
-            result->m_filename = filename;
-            result->m_spirvCode = std::move(spirv);
-
-            return result;
-        }
-
-        // Compile and load from GLSL/HLSL file
-        static std::unique_ptr<ShaderModule> compileFromFile(
-            VkDevice device,
-            const std::string& filename,
-            const std::string& entryPoint = "main",
-            int flags = 0) {
-
-            // Detect shader type from filename
-            ShaderType type = inferShaderTypeFromFilename(filename);
-
-            // Compile file to SPIR-V
-            static ShaderCompiler compiler;
-            auto spirv = compiler.compileFileToSpv(filename, type);
-
-            if (spirv.empty()) {
-                // Compilation failed
-                return nullptr;
-            }
-
-            // Create shader module
-            VkShaderModuleCreateInfo createInfo{};
-            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-            createInfo.codeSize = spirv.size() * sizeof(uint32_t);
-            createInfo.pCode = spirv.data();
-
-            VkShaderModule shaderModule = VK_NULL_HANDLE;
-            if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-                Logger::get().error("Failed to create shader module from compiled file: {}", filename);
-                return nullptr;
-            }
-
-            // Create ShaderModule object
-            auto result = std::make_unique<ShaderModule>();
-            result->m_device = device;
-            result->m_module = std::make_unique<ShaderModuleResource>(device, shaderModule);
-            result->m_type = type;
-            result->m_entryPoint = entryPoint;
-            result->m_filename = filename;
-            result->m_spirvCode = std::move(spirv);
-
-            // ADD THIS: Initialize reflection
-            result->m_reflection = std::make_unique<ShaderReflection>();
-            result->m_reflection->reflect(result->m_spirvCode, result->getShaderStageFlagBits());
-
-            return result;
-        }
-
-    private:    
-        std::vector<uint32_t> m_spirvCode; // Store SPIR-V code
-
-        // Convert shader type to Vulkan stage flag
-        VkShaderStageFlagBits getShaderStageFlagBits() const {
-            switch (m_type) {
-            case ShaderType::Vertex:         return VK_SHADER_STAGE_VERTEX_BIT;
-            case ShaderType::Fragment:       return VK_SHADER_STAGE_FRAGMENT_BIT;
-            case ShaderType::Compute:        return VK_SHADER_STAGE_COMPUTE_BIT;
-            case ShaderType::Geometry:       return VK_SHADER_STAGE_GEOMETRY_BIT;
-            case ShaderType::TessControl:    return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
-            case ShaderType::TessEvaluation: return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-            case ShaderType::Mesh:           return VK_SHADER_STAGE_MESH_BIT_EXT;
-            case ShaderType::Task:           return VK_SHADER_STAGE_TASK_BIT_EXT;
-            case ShaderType::RayGen:         return VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-            case ShaderType::RayMiss:        return VK_SHADER_STAGE_MISS_BIT_KHR;
-            case ShaderType::RayClosestHit:  return VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-            case ShaderType::RayAnyHit:      return VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
-            case ShaderType::RayIntersection:return VK_SHADER_STAGE_INTERSECTION_BIT_KHR;
-            case ShaderType::Callable:       return VK_SHADER_STAGE_CALLABLE_BIT_KHR;
-            default:                         return VK_SHADER_STAGE_VERTEX_BIT;
-            }
-        }
-
-    private:
-        VkDevice m_device = VK_NULL_HANDLE;
-        std::unique_ptr<ShaderModuleResource> m_module;
-        ShaderType m_type = ShaderType::Vertex;
-        std::string m_entryPoint = "main";
-        std::string m_filename;
-    };
 
     
     // Convenience function for loading shaders with automatic type detection
@@ -4573,8 +6334,121 @@ namespace tremor::gfx {
         SamplerResource* m_defaultSampler = nullptr;
     };
 
+    class VertexBufferSimple {
+    public:
+        VertexBufferSimple(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, size_t vertexCount)
+            : m_device(device), m_buffer(buffer), m_memory(memory), m_vertexCount(vertexCount) {
+        }
+
+        ~VertexBufferSimple() {
+            if (m_buffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(m_device, m_buffer, nullptr);
+                m_buffer = VK_NULL_HANDLE;
+            }
+
+            if (m_memory != VK_NULL_HANDLE) {
+                vkFreeMemory(m_device, m_memory, nullptr);
+                m_memory = VK_NULL_HANDLE;
+            }
+        }
+
+        // Bind the vertex buffer
+        void bind(VkCommandBuffer cmdBuffer) const {
+            VkDeviceSize offsets[] = { 0 };
+            vkCmdBindVertexBuffers(cmdBuffer, 0, 1, &m_buffer, offsets);
+        }
+
+        // Get vertex count
+        uint32_t getVertexCount() const { return static_cast<uint32_t>(m_vertexCount); }
+
+        VkBuffer getBuffer() const { return m_buffer; }
+
+    private:
+        VkDevice m_device;
+        VkBuffer m_buffer = VK_NULL_HANDLE;
+        VkDeviceMemory m_memory = VK_NULL_HANDLE;
+        size_t m_vertexCount = 0;
+    };
+
+    class MeshRegistry {
+    public:
+        struct MeshData {
+            uint32_t vertexCount;
+            uint32_t indexCount;
+            VkBuffer vertexBuffer;
+            VkBuffer indexBuffer;
+            VkIndexType indexType;
+            AABBF bounds;
+        };
+
+        // Register a mesh and get its ID
+        uint32_t registerMesh(const MeshData& mesh, const std::string& name = "") {
+            uint32_t id = static_cast<uint32_t>(m_meshes.size());
+            m_meshes.push_back(mesh);
+
+            if (!name.empty()) {
+                m_meshNames[name] = id;
+            }
+
+            return id;
+        }
+
+        // Register your existing vertex buffer
+        uint32_t registerMesh(VertexBufferSimple* vertexBuffer, const std::string& name = "") {
+            MeshData mesh;
+            mesh.vertexCount = vertexBuffer->getVertexCount();
+            mesh.indexCount = 0; // No indices for this simple mesh
+            mesh.vertexBuffer = vertexBuffer->getBuffer(); // Assuming you add a getter
+            mesh.indexBuffer = VK_NULL_HANDLE;
+            mesh.indexType = VK_INDEX_TYPE_UINT32; // Default
+
+            // Calculate bounds from vertices or use fixed bounds for the cube
+            mesh.bounds = {
+                glm::vec3(-0.5f, -0.5f, -0.5f),
+                glm::vec3(0.5f, 0.5f, 0.5f)
+            };
+
+            return registerMesh(mesh, name);
+        }
+
+        // Get a mesh by ID
+        const MeshData* getMesh(uint32_t id) const {
+            if (id < m_meshes.size()) {
+                return &m_meshes[id];
+            }
+            return nullptr;
+        }
+
+        // Get a mesh by name
+        const MeshData* getMesh(const std::string& name) const {
+            auto it = m_meshNames.find(name);
+            if (it != m_meshNames.end()) {
+                return &m_meshes[it->second];
+            }
+            return nullptr;
+        }
+
+        // Get a mesh ID by name
+        uint32_t getMeshID(const std::string& name) const {
+            auto it = m_meshNames.find(name);
+            if (it != m_meshNames.end()) {
+                return it->second;
+            }
+            return UINT32_MAX; // Invalid ID
+        }
+
+    private:
+        std::vector<MeshData> m_meshes;
+        std::unordered_map<std::string, uint32_t> m_meshNames;
+    };
+
     class VulkanBackend : public RenderBackend {
     public:
+
+        MeshRegistry m_meshRegistry;
+
+        std::unique_ptr<tremor::gfx::ClusteredRenderer> m_clusteredRenderer;
+        tremor::gfx::Octree<tremor::gfx::RenderableObject> m_sceneOctree;
 
         tremor::gfx::Camera cam;
 
@@ -4606,7 +6480,12 @@ namespace tremor::gfx {
         VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
 #endif
 
-		VulkanBackend() = default;
+        VulkanBackend() : m_sceneOctree(AABBQ{
+            {-1'000'000'000, -1'000'000'000, -1'000'000'000}, // min bounds
+            { 1'000'000'000,  1'000'000'000,  1'000'000'000}  // max bounds
+            }) {
+        }
+
         ~VulkanBackend() override = default;
 
         struct UniformBufferObject {
@@ -4988,40 +6867,6 @@ namespace tremor::gfx {
             Logger::get().info("Synchronization objects created successfully");
             return true;
         }
-
-        class VertexBufferSimple {
-        public:
-            VertexBufferSimple(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, size_t vertexCount)
-                : m_device(device), m_buffer(buffer), m_memory(memory), m_vertexCount(vertexCount) {
-            }
-
-            ~VertexBufferSimple() {
-                if (m_buffer != VK_NULL_HANDLE) {
-                    vkDestroyBuffer(m_device, m_buffer, nullptr);
-                    m_buffer = VK_NULL_HANDLE;
-                }
-
-                if (m_memory != VK_NULL_HANDLE) {
-                    vkFreeMemory(m_device, m_memory, nullptr);
-                    m_memory = VK_NULL_HANDLE;
-                }
-            }
-
-            // Bind the vertex buffer
-            void bind(VkCommandBuffer cmdBuffer) const {
-                VkDeviceSize offsets[] = { 0 };
-                vkCmdBindVertexBuffers(cmdBuffer, 0, 1, &m_buffer, offsets);
-            }
-
-            // Get vertex count
-            uint32_t getVertexCount() const { return static_cast<uint32_t>(m_vertexCount); }
-
-        private:
-            VkDevice m_device;
-            VkBuffer m_buffer = VK_NULL_HANDLE;
-            VkDeviceMemory m_memory = VK_NULL_HANDLE;
-            size_t m_vertexCount = 0;
-        };
 
         struct BlinnPhongVertex {
             float position[3];  // XYZ position - location 0
@@ -5613,6 +7458,13 @@ namespace tremor::gfx {
                 Logger::get().warning("No vertex buffer available for drawing");
             }
 
+
+            m_clusteredRenderer->setCamera(&cam);
+            m_clusteredRenderer->buildClusters(&cam, m_sceneOctree);
+
+            // Render using clustered renderer
+            m_clusteredRenderer->render(m_commandBuffers[currentFrame], &cam);
+
             renderWithMeshShader(m_commandBuffers[currentFrame]);
 
         }
@@ -5682,6 +7534,43 @@ private:
         std::unique_ptr<ImageViewResource> m_depthImageView;
         VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
 
+        void createCubeRenderableObject() {
+            // Register the cube mesh
+            uint32_t cubeID = m_meshRegistry.registerMesh(m_vertexBuffer.get(), "cube");
+
+            // Use material 0 for now
+            uint32_t materialID = 0;
+
+            // Create transform matrix
+            glm::mat4 transform = glm::mat4(1.0f); // Identity matrix
+
+            // Calculate AABBQ bounds
+            AABBF localBounds = {
+                glm::vec3(-0.5f, -0.5f, -0.5f),
+                glm::vec3(0.5f, 0.5f, 0.5f)
+            };
+
+            // Transform bounds to world space
+            AABBF worldBounds = transformAABB(transform, localBounds);
+
+            // Convert to quantized space
+            AABBQ quantizedBounds = AABBQ::fromFloat(worldBounds);
+
+            // Create the renderable object
+            tremor::gfx::RenderableObject cubeObject;
+            cubeObject.meshID = cubeID;
+            cubeObject.materialID = materialID;
+            cubeObject.transform = transform;
+            cubeObject.prevTransform = transform;
+            cubeObject.bounds = quantizedBounds;
+
+            // Add to octree
+            m_sceneOctree.insert(cubeObject, quantizedBounds);
+
+            Logger::get().info("Cube added to octree as renderable object");
+        }
+
+
         bool initialize(SDL_Window* window) override {
         
             ShaderReflection combinedReflection;
@@ -5714,7 +7603,9 @@ private:
             }
 
             sm = std::make_unique<ShaderManager>(vkDevice.get()->device());
+            
             createCubeMesh();
+
 			createTestTexture();            
 
 			createDescriptorSetLayouts();
@@ -5722,6 +7613,72 @@ private:
             createMinimalMeshShaderPipeline();
             createGraphicsPipeline();
             createSyncObjects();
+
+            // Create world octree with 64-bit bounds
+            AABBQ worldBounds{
+                {-1'000'000'000, -1'000'000'000, -1'000'000'000}, // 8000km^3 world bounds
+                { 1'000'000'000,  1'000'000'000,  1'000'000'000}
+            };
+            m_sceneOctree = tremor::gfx::Octree<tremor::gfx::RenderableObject>(worldBounds);
+
+            //createCubeRenderableObject();
+
+            // Initialize clustered renderer
+            tremor::gfx::ClusterConfig clusterConfig{};
+            clusterConfig.xSlices = 8;
+            clusterConfig.ySlices = 4;
+            clusterConfig.zSlices = 8;
+            clusterConfig.nearPlane = 0.1f;
+            clusterConfig.farPlane = 10000000.0f;
+            clusterConfig.logarithmicZ = true;
+
+            m_clusteredRenderer = std::make_unique<tremor::gfx::ClusteredRenderer>(
+                device,
+                physicalDevice,
+                clusterConfig
+            );
+
+            for (int i = 0; i < 5; i++) {
+                RenderableObject obj;
+                obj.meshID = m_meshRegistry.getMeshID("cube");
+                obj.materialID = 0;
+
+                // Position in front of the camera in a grid
+                float x = (i % 3 - 1) * 2.0f;  // -2, 0, or 2
+                float z = (i / 3 - 1) * 2.0f - 5.0f;  // -6 or -4
+
+                obj.transform = glm::translate(
+                    glm::mat4(1.0f),
+                    glm::vec3(x, 0.0f, z)
+                );
+
+                // Use bigger cubes for testing
+                AABBF localBounds = { glm::vec3(-1.0f), glm::vec3(1.0f) };  // 2x2x2 cube
+                AABBF worldBounds = transformAABB(obj.transform, localBounds);
+                obj.bounds = AABBQ::fromFloat(worldBounds);
+
+                m_sceneOctree.insert(obj, obj.bounds);
+
+                // Log the object position and bounds
+                Logger::get().info("Added test object at ({},{},{}), bounds: min=({},{},{}), max=({},{},{})",
+                    x, 0.0f, z,
+                    worldBounds.min.x, worldBounds.min.y, worldBounds.min.z,
+                    worldBounds.max.x, worldBounds.max.y, worldBounds.max.z);
+            }
+
+            m_clusteredRenderer->initialize(vkDevice.get()->colorFormat(), vkDevice.get()->depthFormat());
+
+            // Add point light
+            ClusterLight light;
+            light.position = glm::vec3(0.0f, 5.0f, 0.0f);
+            light.color = glm::vec3(1.0f, 1.0f, 1.0f);
+            light.intensity = 10.0f;
+            light.radius = 20.0f;
+            light.type = 0; // Point light
+
+            std::vector<ClusterLight> lights = { light };
+            m_clusteredRenderer->updateLights(lights);
+            Logger::get().info("Added test light");
 
             return true;
         };
@@ -6545,199 +8502,6 @@ private:
                     return false;
                 }
 
-                /*
-                // ===== 7. ALLOCATE DESCRIPTOR SETS =====
-                Logger::get().info("Allocating descriptor sets...");
-                if (!rawSetLayouts.empty()) {
-                    // Allocate the sets
-                    VkDescriptorSetAllocateInfo allocInfo{};
-                    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-                    allocInfo.descriptorPool = m_descriptorPool->handle();
-                    allocInfo.descriptorSetCount = static_cast<uint32_t>(rawSetLayouts.size());
-                    allocInfo.pSetLayouts = rawSetLayouts.data();
-
-                    std::vector<std::pair<VkWriteDescriptorSet, size_t>> descriptorWritesWithIndices;
-
-
-                    std::vector<VkDescriptorSet> rawSets(rawSetLayouts.size());
-                    VkResult allocResult = vkAllocateDescriptorSets(device, &allocInfo, rawSets.data());
-                    if (allocResult != VK_SUCCESS) {
-                        Logger::get().error("Failed to allocate descriptor sets: {}", static_cast<int>(allocResult));
-                        return false;
-                    }
-
-                    // Clear previous descriptor sets and create new wrappers
-                    m_descriptorSets.clear();
-                    for (auto rawSet : rawSets) {
-                        m_descriptorSets.push_back(std::make_unique<DescriptorSetResource>(device, rawSet));
-                    }
-
-                    // ===== 8. UPDATE DESCRIPTOR SETS =====
-                    Logger::get().info("Updating descriptor sets...");
-
-                    // First, count how many buffer and image infos we'll need for proper allocation
-                    size_t bufferInfoCount = 0;
-                    size_t imageInfoCount = 0;
-
-                    for (const auto& ubo : combinedReflection.getUniformBuffers()) {
-                        if (ubo.name == "UniformBufferObject" || ubo.name == "LightUBO") {
-                            bufferInfoCount++;
-                        }
-                    }
-
-                    for (const auto& binding : combinedReflection.getResourceBindings()) {
-                        if (binding.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-                            imageInfoCount++;
-                        }
-                    }
-
-                    // Pre-allocate all vectors to prevent reallocation during descriptor update
-                    std::vector<VkDescriptorBufferInfo> bufferInfos;
-                    std::vector<VkDescriptorImageInfo> imageInfos;
-
-                    bufferInfos.reserve(bufferInfoCount);
-                    imageInfos.reserve(imageInfoCount);
-
-                    // Process UBOs with stable vector locations
-                    for (const auto& ubo : combinedReflection.getUniformBuffers()) {
-                        VkBuffer buffer = VK_NULL_HANDLE;
-                        VkDeviceSize range = 0;
-
-                        if (ubo.name == "UniformBufferObject") {
-                            if (!m_uniformBuffer) {
-                                Logger::get().warning("UniformBufferObject requested but buffer not created");
-                                continue;
-                            }
-                            buffer = m_uniformBuffer->getBuffer();
-                            range = sizeof(UniformBufferObject);
-                            Logger::get().info("Setting up UBO: {} with size {} bytes", ubo.name, range);
-                        }
-                        else if (ubo.name == "LightUBO") {
-                            if (!m_lightBuffer) {
-                                Logger::get().warning("LightUBO requested but buffer not created");
-                                continue;
-                            }
-                            buffer = m_lightBuffer->getBuffer();
-                            range = sizeof(LightUBO);
-                            Logger::get().info("Setting up UBO: {} with size {} bytes", ubo.name, range);
-                        }
-                        else if (ubo.name == "MaterialUBO") {
-                            if (!m_materialBuffer) {
-                                Logger::get().warning("MaterialUBO requested but buffer not created");
-                                continue;
-                            }
-                            buffer = m_materialBuffer->getBuffer();
-                            range = sizeof(MaterialUBO);
-                            Logger::get().info("Setting up UBO: {} with size {} bytes", ubo.name, range);
-                        }
-
-                        else {
-                            Logger::get().warning("Unknown UBO: {}", ubo.name);
-                            continue;
-                        }
-
-                        if (buffer == VK_NULL_HANDLE) {
-                            Logger::get().warning("Buffer for UBO {} is null, skipping", ubo.name);
-                            continue;
-                        }
-
-                        if (ubo.set >= m_descriptorSets.size()) {
-                            Logger::get().error("UBO references set {} which doesn't exist", ubo.set);
-                            continue;
-                        }
-
-                        size_t bufferInfoIndex = bufferInfos.size();
-
-                        // Add buffer info to the STABLE pre-allocated vector
-                        bufferInfos.push_back({
-                            buffer,   // buffer
-                            0,        // offset
-                            range     // range
-                            });
-
-                        // Create write descriptor with STABLE pointer to the buffer info
-                        // This is safe because we pre-allocated the vector capacity
-                        VkWriteDescriptorSet write{};
-                        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                        write.dstSet = m_descriptorSets[ubo.set]->handle();
-                        write.dstBinding = ubo.binding;
-                        write.dstArrayElement = 0;
-                        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-                        write.descriptorCount = 1;
-                        write.pBufferInfo = nullptr;
-
-                        descriptorWritesWithIndices.push_back({ write, bufferInfoIndex });
-                    }
-
-                    // Process image samplers with stable vector locations
-                    for (const auto& binding : combinedReflection.getResourceBindings()) {
-                        if (binding.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-                            if (binding.set >= m_descriptorSets.size()) {
-                                Logger::get().error("Sampler references set {} which doesn't exist", binding.set);
-                                continue;
-                            }
-
-                            if (!m_textureSampler || !m_missingTextureImageView) {
-                                Logger::get().error("Texture sampler or image view is null");
-                                continue;
-                            }
-
-                            size_t imageInfoIndex = bufferInfos.size();
-
-                            // Add image info to the STABLE pre-allocated vector
-                            imageInfos.push_back({
-                                m_textureSampler->handle(),                 // sampler
-                                m_missingTextureImageView->handle(),        // imageView
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL    // imageLayout
-                                });
-
-                            // Create write descriptor with STABLE pointer to the image info
-                            VkWriteDescriptorSet write{};
-                            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                            write.dstSet = m_descriptorSets[binding.set]->handle();
-                            write.dstBinding = binding.binding;
-                            write.dstArrayElement = 0;
-                            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                            write.descriptorCount = 1;
-                            write.pImageInfo = nullptr;
-
-                            descriptorWritesWithIndices.push_back({ write, imageInfoIndex });
-                        }
-                    }
-
-                    std::vector<VkWriteDescriptorSet> descriptorWrites;
-                    descriptorWrites.reserve(descriptorWritesWithIndices.size());
-
-                    for (const auto& [write, index] : descriptorWritesWithIndices) {
-                        VkWriteDescriptorSet finalWrite = write;
-                        if (write.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
-                            finalWrite.pBufferInfo = &bufferInfos[index];
-                        }
-                        else if (write.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-                            finalWrite.pImageInfo = &imageInfos[index];
-                        }
-                        descriptorWrites.push_back(finalWrite);
-                    }
-
-
-                    // Update all descriptors at once
-                    if (!descriptorWrites.empty()) {
-                        Logger::get().info("Updating {} descriptor writes", descriptorWrites.size());
-                        vkUpdateDescriptorSets(
-                            device,
-                            static_cast<uint32_t>(descriptorWrites.size()),
-                            descriptorWrites.data(),
-                            0,
-                            nullptr
-                        );
-                    }
-
-                    // Store the first descriptor set for convenience
-                    if (!m_descriptorSets.empty()) {
-                        m_descriptorSet = std::make_unique<DescriptorSetResource>(device, m_descriptorSets[0]->handle());
-                    }
-                }
-                */
 
                 DescriptorBuilder builder(device, combinedReflection, m_descriptorPool);
 
@@ -7065,6 +8829,18 @@ private:
     };
 
 
-    
+    bool ClusteredRenderer::initialize(VkFormat color, VkFormat depth) {
+        
+        colorFormat = color;
+        depthFormat = depth;
+
+        // Create cluster grid
+        createClusterGrid();
+
+        // Create shader resources
+        return createShaderResources();
+    }
+
 
 }
+
