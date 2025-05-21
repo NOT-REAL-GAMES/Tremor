@@ -56,9 +56,19 @@ layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
 // Minimal task shader just to emit some work
 void main() {
-    // Always emit at least one mesh task
+    // CRITICAL: Only ONE invocation should emit tasks!
     if (gl_LocalInvocationIndex == 0) {
-        // Just one mesh task regardless of workgroup
-        EmitMeshTasksEXT(1, 1, 1);
+        // Calculate how many workgroups needed (each workgroup = one mesh task)
+        // Divide total clusters by 32 (threads per workgroup) and round up
+        uint workgroupCount = (numClusters + 31) / 32;
+        
+        // Limit to reasonable count (important!)
+        workgroupCount = min(workgroupCount, 16);
+        
+        // Always emit at least ONE workgroup for testing
+        workgroupCount = max(workgroupCount, 1);
+        
+        // Emit the tasks
+        EmitMeshTasksEXT(workgroupCount, 1, 1);
     }
 }

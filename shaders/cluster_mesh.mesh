@@ -57,7 +57,7 @@ layout(set = 0, binding = 4) buffer IndexBuffer {
 };
 
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
-layout(triangles, max_vertices = 3, max_primitives = 1) out;
+layout(triangles, max_vertices = 64, max_primitives = 32) out;
 
 // Keep minimal required outputs matching fragment shader inputs
 layout(location = 0) out vec3 outPosition[];
@@ -66,38 +66,40 @@ layout(location = 2) out vec2 outTexCoord[];
 layout(location = 3) out vec4 outColor[];
 layout(location = 4) out flat uint outObjectID[];
 
+// Shared data for all threads in the workgroup
+shared uint s_numTriangles;
+shared bool s_shouldOutput;
+
 void main() {
-
-    uint clusterIndex = gl_WorkGroupID.x * 32 + gl_LocalInvocationIndex; 
-    if (clusterIndex >= numClusters) return; // Skip if beyond cluster count
-
-    // Draw debugging triangle regardless of cluster/workgroup
-    if (gl_LocalInvocationIndex == 0) {
-        // Force draw a single red triangle
+    // ALWAYS draw a triangle for debugging
+    if (gl_LocalInvocationIndex == 0 && gl_WorkGroupID.x == 0) {
+        // Output a single triangle
         SetMeshOutputsEXT(3, 1);
         
-        gl_MeshVerticesEXT[0].gl_Position = vec4(0.0, 0.9, 0.1, 1.0);  // Near top
-        gl_MeshVerticesEXT[1].gl_Position = vec4(-0.1, 0.7, 0.1, 1.0); // Left
-        gl_MeshVerticesEXT[2].gl_Position = vec4(0.1, 0.7, 0.1, 1.0);  // Right
+        // Fixed positions in world space
+        vec3 positions[3] = vec3[3](
+            vec3(0.0, 1.0, 0.0),
+            vec3(-1.0, -1.0, 0.0),
+            vec3(1.0, -1.0, 0.0)
+        );
         
+        // Transform to clip space
+        for (int i = 0; i < 3; i++) {
+            gl_MeshVerticesEXT[i].gl_Position = projMatrix * viewMatrix * vec4(positions[i], 1.0);
+            outPosition[i] = positions[i];
+        }
+        
+        // Set indices
         gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
         
-        // Bright red debug triangle
-        outColor[0] = vec4(1.0, 0.0, 0.0, 1.0);
-        outColor[1] = vec4(1.0, 0.0, 0.0, 1.0);
-        outColor[2] = vec4(1.0, 0.0, 0.0, 1.0);
+        // Bright red color
+        outColor[0] = outColor[1] = outColor[2] = vec4(1.0, 0.0, 0.0, 1.0);
         
         // Set other attributes
-        outPosition[0] = vec3(0.0, 0.9, 0.0);
-        outPosition[1] = vec3(-0.1, 0.7, 0.0);
-        outPosition[2] = vec3(0.1, 0.7, 0.0);
-        
         outNormal[0] = outNormal[1] = outNormal[2] = vec3(0.0, 0.0, 1.0);
         outTexCoord[0] = vec2(0.5, 0.0);
         outTexCoord[1] = vec2(0.0, 1.0);
         outTexCoord[2] = vec2(1.0, 1.0);
         outObjectID[0] = outObjectID[1] = outObjectID[2] = 0;
     }
-    
-    // Original cluster rendering code...
 }

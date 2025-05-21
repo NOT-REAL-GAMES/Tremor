@@ -2158,6 +2158,8 @@ namespace tremor::gfx {
 
         void updateLightBufferDescriptor(VkBuffer buf);
 
+        std::vector<RenderableObject> m_visibleObjects;
+
     private:
         // Creates the clustered data structures
         void createClusterGrid();
@@ -2195,7 +2197,9 @@ namespace tremor::gfx {
         // Helper to find clusters that contain an AABB
         std::vector<uint32_t> findClustersForBounds(const AABBF& bounds, const Camera camera);
 
-    private:
+
+
+    public:
         // Vulkan handles
         VkDevice m_device;
         VkPhysicalDevice m_physicalDevice;
@@ -2215,7 +2219,6 @@ namespace tremor::gfx {
         std::vector<Cluster> m_clusters;
 
         // Storage for objects
-        std::vector<RenderableObject> m_visibleObjects;
 
         // Storage for lights
         std::vector<ClusterLight> m_lights;
@@ -2531,7 +2534,7 @@ namespace tremor::gfx {
                 depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
                 depthStencilState.depthTestEnable = VK_TRUE;
                 depthStencilState.depthWriteEnable = VK_TRUE;
-                depthStencilState.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+                depthStencilState.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
 
                 // Add dynamic states
                 VkDynamicState dynamicStates[] = {
@@ -2812,7 +2815,7 @@ namespace tremor::gfx {
             }
         }*/
 
-        if (node->isLeaf()) {
+        /*if (node->isLeaf()) {
             const auto& objects = node->getObjects();
             Logger::get().info("Leaf node has {} objects", objects.size());
 
@@ -2825,6 +2828,20 @@ namespace tremor::gfx {
 
         else {
             // Recursively process child nodes
+            for (int i = 0; i < 8; i++) {
+                processOctreeNode(node->getChild(i), frustum);
+            }
+        }*/
+
+        // BYPASS FRUSTUM TEST - add all objects regardless of visibility
+        if (node->isLeaf()) {
+            const auto& objects = node->getObjects();
+            for (const auto& object : objects) {
+                m_visibleObjects.push_back(object);
+            }
+        }
+        else {
+            // Process all children
             for (int i = 0; i < 8; i++) {
                 processOctreeNode(node->getChild(i), frustum);
             }
@@ -2853,19 +2870,19 @@ namespace tremor::gfx {
             AABBF viewBounds = transformAABB(viewMatrix, worldBounds);
 
             // Log for debugging
-            Logger::get().info("Object {} world bounds: min=({},{},{}), max=({},{},{})",
-                objIdx,
-                worldBounds.min.x, worldBounds.min.y, worldBounds.min.z,
-                worldBounds.max.x, worldBounds.max.y, worldBounds.max.z);
+            //Logger::get().info("Object {} world bounds: min=({},{},{}), max=({},{},{})",
+            //    objIdx,
+            //    worldBounds.min.x, worldBounds.min.y, worldBounds.min.z,
+            //    worldBounds.max.x, worldBounds.max.y, worldBounds.max.z);
 
-            Logger::get().info("Object {} view bounds: min=({},{},{}), max=({},{},{})",
-                objIdx,
-                viewBounds.min.x, viewBounds.min.y, viewBounds.min.z,
-                viewBounds.max.x, viewBounds.max.y, viewBounds.max.z);
+            //Logger::get().info("Object {} view bounds: min=({},{},{}), max=({},{},{})",
+            //    objIdx,
+            //    viewBounds.min.x, viewBounds.min.y, viewBounds.min.z,
+            //    viewBounds.max.x, viewBounds.max.y, viewBounds.max.z);
 
             // Find clusters that contain this object
             std::vector<uint32_t> clusters = findClustersForBounds(viewBounds, m_camera);
-            Logger::get().info("Object {} assigned to {} clusters", objIdx, clusters.size());
+            //Logger::get().info("Object {} assigned to {} clusters", objIdx, clusters.size());
 
             // Add object index to each cluster
             for (uint32_t clusterIdx : clusters) {
@@ -2967,6 +2984,9 @@ namespace tremor::gfx {
         ubo.clusterDimensions = glm::uvec4(m_config.xSlices, m_config.ySlices, m_config.zSlices, 0);
         ubo.zPlanes = glm::vec4(m_config.nearPlane, m_config.farPlane, static_cast<float>(m_config.zSlices), 0.0f);
         ubo.numLights = static_cast<uint32_t>(m_lights.size());
+
+        Logger::get().info("Num clusters: {}, Num objects: {}", m_totalClusters, static_cast<uint32_t>(m_visibleObjects.size()));
+
         ubo.numObjects = static_cast<uint32_t>(m_visibleObjects.size());
         ubo.numClusters = m_totalClusters;
 
@@ -3212,9 +3232,9 @@ namespace tremor::gfx {
             glm::vec3 clusterPos = worldToCluster(corner, camera);
 
             // Add debug output for each corner
-            Logger::get().info("Corner: world=({},{},{}) → cluster=({},{},{})",
-                corner.x, corner.y, corner.z,
-                clusterPos.x, clusterPos.y, clusterPos.z);
+            //Logger::get().info("Corner: world=({},{},{}) → cluster=({},{},{})",
+             //   corner.x, corner.y, corner.z,
+              //  clusterPos.x, clusterPos.y, clusterPos.z);
 
             // Update bounds, making sure values are valid cluster indices
             int x = glm::clamp(static_cast<int>(clusterPos.x), 0, static_cast<int>(m_config.xSlices - 1));
@@ -3687,9 +3707,9 @@ namespace tremor::gfx {
             if (m_projDirty) updateProjectionMatrix();
             if (m_vpDirty) updateViewProjectionMatrix();
         }
-        Logger::get().info("View matrix: \n {} {} {} {} \n {} {} {} {} \n {} {} {} {} \n {} {} {} {}", m_viewMatrix[0][0], m_viewMatrix[0][1], m_viewMatrix[0][2], m_viewMatrix[0][3], m_viewMatrix[1][0], m_viewMatrix[1][1], m_viewMatrix[1][2], m_viewMatrix[1][3], m_viewMatrix[2][0], m_viewMatrix[2][1], m_viewMatrix[2][2], m_viewMatrix[2][3], m_viewMatrix[3][0], m_viewMatrix[3][1], m_viewMatrix[3][2], m_viewMatrix[3][3]);
+        //Logger::get().info("View matrix: \n {} {} {} {} \n {} {} {} {} \n {} {} {} {} \n {} {} {} {}", m_viewMatrix[0][0], m_viewMatrix[0][1], m_viewMatrix[0][2], m_viewMatrix[0][3], m_viewMatrix[1][0], m_viewMatrix[1][1], m_viewMatrix[1][2], m_viewMatrix[1][3], m_viewMatrix[2][0], m_viewMatrix[2][1], m_viewMatrix[2][2], m_viewMatrix[2][3], m_viewMatrix[3][0], m_viewMatrix[3][1], m_viewMatrix[3][2], m_viewMatrix[3][3]);
 
-        Logger::get().info("Projection matrix: \n {} {} {} {} \n {} {} {} {} \n {} {} {} {} \n {} {} {} {}", m_projectionMatrix[0][0], m_projectionMatrix[0][1], m_projectionMatrix[0][2], m_projectionMatrix[0][3], m_projectionMatrix[1][0], m_projectionMatrix[1][1], m_projectionMatrix[1][2], m_projectionMatrix[1][3], m_projectionMatrix[2][0], m_projectionMatrix[2][1], m_projectionMatrix[2][2], m_projectionMatrix[2][3], m_projectionMatrix[3][0], m_projectionMatrix[3][1], m_projectionMatrix[3][2], m_projectionMatrix[3][3]);
+        //Logger::get().info("Projection matrix: \n {} {} {} {} \n {} {} {} {} \n {} {} {} {} \n {} {} {} {}", m_projectionMatrix[0][0], m_projectionMatrix[0][1], m_projectionMatrix[0][2], m_projectionMatrix[0][3], m_projectionMatrix[1][0], m_projectionMatrix[1][1], m_projectionMatrix[1][2], m_projectionMatrix[1][3], m_projectionMatrix[2][0], m_projectionMatrix[2][1], m_projectionMatrix[2][2], m_projectionMatrix[2][3], m_projectionMatrix[3][0], m_projectionMatrix[3][1], m_projectionMatrix[3][2], m_projectionMatrix[3][3]);
     }
 
     // Frustum implementation
@@ -7589,8 +7609,8 @@ namespace tremor::gfx {
                     m_vertexBuffer->bind(m_commandBuffers[currentFrame]);
 
                     // Draw without indices
-                    Logger::get().info("Drawing {} vertices", m_vertexBuffer->getVertexCount());
-                    vkCmdDraw(m_commandBuffers[currentFrame], m_vertexBuffer->getVertexCount(), 1, 0, 0);
+                    //Logger::get().info("Drawing {} vertices", m_vertexBuffer->getVertexCount());
+                    //vkCmdDraw(m_commandBuffers[currentFrame], m_vertexBuffer->getVertexCount(), 1, 0, 0);
                 }
                 catch (const std::exception& e) {
                     Logger::get().error("Exception during triangle drawing: {}", e.what());
@@ -7779,7 +7799,7 @@ private:
                 physicalDevice,
                 clusterConfig
             );
-
+            /*
             for (int i = 0; i < 5; i++) {
                 RenderableObject obj;
                 obj.meshID = m_meshRegistry.getMeshID("cube");
@@ -7806,6 +7826,38 @@ private:
                     x, 0.0f, z,
                     worldBounds.min.x, worldBounds.min.y, worldBounds.min.z,
                     worldBounds.max.x, worldBounds.max.y, worldBounds.max.z);
+            }
+            */
+
+            // In your render function, before calling buildClusters
+            // Add a guaranteed visible object
+            RenderableObject debugObject;
+            debugObject.meshID = 0; // Or whatever mesh ID you're using
+            debugObject.materialID = 0;
+            debugObject.transform = glm::mat4(1.0f); // Identity - at origin
+            debugObject.prevTransform = glm::mat4(1.0f);
+            debugObject.bounds = AABBQ::fromFloat(
+                glm::vec3(-1.0f, -1.0f, -1.0f),
+                glm::vec3(1.0f, 1.0f, 1.0f)
+            );
+
+            // Add to visible objects directly
+            m_clusteredRenderer->m_visibleObjects.push_back(debugObject);
+
+            // Ensure cluster 0 has this object
+            if (m_clusteredRenderer->m_clusters.size() > 0) {
+                m_clusteredRenderer->m_clusters[0].objectCount = 1;
+                m_clusteredRenderer->m_clusters[0].objectOffset = 0;
+
+                // Add the object index 0 to the indices buffer
+                m_clusteredRenderer->m_clusterObjectIndices.clear();
+                m_clusteredRenderer->m_clusterObjectIndices.push_back(0);
+
+                // Update the buffers directly
+                m_clusteredRenderer->m_clusterBuffer->update(m_clusteredRenderer->m_clusters.data(), sizeof(Cluster));
+                m_clusteredRenderer->m_objectBuffer->update(&debugObject, sizeof(RenderableObject));
+                m_clusteredRenderer->m_indexBuffer->update(m_clusteredRenderer->m_clusterObjectIndices.data(), sizeof(uint32_t));
+
             }
 
             m_clusteredRenderer->initialize(vkDevice.get()->colorFormat(), vkDevice.get()->depthFormat());
@@ -8409,7 +8461,7 @@ private:
                 samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
                 samplerInfo.unnormalizedCoordinates = VK_FALSE;
                 samplerInfo.compareEnable = VK_FALSE;
-                samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+                samplerInfo.compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
                 samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
                 samplerInfo.mipLodBias = 0.0f;
                 samplerInfo.minLod = 0.0f;

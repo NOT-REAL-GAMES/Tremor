@@ -55,8 +55,5 @@ layout(location = 0) out vec4 outColor;
 
 void main() {
     // Simple color calculation
-    //outColor = inColor;
-    
-    // Or for testing, use a bright color to ensure rendering
-     outColor = vec4(1.0, 0.0, 1.0, 1.0);  // Bright magenta
+    outColor = inColor;
 }
