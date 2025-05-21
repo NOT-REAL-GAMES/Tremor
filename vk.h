@@ -1290,6 +1290,8 @@ namespace tremor::gfx {
             }
         };
 
+
+
         // Basic camera properties
         void setPosition(const WorldPosition& position) { m_position = position; m_viewDirty = true; }
         void setPosition(const glm::vec3& position);    // Convenience for local space
@@ -1348,6 +1350,8 @@ namespace tremor::gfx {
 
         // Update per-frame (handles animations, stabilization, etc.)
         void update(float deltaTime);
+
+        VkExtent2D extent;
 
     private:
         // Camera position and orientation
@@ -2152,6 +2156,8 @@ namespace tremor::gfx {
         // Updates light information
         void updateLights(const std::vector<ClusterLight>& lights);
 
+        void updateLightBufferDescriptor(VkBuffer buf);
+
     private:
         // Creates the clustered data structures
         void createClusterGrid();
@@ -2338,10 +2344,14 @@ namespace tremor::gfx {
             combinedReflection.merge(*m_meshShader->getReflection());
             combinedReflection.merge(*m_fragmentShader->getReflection());
 
+            Logger::get().info("Task shader bindings: {}", m_taskShader->getReflection()->getResourceBindings().size());
+            Logger::get().info("Mesh shader bindings: {}", m_meshShader->getReflection()->getResourceBindings().size());
+            Logger::get().info("Fragment shader bindings: {}", m_fragmentShader->getReflection()->getResourceBindings().size());
+
             // Create descriptor set layout
             m_descriptorSetLayout = combinedReflection.createDescriptorSetLayout(m_device, 0);
             if (!m_descriptorSetLayout) {
-                Logger::get().error("Failed to create descriptor set layout");
+                Logger::get().error("Failed to create descriptor set layout for the clustered renderer!!");
                 return false;
             }
 
@@ -2416,7 +2426,7 @@ namespace tremor::gfx {
 
             // Object buffer
             VkDescriptorBufferInfo objectInfo{};
-            objectInfo.buffer = m_objectBuffer ? m_objectBuffer.get()->getBuffer() : VK_NULL_HANDLE;
+            objectInfo.buffer = m_objectBuffer.get()->getBuffer();
             objectInfo.offset = 0;
             objectInfo.range = VK_WHOLE_SIZE;
 
@@ -2430,7 +2440,7 @@ namespace tremor::gfx {
 
             // Light buffer
             VkDescriptorBufferInfo lightInfo{};
-            lightInfo.buffer = m_lightBuffer ? m_lightBuffer->getBuffer() : VK_NULL_HANDLE;
+            lightInfo.buffer = m_lightBuffer->getBuffer();
             lightInfo.offset = 0;
             lightInfo.range = VK_WHOLE_SIZE;
 
@@ -2498,7 +2508,7 @@ namespace tremor::gfx {
                 VkPipelineRasterizationStateCreateInfo rasterizationState{};
                 rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
                 rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
-                rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
+                rasterizationState.cullMode = VK_CULL_MODE_NONE;
                 rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
                 rasterizationState.lineWidth = 1.0f;
 
@@ -2521,7 +2531,7 @@ namespace tremor::gfx {
                 depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
                 depthStencilState.depthTestEnable = VK_TRUE;
                 depthStencilState.depthWriteEnable = VK_TRUE;
-                depthStencilState.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+                depthStencilState.depthCompareOp = VK_COMPARE_OP_ALWAYS;
 
                 // Add dynamic states
                 VkDynamicState dynamicStates[] = {
@@ -2879,7 +2889,7 @@ namespace tremor::gfx {
         }
     }
 
-    void ClusteredRenderer::assignLightsToClusters() {
+    /*void ClusteredRenderer::assignLightsToClusters() {
         // Clear previous assignments
         for (auto& cluster : m_clusters) {
             cluster.lightOffset = 0;
@@ -2945,7 +2955,7 @@ namespace tremor::gfx {
 
             m_clusters[i].lightCount = static_cast<uint32_t>(clusterLights[i].size() + directionalLights.size());
         }
-    }
+    }*/
 
     void ClusteredRenderer::updateUniformBuffers(Camera* camera) {
         // Update uniform buffer with camera data
@@ -2964,8 +2974,83 @@ namespace tremor::gfx {
     }
 
     void ClusteredRenderer::render(VkCommandBuffer cmdBuffer, Camera* camera) {
+
+        std::vector<VkBufferMemoryBarrier> barriers;
+
+        VkBufferMemoryBarrier uboBarrier{};
+        uboBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        uboBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        uboBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        uboBarrier.buffer = m_uniformBuffer->getBuffer();
+        uboBarrier.offset = 0;
+        uboBarrier.size = sizeof(ClusterUBO);
+        uboBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        uboBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+        VkBufferMemoryBarrier clusterBarrier{};
+        clusterBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        clusterBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        clusterBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        clusterBarrier.buffer = m_clusterBuffer->getBuffer();
+        clusterBarrier.offset = 0;
+        clusterBarrier.size = VK_WHOLE_SIZE;
+        clusterBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        clusterBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+
+        VkBufferMemoryBarrier objectBarrier{};
+        objectBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        objectBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        objectBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        objectBarrier.buffer = m_objectBuffer->getBuffer();
+        objectBarrier.offset = 0;
+        objectBarrier.size = VK_WHOLE_SIZE;
+        objectBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        objectBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+        VkBufferMemoryBarrier indexBarrier{};
+        indexBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        indexBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        indexBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        indexBarrier.buffer = m_indexBuffer->getBuffer();
+        indexBarrier.offset = 0;
+        indexBarrier.size = VK_WHOLE_SIZE;
+        indexBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        indexBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+        VkBufferMemoryBarrier lightBarrier{};
+        lightBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        lightBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        lightBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        lightBarrier.buffer = m_lightBuffer->getBuffer();
+        lightBarrier.offset = 0;
+        lightBarrier.size = VK_WHOLE_SIZE;
+        lightBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        lightBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+        barriers.push_back(uboBarrier);
+        barriers.push_back(clusterBarrier);
+        barriers.push_back(objectBarrier);
+        barriers.push_back(indexBarrier);
+        barriers.push_back(lightBarrier);
+
+        vkCmdPipelineBarrier(
+            cmdBuffer,
+            VK_PIPELINE_STAGE_HOST_BIT,
+            VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
+            0,
+            0, nullptr,
+            static_cast<uint32_t>(barriers.size()), barriers.data(),
+            0, nullptr
+        );
+
         // Bind the pipeline
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->handle());
+
+        if (!m_descriptorSet || m_descriptorSet->handle() == VK_NULL_HANDLE) {
+            Logger::get().error("Invalid descriptor set in render()");
+            return;
+        }
 
         // Bind descriptor sets
         vkCmdBindDescriptorSets(
@@ -2979,22 +3064,28 @@ namespace tremor::gfx {
             nullptr
         );
 
-        // Set viewport and scissor
-        // (These values would typically come from the swapchain extent)
+        VkExtent2D extent = camera->extent; 
+        // Or get from swapchain
         VkViewport viewport{};
-        viewport.width = 1920.0f;  // Replace with actual dimensions
-        viewport.height = 1080.0f; // Replace with actual dimensions
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(extent.width);
+        viewport.height = static_cast<float>(extent.height);
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
         vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
 
         VkRect2D scissor{};
-        scissor.extent = { 1920, 1080 }; // Replace with actual dimensions
-        vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
+        scissor.offset = { 0, 0 };
+        scissor.extent = extent;
+        vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);        // Draw using mesh shaders
 
-        // Draw using mesh shaders
         // Calculate the number of task shader workgroups needed
         uint32_t taskGroupX = (m_totalClusters + 31) / 32; // 32 clusters per workgroup
+        taskGroupX = std::max(taskGroupX, 1u); // Ensure at least one workgroup
+
+        Logger::get().info("Drawing mesh tasks: {} workgroups, {} clusters",
+            taskGroupX, m_totalClusters);
 
         // Draw using mesh shaders
         vkCmdDrawMeshTasksEXT(
@@ -3003,6 +3094,71 @@ namespace tremor::gfx {
             1,          // Y dimension of the grid
             1           // Z dimension of the grid
         );
+    }
+
+	void ClusteredRenderer::assignLightsToClusters() {
+		// Clear previous assignments
+		for (auto& cluster : m_clusters) {
+			cluster.lightOffset = 0;
+			cluster.lightCount = 0;
+		}
+		// Temporary map of lights per cluster
+		std::vector<std::vector<uint32_t>> clusterLights(m_totalClusters);
+		// Assign each light to clusters
+		for (size_t lightIdx = 0; lightIdx < m_lights.size(); lightIdx++) {
+			const auto& light = m_lights[lightIdx];
+			// Skip directional lights (they affect all clusters)
+			if (light.type == 2) {
+				continue;
+			}
+			// Calculate light bounds
+			float radius = light.radius;
+			AABBF lightBounds = {
+				glm::vec3(light.position) - glm::vec3(radius),
+				glm::vec3(light.position) + glm::vec3(radius)
+			};
+			// Find clusters that contain this light
+			std::vector<uint32_t> clusters = findClustersForBounds(lightBounds, m_camera);
+			// Add light index to each cluster
+			for (uint32_t clusterIdx : clusters) {
+				if (clusterIdx < m_totalClusters) {
+					clusterLights[clusterIdx].push_back(static_cast<uint32_t>(lightIdx));
+				}
+			}
+		}
+		// Compact the light indices
+		m_clusterLightIndices.clear();
+		for (uint32_t i = 0; i < m_totalClusters; i++) {
+			m_clusters[i].lightOffset = static_cast<uint32_t>(m_clusterLightIndices.size());
+			// Add cluster-specific lights
+			m_clusterLightIndices.insert(
+				m_clusterLightIndices.end(),
+				clusterLights[i].begin(),
+				clusterLights[i].end()
+			);
+			m_clusters[i].lightCount = static_cast<uint32_t>(clusterLights[i].size());
+		}
+	}
+
+    void ClusteredRenderer::updateLightBufferDescriptor(VkBuffer buf) {
+        // Update descriptor for new buffer
+        VkDescriptorBufferInfo lightInfo{};
+        lightInfo.buffer = buf;
+        lightInfo.offset = 0;
+        lightInfo.range = VK_WHOLE_SIZE;
+
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = m_descriptorSet->handle();
+        write.dstBinding = 3;
+        write.dstArrayElement = 0;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.descriptorCount = 1;
+        write.pBufferInfo = &lightInfo;
+
+        vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+
+
     }
 
     void ClusteredRenderer::updateLights(const std::vector<ClusterLight>& lights) {
@@ -3019,22 +3175,6 @@ namespace tremor::gfx {
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
-            // Update descriptor for new buffer
-            VkDescriptorBufferInfo lightInfo{};
-            lightInfo.buffer = m_lightBuffer->getBuffer();
-            lightInfo.offset = 0;
-            lightInfo.range = VK_WHOLE_SIZE;
-
-            VkWriteDescriptorSet write{};
-            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write.dstSet = m_descriptorSet->handle();
-            write.dstBinding = 3;
-            write.dstArrayElement = 0;
-            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            write.descriptorCount = 1;
-            write.pBufferInfo = &lightInfo;
-
-            vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
         }
 
         // Update light data
@@ -7269,6 +7409,8 @@ namespace tremor::gfx {
 
         void beginFrame() override {
 
+            cam.extent = vkSwapchain.get()->extent();
+
             updateUniformBuffer();
             updateLight();
 
@@ -7465,7 +7607,7 @@ namespace tremor::gfx {
             // Render using clustered renderer
             m_clusteredRenderer->render(m_commandBuffers[currentFrame], &cam);
 
-            renderWithMeshShader(m_commandBuffers[currentFrame]);
+            //renderWithMeshShader(m_commandBuffers[currentFrame]);
 
         }
 
@@ -7621,7 +7763,7 @@ private:
             };
             m_sceneOctree = tremor::gfx::Octree<tremor::gfx::RenderableObject>(worldBounds);
 
-            //createCubeRenderableObject();
+            createCubeRenderableObject();
 
             // Initialize clustered renderer
             tremor::gfx::ClusterConfig clusterConfig{};
@@ -8833,6 +8975,36 @@ private:
         
         colorFormat = color;
         depthFormat = depth;
+
+
+        m_clusterBuffer = std::make_unique<Buffer>(
+            m_device, m_physicalDevice,
+			sizeof(Cluster) * 65536, // Pre-allocate for 2048 clusters
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+
+        m_objectBuffer = std::make_unique<Buffer>(
+            m_device, m_physicalDevice,
+            sizeof(RenderableObject) * 65536, // Pre-allocate for 65536 renderables
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+
+        m_indexBuffer = std::make_unique<Buffer>(
+            m_device, m_physicalDevice,
+            sizeof(uint32_t) * 65536, // Pre-allocate for 65536 renderables
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+
+        m_lightBuffer = std::make_unique<Buffer>(
+            m_device, m_physicalDevice,
+            sizeof(ClusterLight) * 65536, // Pre-allocate for 65536 renderables
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+
 
         // Create cluster grid
         createClusterGrid();
