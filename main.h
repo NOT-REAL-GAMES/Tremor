@@ -272,4 +272,6 @@ private:
 
 #undef NEAR
 #undef FAR
+#undef near
+#undef far
 //#UNDEF WHEREVER_YOU_ARE

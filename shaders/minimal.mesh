@@ -1,0 +1,30 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout(triangles, max_vertices = 3, max_primitives = 1) out;
+
+// Per-vertex outputs
+layout(location = 0) out vec4 outColor[];
+
+void main() {
+    // Only first thread does work
+    if (gl_LocalInvocationIndex == 0) {
+        // First, set the actual number of vertices and primitives
+        // This must be called before any output writes
+        SetMeshOutputsEXT(3, 1);
+        
+        // Now we can write to outputs
+        // Simple triangle
+        gl_MeshVerticesEXT[0].gl_Position = vec4(-0.5, -0.5, 0.0, 1.0);
+        gl_MeshVerticesEXT[1].gl_Position = vec4(0.5, -0.5, 0.0, 1.0);
+        gl_MeshVerticesEXT[2].gl_Position = vec4(0.0, 0.5, 0.0, 1.0);
+        
+        outColor[0] = vec4(1.0, 0.0, 0.0, 1.0);
+        outColor[1] = vec4(0.0, 1.0, 0.0, 1.0);
+        outColor[2] = vec4(0.0, 0.0, 1.0, 1.0);
+        
+        // Triangle indices
+        gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
+    }
+}

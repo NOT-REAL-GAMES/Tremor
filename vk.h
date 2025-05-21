@@ -4590,6 +4590,9 @@ namespace tremor::gfx {
 
         std::unique_ptr<VulkanResourceManager> res;
 
+        std::unique_ptr<PipelineResource> m_meshShaderPipeline;
+        std::unique_ptr<PipelineLayoutResource> m_meshShaderPipelineLayout;
+
         // Collection of loaded shaders for the current pipeline
         std::vector<std::shared_ptr<ShaderModule>> m_pipelineShaders;
 
@@ -4630,6 +4633,114 @@ namespace tremor::gfx {
 
             // Initialize the UBO with identity matrices and a camera position
             updateUniformBuffer();
+
+            return true;
+        }
+
+        bool createMinimalMeshShaderPipeline() {
+            // Load shaders
+            auto taskShader = ShaderModule::compileFromFile(device, "shaders/minimal.task");
+            auto meshShader = ShaderModule::compileFromFile(device, "shaders/minimal.mesh");
+            auto fragShader = ShaderModule::compileFromFile(device, "shaders/minimal.frag");
+
+            if (!taskShader || !meshShader || !fragShader) {
+                Logger::get().error("Failed to compile mesh shaders");
+                return false;
+            }
+
+            // Create simple pipeline layout (no descriptors yet)
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+
+            VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+            if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+                Logger::get().error("Failed to create pipeline layout");
+                return false;
+            }
+
+            m_meshShaderPipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayout);
+            Logger::get().info("Created mesh shader pipeline layout");
+
+            // Create shader stages
+            std::vector<VkPipelineShaderStageCreateInfo> shaderStages = {
+                taskShader->createShaderStageInfo(),
+                meshShader->createShaderStageInfo(),
+                fragShader->createShaderStageInfo()
+            };
+
+            // Simple pipeline state
+            VkPipelineViewportStateCreateInfo viewportState{};
+            viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            viewportState.viewportCount = 1;
+            viewportState.scissorCount = 1;
+
+            VkPipelineRasterizationStateCreateInfo rasterizer{};
+            rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            rasterizer.depthClampEnable = VK_FALSE;
+            rasterizer.rasterizerDiscardEnable = VK_FALSE;
+            rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+            rasterizer.lineWidth = 1.0f;
+            rasterizer.cullMode = VK_CULL_MODE_NONE;  // No culling to start
+            rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+            rasterizer.depthBiasEnable = VK_FALSE;
+
+            VkPipelineMultisampleStateCreateInfo multisampling{};
+            multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            multisampling.sampleShadingEnable = VK_FALSE;
+            multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+            VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+            colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            colorBlendAttachment.blendEnable = VK_FALSE;
+
+            VkPipelineColorBlendStateCreateInfo colorBlending{};
+            colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            colorBlending.logicOpEnable = VK_FALSE;
+            colorBlending.attachmentCount = 1;
+            colorBlending.pAttachments = &colorBlendAttachment;
+
+            VkDynamicState dynamicStates[] = {
+                VK_DYNAMIC_STATE_VIEWPORT,
+                VK_DYNAMIC_STATE_SCISSOR
+            };
+
+            VkPipelineDynamicStateCreateInfo dynamicState{};
+            dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            dynamicState.dynamicStateCount = 2;
+            dynamicState.pDynamicStates = dynamicStates;
+
+            // Setup the pipeline using dynamic rendering
+            VkPipelineRenderingCreateInfoKHR renderingInfo{};
+            renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+            renderingInfo.colorAttachmentCount = 1;
+            VkFormat colorFormat = vkSwapchain->imageFormat();
+            renderingInfo.pColorAttachmentFormats = &colorFormat;
+
+            VkGraphicsPipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            pipelineInfo.pNext = &renderingInfo;  // Use dynamic rendering
+            pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+            pipelineInfo.pStages = shaderStages.data();
+            pipelineInfo.pViewportState = &viewportState;
+            pipelineInfo.pRasterizationState = &rasterizer;
+            pipelineInfo.pMultisampleState = &multisampling;
+            pipelineInfo.pColorBlendState = &colorBlending;
+            pipelineInfo.pDynamicState = &dynamicState;
+            pipelineInfo.layout = pipelineLayout;
+
+            // Create the pipeline
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            VkResult result = vkCreateGraphicsPipelines(
+                device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
+
+            if (result != VK_SUCCESS) {
+                Logger::get().error("Failed to create mesh shader pipeline: {}", (int)result);
+                return false;
+            }
+
+            m_meshShaderPipeline = std::make_unique<PipelineResource>(device, pipeline);
+            Logger::get().info("Created mesh shader pipeline successfully");
 
             return true;
         }
@@ -5501,6 +5612,9 @@ namespace tremor::gfx {
             else {
                 Logger::get().warning("No vertex buffer available for drawing");
             }
+
+            renderWithMeshShader(m_commandBuffers[currentFrame]);
+
         }
 
         void endFrame() override {
@@ -5605,12 +5719,35 @@ private:
 
 			createDescriptorSetLayouts();
 
+            createMinimalMeshShaderPipeline();
             createGraphicsPipeline();
             createSyncObjects();
 
             return true;
         };
         void shutdown() override {};
+
+        void renderWithMeshShader(VkCommandBuffer cmdBuffer) {
+            if (m_meshShaderPipeline && m_meshShaderPipelineLayout) {
+                // Bind the pipeline
+                vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, *m_meshShaderPipeline);
+
+                // Set viewport and scissor
+                VkViewport viewport{};
+                viewport.width = static_cast<float>(vkSwapchain->extent().width);
+                viewport.height = static_cast<float>(vkSwapchain->extent().height);
+                viewport.minDepth = 0.0f;
+                viewport.maxDepth = 1.0f;
+                vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
+
+                VkRect2D scissor{};
+                scissor.extent = vkSwapchain->extent();
+                vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
+
+                // Draw a mesh - no need for vertex/index buffers!
+                vkCmdDrawMeshTasksEXT(cmdBuffer, 1, 1, 1);
+            }
+        }
 
 
         TextureHandle createTexture(const TextureDesc& desc) {
