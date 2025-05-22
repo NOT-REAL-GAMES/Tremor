@@ -1,4 +1,8 @@
 ﻿#pragma once
+
+#define GLM_FORCE_RADIANS
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE  // Important for Vulkan depth range
+
 #include "main.h"
 #include "RenderBackendBase.h"
 #include "res.h"
@@ -116,6 +120,48 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
 }
 
 namespace tremor::gfx {
+
+    const float PI = 3.14159265359f;
+
+    struct MeshVertex {
+        glm::vec3 position;
+        glm::vec3 normal;
+        glm::vec2 texCoord;
+        glm::vec4 tangent; // w component stores handedness
+
+        static std::vector<VkVertexInputAttributeDescription> getAttributeDescriptions() {
+            std::vector<VkVertexInputAttributeDescription> attributes(4);
+
+            attributes[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(MeshVertex, position) };
+            attributes[1] = { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(MeshVertex, normal) };
+            attributes[2] = { 2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(MeshVertex, texCoord) };
+            attributes[3] = { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(MeshVertex, tangent) };
+
+            return attributes;
+        }
+    };
+
+
+    struct Material {
+        alignas(16) glm::vec4 baseColor;
+        float metallic;
+        float roughness;
+        float ao;
+        float emissive;
+        alignas(16) glm::vec3 emissiveColor;
+        float padding;
+    };
+
+    struct MaterialDesc {
+        glm::vec4 baseColor;
+        float metallic;
+        float roughness;
+        float ao;
+        float emissive;
+        glm::vec3 emissiveColor;
+        float padding;
+    };
+
 
     class Buffer {
     public:
@@ -251,7 +297,27 @@ namespace tremor::gfx {
             m_compiler = std::make_unique<shaderc::Compiler>();
             m_options = std::make_unique<shaderc::CompileOptions>();
 
-            m_options.get()->SetTargetSpirv(shaderc_spirv_version_1_6);
+
+            // Set proper SPIR-V version (1.6 is good for Vulkan 1.4)
+            m_options->SetTargetSpirv(shaderc_spirv_version_1_6);
+
+            // Set target environment
+            m_options->SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_4);
+
+            m_options->SetVulkanRulesRelaxed(true);
+
+            // Enable optimization
+            m_options->SetOptimizationLevel(shaderc_optimization_level_performance);
+
+            // For your 64-bit coordinate system, enable double precision
+            m_options->AddMacroDefinition("ENABLE_DOUBLE_PRECISION", "1");
+
+            // For mesh shaders (when you get to Phase 6)
+            m_options->AddMacroDefinition("MESH_SHADER_SUPPORT", "1");
+
+            // Suppress warnings that might clutter your output
+            //m_options->SetSuppressWarnings(); // Set to true if too verbose
+            //m_options->SetWarningsAsErrors();  // Good for development
         }
 
         // Compile GLSL or HLSL source to SPIR-V
@@ -303,11 +369,19 @@ namespace tremor::gfx {
             const CompileOptions& options = {}) {
 
             // Read file content
-            std::ifstream file(filename);
+            std::ifstream file(filename, std::ios::ate | std::ios::binary);
             if (!file.is_open()) {
                 Logger::get().error("Failed to open shader file: {}", filename);
                 return {};
             }
+
+            //size_t fileSize = static_cast<size_t>(file.tellg());
+            //std::vector<char> shaderCode(fileSize);
+            //file.seekg(0);
+            //file.read(shaderCode.data(), fileSize);
+            //file.close();
+
+            //std::string sourceCode(shaderCode.begin(), shaderCode.end());
 
             std::stringstream buffer;
             buffer << file.rdbuf();
@@ -315,6 +389,9 @@ namespace tremor::gfx {
 
             // Compile the source
             return compileToSpv(buffer.str(), type, filename);
+
+            // Compile the source
+            //return compileToSpv(sourceCode, type, filename);
         }
 
     private:
@@ -368,7 +445,9 @@ namespace tremor::gfx {
             Compute,
             Geometry,
             TessControl,
-            TessEvaluation
+            TessEvaluation,
+            Task,
+            Mesh
             // Add others as needed
         };
 
@@ -380,6 +459,9 @@ namespace tremor::gfx {
             if (flags & VK_SHADER_STAGE_GEOMETRY_BIT) return ShaderStageType::Geometry;
             if (flags & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) return ShaderStageType::TessControl;
             if (flags & VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT) return ShaderStageType::TessEvaluation;
+            if (flags & VK_SHADER_STAGE_TASK_BIT_EXT) return ShaderStageType::Task;         // Add this
+            if (flags & VK_SHADER_STAGE_MESH_BIT_EXT) return ShaderStageType::Mesh;         // Add this
+
             return ShaderStageType::Vertex; // Default
         }
 
@@ -2125,934 +2207,439 @@ namespace tremor::gfx {
         float padding;                    // For alignment
     };
 
-    // Renderable object structure
+    // Mesh information for GPU access
+    struct MeshInfo {
+        uint32_t vertexOffset;
+        uint32_t vertexCount;
+        uint32_t indexOffset;
+        uint32_t indexCount;
+        glm::vec3 boundsMin;
+        float padding1;
+        glm::vec3 boundsMax;
+        float padding2;
+    };
+
+    // Enhanced material structure
+    struct PBRMaterial {
+        alignas(16) glm::vec4 baseColor;
+        float metallic;
+        float roughness;
+        float normalScale;
+        float occlusionStrength;
+        alignas(16) glm::vec3 emissiveColor;
+        float emissiveFactor;
+
+        // Texture indices (into a texture array or descriptor array)
+        int32_t albedoTexture;
+        int32_t normalTexture;
+        int32_t metallicRoughnessTexture;
+        int32_t occlusionTexture;
+        int32_t emissiveTexture;
+        float alphaCutoff;
+        uint32_t flags; // Alpha blend, double sided, etc.
+        float padding;
+    };
+
+    // Enhanced renderable object
     struct RenderableObject {
-        uint32_t meshID;
-        uint32_t materialID;
         glm::mat4 transform;
         glm::mat4 prevTransform; // For motion vectors
-
-        // Store the quantized bounds for this object
-        AABBQ bounds;
+        uint32_t meshID;
+        uint32_t materialID;
+        uint32_t instanceID; // For instancing support
+        uint32_t flags; // Visibility, shadow casting, etc.
+        AABBQ bounds; // Quantized bounds for large worlds
     };
 
     class ClusteredRenderer {
     public:
-        // Constructor takes the render context and configures the clustering grid
-        ClusteredRenderer(VkDevice device, VkPhysicalDevice physicalDevice, const ClusterConfig& config);
+
+
+        ClusteredRenderer(VkDevice device, VkPhysicalDevice physicalDevice,
+            VkQueue graphicsQueue, uint32_t graphicsQueueFamily,
+            VkCommandPool commandPool, const ClusterConfig& config);
         ~ClusteredRenderer();
 
-        // Initialize the renderer
+        // Initialization
         bool initialize(VkFormat color, VkFormat depth);
+        void shutdown();
 
+        // Mesh management
+        uint32_t loadMesh(std::vector<MeshVertex> vertices, const std::vector<uint32_t>& indices,
+            const std::string& name = "");
+        uint32_t createMaterial(const PBRMaterial& material);
+        uint32_t createDefaultMaterial();
+
+        // Scene management
         void setCamera(Camera* camera);
-
-        // Processes the octree and builds the clusters for the current frame
         void buildClusters(Camera* camera, const Octree<RenderableObject>& octree);
-
-        // Renders all visible objects using mesh shaders
-        void render(VkCommandBuffer cmdBuffer, Camera* camera);
-
-        // Updates light information
         void updateLights(const std::vector<ClusterLight>& lights);
 
-        void updateLightBufferDescriptor(VkBuffer buf);
+        bool createGraphicsPipeline();
+        void updateDescriptorSet();
 
-        std::vector<RenderableObject> m_visibleObjects;
+        // Rendering
+        void render(VkCommandBuffer cmdBuffer, Camera* camera);
+
+        // Debug utilities
+        void enableWireframe(bool enable) { m_wireframeMode = enable; }
+        void setDebugClusterVisualization(bool enable) { m_debugClusters = enable; }
+
+        // Getters
+        const std::vector<RenderableObject>& getVisibleObjects() const { return m_visibleObjects; }
+        uint32_t getClusterCount() const { return m_totalClusters; }
+
+        std::unique_ptr<ImageResource> m_defaultAlbedoTexture;
+        std::unique_ptr<ImageViewResource> m_defaultAlbedoView;
+        std::unique_ptr<ImageResource> m_defaultNormalTexture;
+        std::unique_ptr<ImageViewResource> m_defaultNormalView;
+        std::unique_ptr<SamplerResource> m_defaultSampler;
 
     private:
-        // Creates the clustered data structures
-        void createClusterGrid();
-
-        void processOctreeNode(const OctreeNode<RenderableObject>* node, const Frustum& frustum);
-
-        // Creates the shader resources (descriptors, pipelines, etc.)
-        bool createShaderResources();
-
-        // Updates uniform buffers for the current frame
-        void updateUniformBuffers(Camera* camera);
-
-        // Culls the octree against the view frustum
-        void cullOctree(const Octree<RenderableObject>& octree, const Frustum& frustum);
-
-        // Assigns visible objects to clusters
-        void assignObjectsToClusters();
-
-        // Assigns lights to clusters
-        void assignLightsToClusters();
-
-        // Prepares the mesh shader draw commands
-        void prepareMeshShaderDrawCommands(VkCommandBuffer cmdBuffer);
-
-        // Helper method to find memory type
-        uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
-
-        // Helper method to create buffer
-        bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
-            VkBuffer& buffer, VkDeviceMemory& bufferMemory);
-
-        // Helper method to map cluster grid to frustum
-        glm::vec3 worldToCluster(const glm::vec3& worldPos, const Camera camera);
-
-        // Helper to find clusters that contain an AABB
-        std::vector<uint32_t> findClustersForBounds(const AABBF& bounds, const Camera camera);
-
-
-
-    public:
-        // Vulkan handles
+        // Core Vulkan resources
         VkDevice m_device;
         VkPhysicalDevice m_physicalDevice;
         VkCommandPool m_commandPool;
         VkQueue m_graphicsQueue;
         uint32_t m_graphicsQueueFamily;
 
-        VkFormat colorFormat;
-        VkFormat depthFormat;
-
-        Camera m_camera;  // Shared ownership
-
-        // Configuration
+        // Rendering configuration
+        VkFormat m_colorFormat;
+        VkFormat m_depthFormat;
         ClusterConfig m_config;
+        uint32_t m_totalClusters;
+        bool m_wireframeMode = false;
+        bool m_debugClusters = false;
 
-        // Storage for clusters
+        // Camera
+        Camera m_camera;
+        Frustum m_frustum;
+
+        // Shader modules
+        std::unique_ptr<ShaderModule> m_taskShader;
+        std::unique_ptr<ShaderModule> m_meshShader;
+        std::unique_ptr<ShaderModule> m_fragmentShader;
+        std::unique_ptr<ShaderModule> m_debugTaskShader;
+        std::unique_ptr<ShaderModule> m_debugMeshShader;
+
+        // Pipeline resources
+        std::unique_ptr<PipelineLayoutResource> m_pipelineLayout;
+        std::unique_ptr<PipelineResource> m_pipeline;
+        std::unique_ptr<PipelineResource> m_wireframePipeline;
+        std::unique_ptr<PipelineResource> m_debugPipeline;
+
+        // Descriptor resources
+        std::unique_ptr<DescriptorSetLayoutResource> m_descriptorSetLayout;
+        std::unique_ptr<DescriptorPoolResource> m_descriptorPool;
+        std::unique_ptr<DescriptorSetResource> m_descriptorSet;
+
+        // GPU buffers
+        std::unique_ptr<Buffer> m_clusterBuffer;
+        std::unique_ptr<Buffer> m_objectBuffer;
+        std::unique_ptr<Buffer> m_lightBuffer;
+        std::unique_ptr<Buffer> m_indexBuffer;
+        std::unique_ptr<Buffer> m_uniformBuffer;
+
+        // Enhanced mesh buffers
+        std::unique_ptr<Buffer> m_vertexBuffer;
+        std::unique_ptr<Buffer> m_meshIndexBuffer;
+        std::unique_ptr<Buffer> m_meshInfoBuffer;
+        std::unique_ptr<Buffer> m_materialBuffer;
+
+        // CPU storage
         std::vector<Cluster> m_clusters;
-
-        // Storage for objects
-
-        // Storage for lights
+        std::vector<RenderableObject> m_visibleObjects;
         std::vector<ClusterLight> m_lights;
-
-        // Maps of which objects/lights are in which clusters
         std::vector<uint32_t> m_clusterLightIndices;
         std::vector<uint32_t> m_clusterObjectIndices;
 
-        // Vulkan resources
-        std::unique_ptr<ShaderModule> m_taskShader = nullptr;
-        std::unique_ptr<ShaderModule> m_meshShader = nullptr;
-        std::unique_ptr<ShaderModule> m_fragmentShader = nullptr;
+        // Mesh data storage
+        std::vector<MeshVertex> m_allVertices;
+        std::vector<uint32_t> m_allIndices;
+        std::vector<MeshInfo> m_meshInfos;
+        std::vector<PBRMaterial> m_materials;
+        std::unordered_map<std::string, uint32_t> m_meshNameToID;
 
-        std::unique_ptr<PipelineLayoutResource> m_pipelineLayout = nullptr;
-        std::unique_ptr<PipelineResource> m_pipeline = nullptr;
+        // Private methods
+        void createClusterGrid();
+        bool createShaderResources();
+        bool createMeshBuffers();
+        bool createDefaultTextures();
+        void updateUniformBuffers(Camera* camera);
+        void cullOctree(const Octree<RenderableObject>& octree, const Frustum& frustum);
+        void processOctreeNode(const OctreeNode<RenderableObject>* node, const Frustum& frustum);
+        void assignObjectsToClusters();
+        void assignLightsToClusters();
+        void updateGPUBuffers();
+        std::vector<uint32_t> findClustersForBounds(const AABBF& bounds, const Camera& camera);
+        glm::vec3 worldToCluster(const glm::vec3& worldPos, const Camera& camera);
 
-        // Descriptor resources
-        std::unique_ptr<DescriptorSetLayoutResource> m_descriptorSetLayout = nullptr;
-        std::unique_ptr<DescriptorPoolResource> m_descriptorPool = nullptr;
-        std::unique_ptr<DescriptorSetResource> m_descriptorSet = nullptr;
-
-        // Buffers
-        std::unique_ptr<Buffer> m_clusterBuffer = nullptr;
-        std::unique_ptr<Buffer> m_lightBuffer = nullptr;
-        std::unique_ptr<Buffer> m_objectBuffer = nullptr;
-        std::unique_ptr<Buffer> m_indexBuffer = nullptr;
-        std::unique_ptr<Buffer> m_uniformBuffer = nullptr;
-
-        // Frustum for current frame culling
-        Frustum m_frustum;
-
-        // Total number of clusters
-        uint32_t m_totalClusters;
+        // Mesh creation helpers
+        void updateMeshBuffers();
+        void updateMaterialBuffer();
+        uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
+        bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+            VkBuffer& buffer, VkDeviceMemory& bufferMemory);
     };
 
-    // UBO for cluster rendering
-    struct ClusterUBO {
+    // UBO for enhanced cluster rendering
+    struct EnhancedClusterUBO {
         alignas(16) glm::mat4 viewMatrix;
         alignas(16) glm::mat4 projMatrix;
+        alignas(16) glm::mat4 invViewMatrix;
+        alignas(16) glm::mat4 invProjMatrix;
         alignas(16) glm::vec4 cameraPos;
-        alignas(16) glm::uvec4 clusterDimensions;  // x, y, z, pad
-        alignas(16) glm::vec4 zPlanes;             // near, far, clustersPerZ, pad
-        uint32_t numLights;
-        uint32_t numObjects;
-        uint32_t numClusters;
-        uint32_t padding;
+        alignas(16) glm::uvec4 clusterDimensions;
+        alignas(16) glm::vec4 zPlanes;
+        alignas(16) glm::vec4 screenSize; // width, height, 1/width, 1/height
+        alignas(4) uint32_t numLights;
+        alignas(4) uint32_t numObjects;
+        alignas(4) uint32_t numClusters;
+        alignas(4) uint32_t frameNumber;
+        alignas(4) float time;
+        alignas(4) float deltaTime;
+        alignas(8) uint32_t flags; // Debug flags, etc.
     };
 
-    // ===============================
-    // Implementation
-    // ===============================
+    uint32_t ClusteredRenderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+        VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProperties);
 
-    ClusteredRenderer::ClusteredRenderer(VkDevice device, VkPhysicalDevice physicalDevice, const ClusterConfig& config)
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+            if ((typeFilter & (1 << i)) &&
+                (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                return i;
+            }
+        }
+
+        throw std::runtime_error("Failed to find suitable memory type");
+    }
+
+    // Implementation
+    ClusteredRenderer::ClusteredRenderer(VkDevice device, VkPhysicalDevice physicalDevice,
+        VkQueue graphicsQueue, uint32_t graphicsQueueFamily,
+        VkCommandPool commandPool, const ClusterConfig& config)
         : m_device(device)
         , m_physicalDevice(physicalDevice)
+        , m_graphicsQueue(graphicsQueue)
+        , m_graphicsQueueFamily(graphicsQueueFamily)
+        , m_commandPool(commandPool)
         , m_config(config)
         , m_totalClusters(config.xSlices* config.ySlices* config.zSlices)
     {
+        Logger::get().info("Creating ClusteredRenderer with {} clusters ({}x{}x{})",
+            m_totalClusters, config.xSlices, config.ySlices, config.zSlices);
     }
 
     ClusteredRenderer::~ClusteredRenderer() {
-        // Cleanup is handled by RAII wrappers
+        shutdown();
     }
 
-    void ClusteredRenderer::setCamera(Camera* camera) {
-        m_camera = *camera;
-    }
+    bool ClusteredRenderer::initialize(VkFormat color, VkFormat depth) {
+        m_colorFormat = color;
+        m_depthFormat = depth;
 
+        Logger::get().info("Initializing ClusteredRenderer...");
 
-    void ClusteredRenderer::createClusterGrid() {
-        // Initialize cluster storage
-        m_clusters.resize(m_totalClusters);
-
-        // Reserve space for indices
-        m_clusterLightIndices.reserve(m_totalClusters * 32); // Estimate 32 lights per cluster max
-        m_clusterObjectIndices.reserve(m_totalClusters * 64); // Estimate 64 objects per cluster max
-
-        // Create cluster buffer
-        VkDeviceSize clusterBufferSize = m_totalClusters * sizeof(Cluster);
-        m_clusterBuffer = std::make_unique<Buffer>(
-            m_device,
-            m_physicalDevice,
-            clusterBufferSize,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        );
-
-        // Create index buffer for object and light indices
-        VkDeviceSize indexBufferSize = (m_clusterLightIndices.capacity() + m_clusterObjectIndices.capacity()) * sizeof(uint32_t);
-        m_indexBuffer = std::make_unique<Buffer>(
-            m_device,
-            m_physicalDevice,
-            indexBufferSize,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        );
-
-        // Create uniform buffer
-        m_uniformBuffer = std::make_unique<Buffer>(
-            m_device,
-            m_physicalDevice,
-            sizeof(ClusterUBO),
-            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        );
-
-        Logger::get().info("Created cluster grid with {} clusters ({}x{}x{})",
-            m_totalClusters, m_config.xSlices, m_config.ySlices, m_config.zSlices);
-    }
-
-    bool ClusteredRenderer::createShaderResources() {
         try {
-            // Load shaders
-            m_taskShader = ShaderModule::compileFromFile(m_device, "shaders/cluster_task.task");
-            m_meshShader = ShaderModule::compileFromFile(m_device, "shaders/cluster_mesh.mesh");
-            m_fragmentShader = ShaderModule::compileFromFile(m_device, "shaders/cluster_frag.frag");
-
-            if (!m_taskShader || !m_meshShader || !m_fragmentShader) {
-                Logger::get().error("Failed to compile cluster shaders");
+            // Create GPU buffers
+            if (!createMeshBuffers()) {
+                Logger::get().error("Failed to create mesh buffers");
                 return false;
             }
 
-            // Extract reflection data
-            ShaderReflection combinedReflection;
-            combinedReflection.merge(*m_taskShader->getReflection());
-            combinedReflection.merge(*m_meshShader->getReflection());
-            combinedReflection.merge(*m_fragmentShader->getReflection());
-
-            Logger::get().info("Task shader bindings: {}", m_taskShader->getReflection()->getResourceBindings().size());
-            Logger::get().info("Mesh shader bindings: {}", m_meshShader->getReflection()->getResourceBindings().size());
-            Logger::get().info("Fragment shader bindings: {}", m_fragmentShader->getReflection()->getResourceBindings().size());
-
-            // Create descriptor set layout
-            m_descriptorSetLayout = combinedReflection.createDescriptorSetLayout(m_device, 0);
-            if (!m_descriptorSetLayout) {
-                Logger::get().error("Failed to create descriptor set layout for the clustered renderer!!");
+            // Create default textures
+            if (!createDefaultTextures()) {
+                Logger::get().error("Failed to create default textures");
                 return false;
             }
 
-            // Create pipeline layout
-            std::vector<VkDescriptorSetLayout> setLayouts = { m_descriptorSetLayout->handle() };
+            // Create cluster grid
+            createClusterGrid();
 
-            VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
-            pipelineLayoutInfo.pSetLayouts = setLayouts.data();
-
-            VkPipelineLayout pipelineLayoutHandle;
-            if (vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &pipelineLayoutHandle) != VK_SUCCESS) {
-                Logger::get().error("Failed to create pipeline layout");
+            // Create shader resources
+            if (!createShaderResources()) {
+                Logger::get().error("Failed to create shader resources");
                 return false;
             }
 
-            m_pipelineLayout = std::make_unique<PipelineLayoutResource>(m_device, pipelineLayoutHandle);
+            // Create default material
+            createDefaultMaterial();
 
-            // Create descriptor pool
-            m_descriptorPool = combinedReflection.createDescriptorPool(m_device, 10); // 10 sets max
-            if (!m_descriptorPool) {
-                Logger::get().error("Failed to create descriptor pool");
-                return false;
-            }
-
-            // Allocate descriptor set
-            VkDescriptorSetAllocateInfo allocInfo{};
-            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            allocInfo.descriptorPool = m_descriptorPool->handle();
-            allocInfo.descriptorSetCount = 1;
-            allocInfo.pSetLayouts = &m_descriptorSetLayout->handle();
-
-            VkDescriptorSet descriptorSet;
-            if (vkAllocateDescriptorSets(m_device, &allocInfo, &descriptorSet) != VK_SUCCESS) {
-                Logger::get().error("Failed to allocate descriptor set");
-                return false;
-            }
-
-            m_descriptorSet = std::make_unique<DescriptorSetResource>(m_device, descriptorSet);
-
-            // Update descriptor set
-            std::array<VkWriteDescriptorSet, 5> descriptorWrites{};
-
-            // UBO
-            VkDescriptorBufferInfo uboInfo{};
-            uboInfo.buffer = m_uniformBuffer->getBuffer();
-            uboInfo.offset = 0;
-            uboInfo.range = sizeof(ClusterUBO);
-
-            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[0].dstSet = m_descriptorSet.get()->handle();
-            descriptorWrites[0].dstBinding = 0;
-            descriptorWrites[0].dstArrayElement = 0;
-            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrites[0].descriptorCount = 1;
-            descriptorWrites[0].pBufferInfo = &uboInfo;
-
-            // Cluster buffer
-            VkDescriptorBufferInfo clusterInfo{};
-            clusterInfo.buffer = m_clusterBuffer->getBuffer();
-            clusterInfo.offset = 0;
-            clusterInfo.range = VK_WHOLE_SIZE;
-
-            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[1].dstSet = m_descriptorSet.get()->handle();
-            descriptorWrites[1].dstBinding = 1;
-            descriptorWrites[1].dstArrayElement = 0;
-            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            descriptorWrites[1].descriptorCount = 1;
-            descriptorWrites[1].pBufferInfo = &clusterInfo;
-
-            // Object buffer
-            VkDescriptorBufferInfo objectInfo{};
-            objectInfo.buffer = m_objectBuffer.get()->getBuffer();
-            objectInfo.offset = 0;
-            objectInfo.range = VK_WHOLE_SIZE;
-
-            descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[2].dstSet = m_descriptorSet.get()->handle();
-            descriptorWrites[2].dstBinding = 2;
-            descriptorWrites[2].dstArrayElement = 0;
-            descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            descriptorWrites[2].descriptorCount = 1;
-            descriptorWrites[2].pBufferInfo = &objectInfo;
-
-            // Light buffer
-            VkDescriptorBufferInfo lightInfo{};
-            lightInfo.buffer = m_lightBuffer->getBuffer();
-            lightInfo.offset = 0;
-            lightInfo.range = VK_WHOLE_SIZE;
-
-            descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[3].dstSet = m_descriptorSet.get()->handle();
-            descriptorWrites[3].dstBinding = 3;
-            descriptorWrites[3].dstArrayElement = 0;
-            descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            descriptorWrites[3].descriptorCount = 1;
-            descriptorWrites[3].pBufferInfo = &lightInfo;
-
-            // Index buffer
-            VkDescriptorBufferInfo indexInfo{};
-            indexInfo.buffer = m_indexBuffer.get()->getBuffer();
-            indexInfo.offset = 0;
-            indexInfo.range = VK_WHOLE_SIZE;
-
-            descriptorWrites[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[4].dstSet = m_descriptorSet.get()->handle();
-            descriptorWrites[4].dstBinding = 4;
-            descriptorWrites[4].dstArrayElement = 0;
-            descriptorWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            descriptorWrites[4].descriptorCount = 1;
-            descriptorWrites[4].pBufferInfo = &indexInfo;
-
-            vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
-
-            // Create pipeline
-            std::vector<VkPipelineShaderStageCreateInfo> shaderStages = {
-                m_taskShader->createShaderStageInfo(),
-                m_meshShader->createShaderStageInfo(),
-                m_fragmentShader->createShaderStageInfo()
-            };
-
-            // Pipeline creation will depend on whether we're using dynamic rendering or not
-            // Check for dynamic rendering capability on the device
-            bool dynamicRenderingSupported = true; // Replace with actual capability check
-
-            if (dynamicRenderingSupported) {
-                // Create pipeline with dynamic rendering
-                VkPipelineRenderingCreateInfoKHR renderingInfo{};
-                renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
-                renderingInfo.colorAttachmentCount = 1;
-
-                // Set format based on your swapchain format
-                renderingInfo.pColorAttachmentFormats = &colorFormat;
-
-                // Setup depth format if used
-                renderingInfo.depthAttachmentFormat = depthFormat;
-
-                // Create graphics pipeline
-                VkGraphicsPipelineCreateInfo pipelineInfo{};
-                pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-                pipelineInfo.pNext = &renderingInfo;
-                pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-                pipelineInfo.pStages = shaderStages.data();
-                pipelineInfo.layout = m_pipelineLayout.get()->handle();
-
-                // Create pipeline state objects
-                VkPipelineViewportStateCreateInfo viewportState{};
-                viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-                viewportState.viewportCount = 1;
-                viewportState.scissorCount = 1;
-
-                VkPipelineRasterizationStateCreateInfo rasterizationState{};
-                rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-                rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
-                rasterizationState.cullMode = VK_CULL_MODE_NONE;
-                rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-                rasterizationState.lineWidth = 1.0f;
-
-                VkPipelineMultisampleStateCreateInfo multisampleState{};
-                multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-                multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-                VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-                colorBlendAttachment.colorWriteMask =
-                    VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                    VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-                colorBlendAttachment.blendEnable = VK_FALSE;
-
-                VkPipelineColorBlendStateCreateInfo colorBlendState{};
-                colorBlendState.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-                colorBlendState.attachmentCount = 1;
-                colorBlendState.pAttachments = &colorBlendAttachment;
-
-                VkPipelineDepthStencilStateCreateInfo depthStencilState{};
-                depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-                depthStencilState.depthTestEnable = VK_TRUE;
-                depthStencilState.depthWriteEnable = VK_TRUE;
-                depthStencilState.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
-
-                // Add dynamic states
-                VkDynamicState dynamicStates[] = {
-                    VK_DYNAMIC_STATE_VIEWPORT,
-                    VK_DYNAMIC_STATE_SCISSOR
-                };
-
-                VkPipelineDynamicStateCreateInfo dynamicState{};
-                dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-                dynamicState.dynamicStateCount = 2;
-                dynamicState.pDynamicStates = dynamicStates;
-
-                // Update the pipeline info
-                pipelineInfo.pViewportState = &viewportState;
-                pipelineInfo.pRasterizationState = &rasterizationState;
-                pipelineInfo.pMultisampleState = &multisampleState;
-                pipelineInfo.pColorBlendState = &colorBlendState;
-                pipelineInfo.pDepthStencilState = &depthStencilState;
-                pipelineInfo.pDynamicState = &dynamicState;
-
-                // Configure pipeline state
-                // ...
-
-                // Debug checks
-                if (shaderStages.empty()) {
-                    Logger::get().error("No shader stages for pipeline creation!");
-                    return false;
-                }
-
-                Logger::get().info("Creating pipeline with {} shader stages", shaderStages.size());
-                for (size_t i = 0; i < shaderStages.size(); i++) {
-                    Logger::get().info("Stage {}: module={}, stage={}",
-                        i, (void*)shaderStages[i].module, (int)shaderStages[i].stage);
-                }
-
-                Logger::get().info("Color format: {}", (int)colorFormat);
-                Logger::get().info("Depth format: {}", (int)depthFormat);
-                Logger::get().info("Pipeline layout: {}", (void*)pipelineInfo.layout);
-
-                // Make sure all required state structs are initialized
-                if (!pipelineInfo.pViewportState || !pipelineInfo.pRasterizationState ||
-                    !pipelineInfo.pMultisampleState || !pipelineInfo.pColorBlendState) {
-                    Logger::get().error("Missing required pipeline state objects!");
-                    return false;
-                }
-
-
-                VkPipeline pipelineHandle;
-                auto err = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipelineHandle);
-                if( err != VK_SUCCESS) {
-                    Logger::get().error("Failed to create graphics pipeline");
-                    return false;
-                }
-
-                m_pipeline = std::make_unique<PipelineResource>(m_device, pipelineHandle);
-            }
-            else {
-                // Create pipeline with traditional render pass
-                // ...
-            }
-
-            Logger::get().info("Cluster shader resources created successfully");
+            Logger::get().info("ClusteredRenderer initialized successfully");
             return true;
         }
         catch (const std::exception& e) {
-            Logger::get().error("Exception in createShaderResources: {}", e.what());
+            Logger::get().error("Exception during ClusteredRenderer initialization: {}", e.what());
             return false;
         }
     }
 
-    void ClusteredRenderer::buildClusters(Camera* camera, const Octree<RenderableObject>& octree) {
+    void ClusteredRenderer::shutdown() {
+        // RAII will handle cleanup
+        Logger::get().info("ClusteredRenderer shutdown complete");
+    }
 
+    uint32_t ClusteredRenderer::loadMesh(std::vector<MeshVertex> vertices,
+        const std::vector<uint32_t>& indices,
+        const std::string& name) {
+        if (vertices.empty()) {
+            Logger::get().warning("Attempting to load empty mesh");
+            return UINT32_MAX;
+        }
+
+        // Check if mesh with this name already exists
+        if (!name.empty()) {
+            auto it = m_meshNameToID.find(name);
+            if (it != m_meshNameToID.end()) {
+                Logger::get().info("Mesh '{}' already loaded, returning existing ID {}", name, it->second);
+                return it->second;
+            }
+        }
+
+        MeshInfo meshInfo{};
+        meshInfo.vertexOffset = static_cast<uint32_t>(m_allVertices.size());
+        meshInfo.vertexCount = static_cast<uint32_t>(vertices.size());
+        meshInfo.indexOffset = static_cast<uint32_t>(m_allIndices.size());
+        meshInfo.indexCount = static_cast<uint32_t>(indices.size());
+
+        // Calculate bounds
+        meshInfo.boundsMin = vertices[0].position;
+        meshInfo.boundsMax = vertices[0].position;
+
+        for (const auto& vertex : vertices) {
+            meshInfo.boundsMin = glm::min((glm::vec3)meshInfo.boundsMin, (glm::vec3)vertex.position);
+            meshInfo.boundsMax = glm::max((glm::vec3)meshInfo.boundsMax, (glm::vec3)vertex.position);
+        }
+
+        // Store mesh info
+        uint32_t meshID = static_cast<uint32_t>(m_meshInfos.size());
+        m_meshInfos.push_back(meshInfo);
+
+        // Store name mapping
+        if (!name.empty()) {
+            m_meshNameToID[name] = meshID;
+        }
+
+        // Append to vertex and index arrays
+        m_allVertices.insert(m_allVertices.end(), vertices.begin(), vertices.end());
+        m_allIndices.insert(m_allIndices.end(), indices.begin(), indices.end());
+
+        // Update GPU buffers
+        updateMeshBuffers();
+
+        Logger::get().info("Loaded mesh '{}' with ID {}: {} vertices, {} indices",
+            name.empty() ? "unnamed" : name, meshID, vertices.size(), indices.size());
+
+        return meshID;
+    }
+
+    uint32_t ClusteredRenderer::createMaterial(const PBRMaterial& material) {
+        uint32_t materialID = static_cast<uint32_t>(m_materials.size());
+        m_materials.push_back(material);
+
+        updateMaterialBuffer();
+
+        Logger::get().info("Created material with ID {}", materialID);
+        return materialID;
+    }
+
+    uint32_t ClusteredRenderer::createDefaultMaterial() {
+        PBRMaterial defaultMaterial{};
+        defaultMaterial.baseColor = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
+        defaultMaterial.metallic = 0.0f;
+        defaultMaterial.roughness = 0.5f;
+        defaultMaterial.normalScale = 1.0f;
+        defaultMaterial.occlusionStrength = 1.0f;
+        defaultMaterial.emissiveColor = glm::vec3(0.0f);
+        defaultMaterial.emissiveFactor = 0.0f;
+        defaultMaterial.albedoTexture = -1; // Use default texture
+        defaultMaterial.normalTexture = -1;
+        defaultMaterial.metallicRoughnessTexture = -1;
+        defaultMaterial.occlusionTexture = -1;
+        defaultMaterial.emissiveTexture = -1;
+        defaultMaterial.alphaCutoff = 0.5f;
+        defaultMaterial.flags = 0;
+
+        return createMaterial(defaultMaterial);
+    }
+
+    void ClusteredRenderer::setCamera(Camera* camera) {
+        if (camera) {
+            m_camera = *camera;
+        }
+    }
+
+    void ClusteredRenderer::buildClusters(Camera* camera, const Octree<RenderableObject>& octree) {
+        if (!camera) return;
+
+        // Clear previous frame data
         m_clusterLightIndices.clear();
         m_clusterObjectIndices.clear();
         m_visibleObjects.clear();
 
-        // Extract frustum for culling
+        // Update camera
+        m_camera = *camera;
         m_frustum = camera->getViewFrustum();
-        
 
         // Cull octree against frustum
         cullOctree(octree, m_frustum);
 
-        Logger::get().info("After culling: found {} visible objects", m_visibleObjects.size());
+        Logger::get().info("Culling found {} visible objects", m_visibleObjects.size());
 
-
-        // Assign objects to clusters
+        // Assign objects and lights to clusters
         assignObjectsToClusters();
-
-        // Assign lights to clusters
         assignLightsToClusters();
 
-        // Update buffer data
+        // Update GPU buffers
+        updateGPUBuffers();
         updateUniformBuffers(camera);
+    }
 
-        // Update cluster buffer
-        if (!m_clusterBuffer || m_clusters.size() * sizeof(Cluster) > m_clusterBuffer->getSize()) {
-            // Only create new buffer if needed
-            VkDeviceSize clusterBufferSize = m_totalClusters * sizeof(Cluster);
-            m_clusterBuffer = std::make_unique<Buffer>(
-                m_device,
-                m_physicalDevice,
-                clusterBufferSize,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-            );
-        }
-        else {
-            // Just update existing buffer
-            m_clusterBuffer->update(m_clusters.data(), m_clusters.size() * sizeof(Cluster));
-        }
+    void ClusteredRenderer::updateLights(const std::vector<ClusterLight>& lights) {
+        m_lights = lights;
 
-
-
-        // Update object buffer if we have visible objects
-        if (m_visibleObjects.size() > 0) {
-            // Calculate required size
-            VkDeviceSize objectBufferSize = m_visibleObjects.size() * sizeof(RenderableObject);
-
-            // Check if we need to resize the buffer
-            bool resizeNeeded = !m_objectBuffer || m_objectBuffer->getSize() < objectBufferSize;
-
-            if (resizeNeeded) {
-                Logger::get().info("Resizing object buffer from {} to {} bytes",
-                    m_objectBuffer ? m_objectBuffer->getSize() : 0, objectBufferSize);
-
-                // Create new buffer with larger size
-                auto newBuffer = std::make_unique<Buffer>(
-                    m_device,
-                    m_physicalDevice,
-                    objectBufferSize,
-                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-                );
-
-                // Update descriptor for new buffer
-                VkDescriptorBufferInfo objectInfo{};
-                objectInfo.buffer = newBuffer->getBuffer();
-                objectInfo.offset = 0;
-                objectInfo.range = VK_WHOLE_SIZE;
-
-                VkWriteDescriptorSet write{};
-                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                write.dstSet = m_descriptorSet->handle();
-                write.dstBinding = 2;
-                write.dstArrayElement = 0;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                write.descriptorCount = 1;
-                write.pBufferInfo = &objectInfo;
-
-                vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
-
-                // Copy data to new buffer
-                newBuffer->update(m_visibleObjects.data(), objectBufferSize);
-
-                // Replace old buffer with new one
-                m_objectBuffer = std::move(newBuffer);
+        // Update light buffer
+        if (!m_lights.empty() && m_lightBuffer) {
+            VkDeviceSize lightBufferSize = m_lights.size() * sizeof(ClusterLight);
+            if (lightBufferSize <= m_lightBuffer->getSize()) {
+                m_lightBuffer->update(m_lights.data(), lightBufferSize);
             }
             else {
-                // Just update existing buffer data
-                m_objectBuffer->update(m_visibleObjects.data(), objectBufferSize);
+                Logger::get().warning("Light buffer too small for {} lights", m_lights.size());
             }
         }
 
-        // Update index buffer with combined object and light indices
-        size_t objectIndicesSize = m_clusterObjectIndices.size() * sizeof(uint32_t);
-        size_t lightIndicesSize = m_clusterLightIndices.size() * sizeof(uint32_t);
-        size_t totalIndicesSize = objectIndicesSize + lightIndicesSize;
-
-        if (totalIndicesSize > 0) {
-            // Check if we need to resize the index buffer
-            bool resizeNeeded = !m_indexBuffer || m_indexBuffer->getSize() < totalIndicesSize;
-
-            if (resizeNeeded) {
-                Logger::get().info("Resizing index buffer from {} to {} bytes",
-                    m_indexBuffer ? m_indexBuffer->getSize() : 0, totalIndicesSize);
-
-                // Create new buffer with larger size (add 20% extra for growth)
-                VkDeviceSize newSize = static_cast<VkDeviceSize>(totalIndicesSize * 1.2);
-                auto newBuffer = std::make_unique<Buffer>(
-                    m_device,
-                    m_physicalDevice,
-                    newSize,
-                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-                );
-
-                // Update descriptor for new buffer
-                VkDescriptorBufferInfo indexInfo{};
-                indexInfo.buffer = newBuffer->getBuffer();
-                indexInfo.offset = 0;
-                indexInfo.range = VK_WHOLE_SIZE;
-
-                VkWriteDescriptorSet write{};
-                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                write.dstSet = m_descriptorSet->handle();
-                write.dstBinding = 4; // Assuming binding 4 is for the index buffer
-                write.dstArrayElement = 0;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                write.descriptorCount = 1;
-                write.pBufferInfo = &indexInfo;
-
-                vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
-
-                // Update the new buffer with combined data
-                if (objectIndicesSize > 0) {
-                    newBuffer->update(m_clusterObjectIndices.data(), objectIndicesSize, 0);
-                }
-
-                if (lightIndicesSize > 0) {
-                    newBuffer->update(m_clusterLightIndices.data(), lightIndicesSize, objectIndicesSize);
-                }
-
-                // Replace old buffer with new one
-                m_indexBuffer = std::move(newBuffer);
-            }
-            else {
-                // Update existing buffer data
-                if (objectIndicesSize > 0) {
-                    m_indexBuffer->update(m_clusterObjectIndices.data(), objectIndicesSize, 0);
-                }
-
-                if (lightIndicesSize > 0) {
-                    m_indexBuffer->update(m_clusterLightIndices.data(), lightIndicesSize, objectIndicesSize);
-                }
-            }
-        }
-
-        Logger::get().info("Built clusters with {} objects and {} lights",
-            m_visibleObjects.size(), m_lights.size());
-    }
-
-    void ClusteredRenderer::cullOctree(const Octree<RenderableObject>& octree, const Frustum& frustum) {
-        // Start with the root node
-        const OctreeNode<RenderableObject>* root = octree.getRoot();
-        if (!root) return;
-
-        // Process the root node
-        processOctreeNode(root, frustum);
-    }
-
-    void ClusteredRenderer::processOctreeNode(const OctreeNode<RenderableObject>* node, const Frustum& frustum) {
-        if (!node) return;
-
-        // Debug output about the node
-        AABBF nodeBoundsF = node->getBounds().toFloat();
-        Logger::get().info("Checking node with bounds: min=({},{},{}), max=({},{},{})",
-            nodeBoundsF.min.x, nodeBoundsF.min.y, nodeBoundsF.min.z,
-            nodeBoundsF.max.x, nodeBoundsF.max.y, nodeBoundsF.max.z);
-
-        // Check if node bounds intersect frustum
-        bool intersects = frustum.containsAABB(nodeBoundsF.min, nodeBoundsF.max);
-        Logger::get().info("Node intersects frustum: {}", intersects ? "YES" : "NO");
-
-        if (!intersects) {
-            return; // Skip this node entirely
-        }
-
-        // If this is a leaf node with objects
-        /*if (node->isLeaf()) {
-            const auto& objects = node->getObjects();
-            Logger::get().info("Leaf node has {} objects", objects.size());
-
-            for (const auto& object : objects) {
-                // Convert to float for testing
-                AABBF objBounds = object.bounds.toFloat();
-
-                // Test against frustum
-                bool visible = frustum.containsAABB(objBounds.min, objBounds.max);
-                Logger::get().info("Object bounds: min=({},{},{}), max=({},{},{}), visible: {}",
-                    objBounds.min.x, objBounds.min.y, objBounds.min.z,
-                    objBounds.max.x, objBounds.max.y, objBounds.max.z,
-                    visible ? "YES" : "NO");
-
-                if (visible) {
-                    m_visibleObjects.push_back(object);
-                }
-            }
-        }*/
-
-        /*if (node->isLeaf()) {
-            const auto& objects = node->getObjects();
-            Logger::get().info("Leaf node has {} objects", objects.size());
-
-            // Add ALL objects from leaf nodes (bypass frustum test)
-            for (const auto& object : objects) {
-                Logger::get().info("Adding object to visible set (bypassing frustum test)");
-                m_visibleObjects.push_back(object);
-            }
-        }
-
-        else {
-            // Recursively process child nodes
-            for (int i = 0; i < 8; i++) {
-                processOctreeNode(node->getChild(i), frustum);
-            }
-        }*/
-
-        // BYPASS FRUSTUM TEST - add all objects regardless of visibility
-        if (node->isLeaf()) {
-            const auto& objects = node->getObjects();
-            for (const auto& object : objects) {
-                m_visibleObjects.push_back(object);
-            }
-        }
-        else {
-            // Process all children
-            for (int i = 0; i < 8; i++) {
-                processOctreeNode(node->getChild(i), frustum);
-            }
-        }
-    }
-
-    void ClusteredRenderer::assignObjectsToClusters() {
-        // Clear previous assignments
-        for (auto& cluster : m_clusters) {
-            cluster.objectOffset = 0;
-            cluster.objectCount = 0;
-        }
-
-        // Temporary map of objects per cluster
-        std::vector<std::vector<uint32_t>> clusterObjects(m_totalClusters);
-
-        // Assign each visible object to clusters
-        for (size_t objIdx = 0; objIdx < m_visibleObjects.size(); objIdx++) {
-            const auto& obj = m_visibleObjects[objIdx];
-
-            // Calculate object bounds in world space
-            AABBF worldBounds = obj.bounds.toFloat();
-
-            // Transform bounds to view space
-            glm::mat4 viewMatrix = m_camera.getViewMatrix();
-            AABBF viewBounds = transformAABB(viewMatrix, worldBounds);
-
-            // Log for debugging
-            //Logger::get().info("Object {} world bounds: min=({},{},{}), max=({},{},{})",
-            //    objIdx,
-            //    worldBounds.min.x, worldBounds.min.y, worldBounds.min.z,
-            //    worldBounds.max.x, worldBounds.max.y, worldBounds.max.z);
-
-            //Logger::get().info("Object {} view bounds: min=({},{},{}), max=({},{},{})",
-            //    objIdx,
-            //    viewBounds.min.x, viewBounds.min.y, viewBounds.min.z,
-            //    viewBounds.max.x, viewBounds.max.y, viewBounds.max.z);
-
-            // Find clusters that contain this object
-            std::vector<uint32_t> clusters = findClustersForBounds(viewBounds, m_camera);
-            //Logger::get().info("Object {} assigned to {} clusters", objIdx, clusters.size());
-
-            // Add object index to each cluster
-            for (uint32_t clusterIdx : clusters) {
-                if (clusterIdx < m_totalClusters) {
-                    clusterObjects[clusterIdx].push_back(static_cast<uint32_t>(objIdx));
-                }
-            }
-        }
-
-        // Compact the object indices
-        m_clusterObjectIndices.clear();
-        for (uint32_t i = 0; i < m_totalClusters; i++) {
-            m_clusters[i].objectOffset = static_cast<uint32_t>(m_clusterObjectIndices.size());
-            m_clusters[i].objectCount = static_cast<uint32_t>(clusterObjects[i].size());
-
-            m_clusterObjectIndices.insert(
-                m_clusterObjectIndices.end(),
-                clusterObjects[i].begin(),
-                clusterObjects[i].end()
-            );
-        }
-    }
-
-    /*void ClusteredRenderer::assignLightsToClusters() {
-        // Clear previous assignments
-        for (auto& cluster : m_clusters) {
-            cluster.lightOffset = 0;
-            cluster.lightCount = 0;
-        }
-
-        // Temporary map of lights per cluster
-        std::vector<std::vector<uint32_t>> clusterLights(m_totalClusters);
-
-        // Assign each light to clusters
-        for (size_t lightIdx = 0; lightIdx < m_lights.size(); lightIdx++) {
-            const auto& light = m_lights[lightIdx];
-
-            // Skip directional lights (they affect all clusters)
-            if (light.type == 2) {
-                continue;
-            }
-
-            // Calculate light bounds
-            float radius = light.radius;
-            AABBF lightBounds = {
-                glm::vec3(light.position) - glm::vec3(radius),
-                glm::vec3(light.position) + glm::vec3(radius)
-            };
-
-            // Find clusters that contain this light
-            std::vector<uint32_t> clusters = findClustersForBounds(lightBounds, m_camera);
-
-            // Add light index to each cluster
-            for (uint32_t clusterIdx : clusters) {
-                if (clusterIdx < m_totalClusters) {
-                    clusterLights[clusterIdx].push_back(static_cast<uint32_t>(lightIdx));
-                }
-            }
-        }
-
-        // Find directional lights
-        std::vector<uint32_t> directionalLights;
-        for (size_t lightIdx = 0; lightIdx < m_lights.size(); lightIdx++) {
-            if (m_lights[lightIdx].type == 2) { // Directional light
-                directionalLights.push_back(static_cast<uint32_t>(lightIdx));
-            }
-        }
-
-        // Compact the light indices
-        m_clusterLightIndices.clear();
-        for (uint32_t i = 0; i < m_totalClusters; i++) {
-            m_clusters[i].lightOffset = static_cast<uint32_t>(m_clusterLightIndices.size());
-
-            // Add cluster-specific lights
-            m_clusterLightIndices.insert(
-                m_clusterLightIndices.end(),
-                clusterLights[i].begin(),
-                clusterLights[i].end()
-            );
-
-            // Add directional lights to all clusters
-            m_clusterLightIndices.insert(
-                m_clusterLightIndices.end(),
-                directionalLights.begin(),
-                directionalLights.end()
-            );
-
-            m_clusters[i].lightCount = static_cast<uint32_t>(clusterLights[i].size() + directionalLights.size());
-        }
-    }*/
-
-    void ClusteredRenderer::updateUniformBuffers(Camera* camera) {
-        // Update uniform buffer with camera data
-        ClusterUBO ubo;
-
-        ubo.viewMatrix = camera->getViewMatrix();
-        ubo.projMatrix = camera->getProjectionMatrix();
-        ubo.cameraPos = glm::vec4(camera->getLocalPosition(), 1.0f);
-        ubo.clusterDimensions = glm::uvec4(m_config.xSlices, m_config.ySlices, m_config.zSlices, 0);
-        ubo.zPlanes = glm::vec4(m_config.nearPlane, m_config.farPlane, static_cast<float>(m_config.zSlices), 0.0f);
-        ubo.numLights = static_cast<uint32_t>(m_lights.size());
-
-        Logger::get().info("Num clusters: {}, Num objects: {}", m_totalClusters, static_cast<uint32_t>(m_visibleObjects.size()));
-
-        ubo.numObjects = static_cast<uint32_t>(m_visibleObjects.size());
-        ubo.numClusters = m_totalClusters;
-
-        m_uniformBuffer->update(&ubo, sizeof(ubo));
+        Logger::get().info("Updated {} lights", m_lights.size());
     }
 
     void ClusteredRenderer::render(VkCommandBuffer cmdBuffer, Camera* camera) {
+        if (!m_pipeline) {
+            Logger::get().error("Pipeline not created, cannot render");
+            return;
+        }
 
+        // Memory barriers for buffer updates
         std::vector<VkBufferMemoryBarrier> barriers;
 
-        VkBufferMemoryBarrier uboBarrier{};
-        uboBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        uboBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-        uboBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        uboBarrier.buffer = m_uniformBuffer->getBuffer();
-        uboBarrier.offset = 0;
-        uboBarrier.size = sizeof(ClusterUBO);
-        uboBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        uboBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        auto addBarrier = [&](VkBuffer buffer, VkDeviceSize size) {
+            VkBufferMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barrier.buffer = buffer;
+            barrier.offset = 0;
+            barrier.size = size;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers.push_back(barrier);
+            };
 
-        VkBufferMemoryBarrier clusterBarrier{};
-        clusterBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        clusterBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-        clusterBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        clusterBarrier.buffer = m_clusterBuffer->getBuffer();
-        clusterBarrier.offset = 0;
-        clusterBarrier.size = VK_WHOLE_SIZE;
-        clusterBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        clusterBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-
-
-        VkBufferMemoryBarrier objectBarrier{};
-        objectBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        objectBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-        objectBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        objectBarrier.buffer = m_objectBuffer->getBuffer();
-        objectBarrier.offset = 0;
-        objectBarrier.size = VK_WHOLE_SIZE;
-        objectBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        objectBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-
-        VkBufferMemoryBarrier indexBarrier{};
-        indexBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        indexBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-        indexBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        indexBarrier.buffer = m_indexBuffer->getBuffer();
-        indexBarrier.offset = 0;
-        indexBarrier.size = VK_WHOLE_SIZE;
-        indexBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        indexBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-
-        VkBufferMemoryBarrier lightBarrier{};
-        lightBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        lightBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-        lightBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        lightBarrier.buffer = m_lightBuffer->getBuffer();
-        lightBarrier.offset = 0;
-        lightBarrier.size = VK_WHOLE_SIZE;
-        lightBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        lightBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-
-        barriers.push_back(uboBarrier);
-        barriers.push_back(clusterBarrier);
-        barriers.push_back(objectBarrier);
-        barriers.push_back(indexBarrier);
-        barriers.push_back(lightBarrier);
+        addBarrier(m_uniformBuffer->getBuffer(), sizeof(EnhancedClusterUBO));
+        addBarrier(m_clusterBuffer->getBuffer(), VK_WHOLE_SIZE);
+        addBarrier(m_objectBuffer->getBuffer(), VK_WHOLE_SIZE);
+        addBarrier(m_lightBuffer->getBuffer(), VK_WHOLE_SIZE);
+        addBarrier(m_indexBuffer->getBuffer(), VK_WHOLE_SIZE);
 
         vkCmdPipelineBarrier(
             cmdBuffer,
@@ -3064,28 +2651,28 @@ namespace tremor::gfx {
             0, nullptr
         );
 
-        // Bind the pipeline
-        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->handle());
+        // Choose pipeline based on mode
+        VkPipeline currentPipeline = m_debugClusters ?
+            (m_debugPipeline ? m_debugPipeline->handle() : m_pipeline->handle()) :
+            (m_wireframeMode && m_wireframePipeline ? m_wireframePipeline->handle() : m_pipeline->handle());
 
-        if (!m_descriptorSet || m_descriptorSet->handle() == VK_NULL_HANDLE) {
-            Logger::get().error("Invalid descriptor set in render()");
-            return;
-        }
+        // Bind pipeline
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
 
         // Bind descriptor sets
-        vkCmdBindDescriptorSets(
-            cmdBuffer,
-            VK_PIPELINE_BIND_POINT_GRAPHICS,
-            m_pipelineLayout->handle(),
-            0,
-            1,
-            &m_descriptorSet->handle(),
-            0,
-            nullptr
-        );
+        if (m_descriptorSet) {
+            vkCmdBindDescriptorSets(
+                cmdBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_pipelineLayout->handle(),
+                0, 1,
+                &m_descriptorSet->handle(),
+                0, nullptr
+            );
+        }
 
-        VkExtent2D extent = camera->extent; 
-        // Or get from swapchain
+        // Set viewport and scissor
+        VkExtent2D extent = camera->extent;
         VkViewport viewport{};
         viewport.x = 0.0f;
         viewport.y = 0.0f;
@@ -3098,262 +2685,289 @@ namespace tremor::gfx {
         VkRect2D scissor{};
         scissor.offset = { 0, 0 };
         scissor.extent = extent;
-        vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);        // Draw using mesh shaders
+        vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
 
-        // Calculate the number of task shader workgroups needed
-        uint32_t taskGroupX = (m_totalClusters + 31) / 32; // 32 clusters per workgroup
-        taskGroupX = std::max(taskGroupX, 1u); // Ensure at least one workgroup
+        // Calculate task shader workgroups
+        uint32_t taskGroupX = (m_totalClusters + 31) / 32;
+        taskGroupX = std::max(taskGroupX, 1u);
 
-        Logger::get().info("Drawing mesh tasks: {} workgroups, {} clusters",
-            taskGroupX, m_totalClusters);
+        Logger::get().info("Rendering: {} clusters, {} visible objects, {} workgroups",
+            m_totalClusters, m_visibleObjects.size(), taskGroupX);
 
-        // Draw using mesh shaders
-        vkCmdDrawMeshTasksEXT(
-            cmdBuffer,
-            taskGroupX, // X dimension of the grid
-            1,          // Y dimension of the grid
-            1           // Z dimension of the grid
-        );
+        // Dispatch mesh shaders
+        vkCmdDrawMeshTasksEXT(cmdBuffer, taskGroupX, 1, 1);
     }
 
-	void ClusteredRenderer::assignLightsToClusters() {
-		// Clear previous assignments
-		for (auto& cluster : m_clusters) {
-			cluster.lightOffset = 0;
-			cluster.lightCount = 0;
-		}
-		// Temporary map of lights per cluster
-		std::vector<std::vector<uint32_t>> clusterLights(m_totalClusters);
-		// Assign each light to clusters
-		for (size_t lightIdx = 0; lightIdx < m_lights.size(); lightIdx++) {
-			const auto& light = m_lights[lightIdx];
-			// Skip directional lights (they affect all clusters)
-			if (light.type == 2) {
-				continue;
-			}
-			// Calculate light bounds
-			float radius = light.radius;
-			AABBF lightBounds = {
-				glm::vec3(light.position) - glm::vec3(radius),
-				glm::vec3(light.position) + glm::vec3(radius)
-			};
-			// Find clusters that contain this light
-			std::vector<uint32_t> clusters = findClustersForBounds(lightBounds, m_camera);
-			// Add light index to each cluster
-			for (uint32_t clusterIdx : clusters) {
-				if (clusterIdx < m_totalClusters) {
-					clusterLights[clusterIdx].push_back(static_cast<uint32_t>(lightIdx));
-				}
-			}
-		}
-		// Compact the light indices
-		m_clusterLightIndices.clear();
-		for (uint32_t i = 0; i < m_totalClusters; i++) {
-			m_clusters[i].lightOffset = static_cast<uint32_t>(m_clusterLightIndices.size());
-			// Add cluster-specific lights
-			m_clusterLightIndices.insert(
-				m_clusterLightIndices.end(),
-				clusterLights[i].begin(),
-				clusterLights[i].end()
-			);
-			m_clusters[i].lightCount = static_cast<uint32_t>(clusterLights[i].size());
-		}
-	}
+    // Private implementation methods...
+    void ClusteredRenderer::createClusterGrid() {
+        m_clusters.resize(m_totalClusters);
 
-    void ClusteredRenderer::updateLightBufferDescriptor(VkBuffer buf) {
-        // Update descriptor for new buffer
-        VkDescriptorBufferInfo lightInfo{};
-        lightInfo.buffer = buf;
-        lightInfo.offset = 0;
-        lightInfo.range = VK_WHOLE_SIZE;
+        // Initialize all clusters
+        for (auto& cluster : m_clusters) {
+            cluster.lightOffset = 0;
+            cluster.lightCount = 0;
+            cluster.objectOffset = 0;
+            cluster.objectCount = 0;
+        }
 
-        VkWriteDescriptorSet write{};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = m_descriptorSet->handle();
-        write.dstBinding = 3;
-        write.dstArrayElement = 0;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.descriptorCount = 1;
-        write.pBufferInfo = &lightInfo;
-
-        vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
-
-
+        Logger::get().info("Created cluster grid: {} total clusters", m_totalClusters);
     }
 
-    void ClusteredRenderer::updateLights(const std::vector<ClusterLight>& lights) {
-        m_lights = lights;
+    bool ClusteredRenderer::createMeshBuffers() {
+        try {
+            // Large pre-allocated buffers for scalability
+            const VkDeviceSize VERTEX_BUFFER_SIZE = sizeof(MeshVertex) * 1000000; // 1M vertices
+            const VkDeviceSize INDEX_BUFFER_SIZE = sizeof(uint32_t) * 3000000;    // 3M indices
+            const VkDeviceSize MESH_INFO_SIZE = sizeof(MeshInfo) * 10000;         // 10K meshes
+            const VkDeviceSize MATERIAL_SIZE = sizeof(PBRMaterial) * 1000;        // 1K materials
+            const VkDeviceSize CLUSTER_SIZE = sizeof(Cluster) * m_totalClusters;
+            const VkDeviceSize OBJECT_SIZE = sizeof(RenderableObject) * 100000; // 100K objects
+            const VkDeviceSize LIGHT_SIZE = sizeof(ClusterLight) * 10000;         // 10K lights
+            const VkDeviceSize INDEX_BUFFER_SIZE_CLUSTER = sizeof(uint32_t) * 1000000; // 1M indices
+            const VkDeviceSize UBO_SIZE = sizeof(EnhancedClusterUBO);
 
-        // Create or resize light buffer if needed
-        VkDeviceSize lightBufferSize = m_lights.size() * sizeof(ClusterLight);
-        if (!m_lightBuffer || m_lightBuffer->getSize() < lightBufferSize) {
-            m_lightBuffer = std::make_unique<Buffer>(
-                m_device,
-                m_physicalDevice,
-                lightBufferSize,
+            // Create all buffers
+            m_vertexBuffer = std::make_unique<Buffer>(
+                m_device, m_physicalDevice, VERTEX_BUFFER_SIZE,
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
-        }
+            m_meshIndexBuffer = std::make_unique<Buffer>(
+                m_device, m_physicalDevice, INDEX_BUFFER_SIZE,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
 
-        // Update light data
-        if (m_lights.size() > 0) {
-            m_lightBuffer->update(m_lights.data(), lightBufferSize);
+            m_meshInfoBuffer = std::make_unique<Buffer>(
+                m_device, m_physicalDevice, MESH_INFO_SIZE,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            m_materialBuffer = std::make_unique<Buffer>(
+                m_device, m_physicalDevice, MATERIAL_SIZE,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            m_clusterBuffer = std::make_unique<Buffer>(
+                m_device, m_physicalDevice, CLUSTER_SIZE,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            m_objectBuffer = std::make_unique<Buffer>(
+                m_device, m_physicalDevice, OBJECT_SIZE,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            m_lightBuffer = std::make_unique<Buffer>(
+                m_device, m_physicalDevice, LIGHT_SIZE,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            m_indexBuffer = std::make_unique<Buffer>(
+                m_device, m_physicalDevice, INDEX_BUFFER_SIZE_CLUSTER,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            m_uniformBuffer = std::make_unique<Buffer>(
+                m_device, m_physicalDevice, UBO_SIZE,
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            Logger::get().info("Created all mesh buffers successfully");
+            return true;
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Failed to create mesh buffers: {}", e.what());
+            return false;
         }
     }
 
-    // Helper to find clusters that contain an AABB
-    std::vector<uint32_t> ClusteredRenderer::findClustersForBounds(const AABBF& bounds, const Camera camera) {
-        std::vector<uint32_t> result;
+    bool ClusteredRenderer::createDefaultTextures() {
+        try {
+            // Create a simple 4x4 white texture for albedo
+            const uint32_t size = 4;
+            std::vector<uint8_t> whitePixels(size * size * 4, 255); // RGBA white
 
-        // Get the 8 corners of the AABB
-        std::array<glm::vec3, 8> corners = {
-            glm::vec3(bounds.min.x, bounds.min.y, bounds.min.z),
-            glm::vec3(bounds.max.x, bounds.min.y, bounds.min.z),
-            glm::vec3(bounds.min.x, bounds.max.y, bounds.min.z),
-            glm::vec3(bounds.max.x, bounds.max.y, bounds.min.z),
-            glm::vec3(bounds.min.x, bounds.min.y, bounds.max.z),
-            glm::vec3(bounds.max.x, bounds.min.y, bounds.max.z),
-            glm::vec3(bounds.min.x, bounds.max.y, bounds.max.z),
-            glm::vec3(bounds.max.x, bounds.max.y, bounds.max.z)
-        };
+            // Create albedo texture
+            VkImageCreateInfo imageInfo{};
+            imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            imageInfo.imageType = VK_IMAGE_TYPE_2D;
+            imageInfo.extent = { size, size, 1 };
+            imageInfo.mipLevels = 1;
+            imageInfo.arrayLayers = 1;
+            imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+            imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 
-        // Track the cluster bounds of the AABB
-        int minX = m_config.xSlices;
-        int minY = m_config.ySlices;
-        int minZ = m_config.zSlices;
-        int maxX = -1;
-        int maxY = -1;
-        int maxZ = -1;
+            // Create albedo image
+            m_defaultAlbedoTexture = std::make_unique<ImageResource>(m_device);
+            if (vkCreateImage(m_device, &imageInfo, nullptr, &m_defaultAlbedoTexture->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to create default albedo image");
+                return false;
+            }
 
-        // Convert each corner to cluster space and expand bounds
-        for (const auto& corner : corners) {
-            glm::vec3 clusterPos = worldToCluster(corner, camera);
+            // Get memory properties once
+            VkPhysicalDeviceMemoryProperties memProperties;
+            vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProperties);
 
-            // Add debug output for each corner
-            //Logger::get().info("Corner: world=({},{},{}) → cluster=({},{},{})",
-             //   corner.x, corner.y, corner.z,
-              //  clusterPos.x, clusterPos.y, clusterPos.z);
+            // Allocate memory for albedo
+            VkMemoryRequirements memRequirements;
+            vkGetImageMemoryRequirements(m_device, m_defaultAlbedoTexture->handle(), &memRequirements);
 
-            // Update bounds, making sure values are valid cluster indices
-            int x = glm::clamp(static_cast<int>(clusterPos.x), 0, static_cast<int>(m_config.xSlices - 1));
-            int y = glm::clamp(static_cast<int>(clusterPos.y), 0, static_cast<int>(m_config.ySlices - 1));
-            int z = glm::clamp(static_cast<int>(clusterPos.z), 0, static_cast<int>(m_config.zSlices - 1));
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memRequirements.size;
 
-            minX = std::min(minX, x);
-            minY = std::min(minY, y);
-            minZ = std::min(minZ, z);
-            maxX = std::max(maxX, x);
-            maxY = std::max(maxY, y);
-            maxZ = std::max(maxZ, z);
-        }
-
-        // Check if we found any valid clusters
-        if (minX > maxX || minY > maxY || minZ > maxZ) {
-            Logger::get().warning("No valid clusters found for bounds min=({},{},{}), max=({},{},{})",
-                bounds.min.x, bounds.min.y, bounds.min.z,
-                bounds.max.x, bounds.max.y, bounds.max.z);
-            return result;
-        }
-
-        // Add all clusters within the bounds
-        Logger::get().info("Cluster bounds: X=[{},{}], Y=[{},{}], Z=[{},{}]",
-            minX, maxX, minY, maxY, minZ, maxZ);
-
-        // Limit cluster count to avoid excessive assignments
-        int maxClusters = 65536;  // Set a reasonable limit
-        int clusterCount = (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
-
-        if (clusterCount > maxClusters) {
-            // If too many clusters, simplify by using only the most important ones
-            Logger::get().warning("Too many clusters ({}) - restricting to {} key clusters",
-                clusterCount, maxClusters);
-
-            // Just add clusters along the main diagonal as a simple approximation
-            for (int i = 0; i < maxClusters; i++) {
-                float t = i / static_cast<float>(maxClusters - 1);
-                int x = minX + static_cast<int>(t * (maxX - minX));
-                int y = minY + static_cast<int>(t * (maxY - minY));
-                int z = minZ + static_cast<int>(t * (maxZ - minZ));
-
-                uint32_t clusterIdx = z * m_config.xSlices * m_config.ySlices +
-                    y * m_config.xSlices + x;
-
-                if (clusterIdx < m_totalClusters) {
-                    result.push_back(clusterIdx);
+            // Find suitable memory type
+            uint32_t memoryTypeIndex = UINT32_MAX;
+            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+                if ((memRequirements.memoryTypeBits & (1 << i)) &&
+                    (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+                    memoryTypeIndex = i;
+                    break;
                 }
             }
-        }
-        else {
-            // Add all clusters in the range
-            for (int z = minZ; z <= maxZ; z++) {
-                for (int y = minY; y <= maxY; y++) {
-                    for (int x = minX; x <= maxX; x++) {
-                        uint32_t clusterIdx = z * m_config.xSlices * m_config.ySlices +
-                            y * m_config.xSlices + x;
 
-                        if (clusterIdx < m_totalClusters) {
-                            result.push_back(clusterIdx);
-                        }
-                    }
+            if (memoryTypeIndex == UINT32_MAX) {
+                Logger::get().error("Failed to find suitable memory type for default textures");
+                return false;
+            }
+
+            allocInfo.memoryTypeIndex = memoryTypeIndex;
+
+            // Allocate albedo memory
+            VkDeviceMemory albedoMemory;
+            if (vkAllocateMemory(m_device, &allocInfo, nullptr, &albedoMemory) != VK_SUCCESS) {
+                Logger::get().error("Failed to allocate albedo memory");
+                return false;
+            }
+
+            vkBindImageMemory(m_device, m_defaultAlbedoTexture->handle(), albedoMemory, 0);
+
+            // Create image view for albedo
+            VkImageViewCreateInfo viewInfo{};
+            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewInfo.image = m_defaultAlbedoTexture->handle();
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewInfo.subresourceRange.baseMipLevel = 0;
+            viewInfo.subresourceRange.levelCount = 1;
+            viewInfo.subresourceRange.baseArrayLayer = 0;
+            viewInfo.subresourceRange.layerCount = 1;
+
+            m_defaultAlbedoView = std::make_unique<ImageViewResource>(m_device);
+            if (vkCreateImageView(m_device, &viewInfo, nullptr, &m_defaultAlbedoView->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to create albedo image view");
+                return false;
+            }
+
+            // Create normal texture (flat normal map - 128, 128, 255, 255)
+            std::vector<uint8_t> normalPixels(size * size * 4);
+            for (int i = 0; i < size * size; i++) {
+                normalPixels[i * 4 + 0] = 128; // R
+                normalPixels[i * 4 + 1] = 128; // G  
+                normalPixels[i * 4 + 2] = 255; // B
+                normalPixels[i * 4 + 3] = 255; // A
+            }
+
+            // Create normal image
+            m_defaultNormalTexture = std::make_unique<ImageResource>(m_device);
+            if (vkCreateImage(m_device, &imageInfo, nullptr, &m_defaultNormalTexture->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to create default normal image");
+                return false;
+            }
+
+            // Allocate memory for normal texture
+            vkGetImageMemoryRequirements(m_device, m_defaultNormalTexture->handle(), &memRequirements);
+            allocInfo.allocationSize = memRequirements.size;
+
+            // Find memory type for normal texture
+            memoryTypeIndex = UINT32_MAX;
+            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+                if ((memRequirements.memoryTypeBits & (1 << i)) &&
+                    (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+                    memoryTypeIndex = i;
+                    break;
                 }
             }
-        }
+            allocInfo.memoryTypeIndex = memoryTypeIndex;
 
-        Logger::get().info("Found {} clusters for bounds", result.size());
-        return result;
+            VkDeviceMemory normalMemory;
+            if (vkAllocateMemory(m_device, &allocInfo, nullptr, &normalMemory) != VK_SUCCESS) {
+                Logger::get().error("Failed to allocate normal memory");
+                return false;
+            }
+
+            vkBindImageMemory(m_device, m_defaultNormalTexture->handle(), normalMemory, 0);
+
+            // Create normal image view
+            viewInfo.image = m_defaultNormalTexture->handle();
+            m_defaultNormalView = std::make_unique<ImageViewResource>(m_device);
+            if (vkCreateImageView(m_device, &viewInfo, nullptr, &m_defaultNormalView->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to create normal image view");
+                return false;
+            }
+
+            // Create sampler
+            VkSamplerCreateInfo samplerInfo{};
+            samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            samplerInfo.magFilter = VK_FILTER_LINEAR;
+            samplerInfo.minFilter = VK_FILTER_LINEAR;
+            samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            samplerInfo.anisotropyEnable = VK_TRUE;
+            samplerInfo.maxAnisotropy = 16.0f;
+            samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+            samplerInfo.unnormalizedCoordinates = VK_FALSE;
+            samplerInfo.compareEnable = VK_FALSE;
+            samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+
+            m_defaultSampler = std::make_unique<SamplerResource>(m_device);
+            if (vkCreateSampler(m_device, &samplerInfo, nullptr, &m_defaultSampler->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to create default sampler");
+                return false;
+            }
+
+            Logger::get().info("Created default textures successfully");
+            return true;
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in createDefaultTextures: {}", e.what());
+            return false;
+        }
     }
 
-    // Convert world position to cluster space
-    glm::vec3 ClusteredRenderer::worldToCluster(const glm::vec3& worldPos, const Camera camera) {
-        // Transform to view space
-        glm::vec4 viewPos = camera.getViewMatrix() * glm::vec4(worldPos, 1.0f);
+    // UBO for cluster rendering
+    struct ClusterUBO {
+        alignas(16) glm::mat4 viewMatrix;
+        alignas(16) glm::mat4 projMatrix;
+        alignas(16) glm::vec4 cameraPos;
+        alignas(16) glm::uvec4 clusterDimensions;  // x, y, z, pad
+        alignas(16) glm::vec4 zPlanes;             // near, far, clustersPerZ, pad
+        alignas(4) uint32_t numLights;
+        alignas(4) uint32_t numObjects;
+        alignas(4) uint32_t numClusters;
+        alignas(4) uint32_t padding;
+    };
 
-        // Get projection matrix values needed for proper NDC calculation
-        const glm::mat4& proj = camera.getProjectionMatrix();
-        float projXX = proj[0][0];
-        float projYY = proj[1][1];
+    // ===============================
+    // Implementation
+    // ===============================
 
-        // Calculate correct NDC coordinates using projection matrix values
-        float ndcX = viewPos.x * projXX / -viewPos.z;
-        float ndcY = viewPos.y * projYY / -viewPos.z;
-
-        // Properly map NDC [-1,1] to cluster coordinates [0,slices]
-        float clusterX = (ndcX + 1.0f) * 0.5f * static_cast<float>(m_config.xSlices - 1);
-        float clusterY = (ndcY + 1.0f) * 0.5f * static_cast<float>(m_config.ySlices - 1);
-
-        // Ensure cluster coordinates are clamped to valid range
-        clusterX = glm::clamp(clusterX, 0.0f, static_cast<float>(m_config.xSlices - 1));
-        clusterY = glm::clamp(clusterY, 0.0f, static_cast<float>(m_config.ySlices - 1));
-
-        // Ensure Z is in the valid range before calculating cluster Z
-        float zViewSpace = -viewPos.z;  // Make positive for math operations
-        zViewSpace = glm::clamp(zViewSpace, camera.getNearClip(), camera.getFarClip());
-
-        // Calculate Z cluster index (logarithmic or linear)
-        float clusterZ;
-        if (m_config.logarithmicZ) {
-            float near = camera.getNearClip();
-            float far = camera.getFarClip();
-            float logRatio = logf(far / near);
-            if (logRatio < 0.0001f) logRatio = 0.0001f;  // Avoid division by zero
-
-            clusterZ = static_cast<float>(m_config.zSlices - 1) *
-                (logf(zViewSpace / near) / logRatio);
-        }
-        else {
-            // Linear mapping
-            clusterZ = static_cast<float>(m_config.zSlices - 1) *
-                ((zViewSpace - camera.getNearClip()) /
-                    (camera.getFarClip() - camera.getNearClip()));
-        }
-
-        // Ensure Z is also clamped
-        clusterZ = glm::clamp(clusterZ, 0.0f, static_cast<float>(m_config.zSlices - 1));
-
-        return glm::vec3(clusterX, clusterY, clusterZ);
-    }
+    
 } // namespace tremor::gfx
 
 namespace tremor::gfx { 
@@ -3395,8 +3009,8 @@ namespace tremor::gfx {
     }
 
     void Camera::setPosition(const glm::vec3& position) {
-        Logger::get().info("Camera::setPosition: position={},{},{}",
-            position.x, position.y, position.z);
+        //Logger::get().info("Camera::setPosition: position={},{},{}",
+        //    position.x, position.y, position.z);
         m_position.integer = glm::i64vec3(0);
         m_position.fractional = position;
         normalizePosition();
@@ -3521,7 +3135,7 @@ namespace tremor::gfx {
     const glm::mat4& Camera::getViewMatrix() const {
         if (m_viewDirty) {
             static_cast<Camera>(*this).updateViewMatrix();
-            Logger::get().info("View matrix updated");
+            //Logger::get().info("View matrix updated");
         }
         return m_viewMatrix;
     }
@@ -3543,8 +3157,8 @@ namespace tremor::gfx {
     void Camera::updateViewMatrix() {
         m_viewMatrix = calculateViewMatrix();
 
-        Logger::get().info("View Matrix[3]: {}, {}, {}",
-            m_viewMatrix[3][0], m_viewMatrix[3][1], m_viewMatrix[3][2]);
+        //Logger::get().info("View Matrix[3]: {}, {}, {}",
+        //    m_viewMatrix[3][0], m_viewMatrix[3][1], m_viewMatrix[3][2]);
 
 
 
@@ -3822,32 +3436,6 @@ namespace tremor::gfx {
         alignas(4) int hasMetallicRoughnessMap;
         alignas(4) int hasAoMap;
         alignas(4) int hasEmissiveMap;
-    };
-
-    struct PBRMaterial {
-        // Base maps
-        std::unique_ptr<ImageResource> albedoMap;
-        std::unique_ptr<ImageResource> normalMap;
-        std::unique_ptr<ImageResource> metallicRoughnessMap; // R: metallic, G: roughness
-        std::unique_ptr<ImageResource> aoMap;               // Ambient occlusion
-        std::unique_ptr<ImageResource> emissiveMap;
-
-        // Default values for when maps aren't available
-        float baseColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-        float metallic = 0.0f;
-        float roughness = 0.5f;
-        float ao = 1.0f;
-        float emissive[3] = {0.0f, 0.0f, 0.0f};
-
-        // Sampler states
-        std::unique_ptr<SamplerResource> sampler;
-
-        // Image views for all textures
-        std::unique_ptr<ImageViewResource> albedoImageView;
-        std::unique_ptr<ImageViewResource> normalImageView;
-        std::unique_ptr<ImageViewResource> metallicRoughnessImageView;
-        std::unique_ptr<ImageViewResource> aoImageView;
-        std::unique_ptr<ImageViewResource> emissiveImageView;
     };
 
     
@@ -6605,6 +6193,193 @@ namespace tremor::gfx {
     class VulkanBackend : public RenderBackend {
     public:
 
+        uint32_t loadMeshFromFile(const std::string& filename);
+
+        uint32_t createMaterialFromDesc(const MaterialDesc& desc);
+
+        void addObjectToScene(uint32_t meshID, uint32_t materialID, const glm::mat4& transform);
+
+        std::vector<uint32_t> m_materialIDs;
+        uint32_t m_cubeMeshID;
+
+        void createEnhancedScene() {
+            // Create world octree with enhanced objects
+            AABBQ worldBounds{
+                {-1'000'000'000, -1'000'000'000, -1'000'000'000},
+                { 1'000'000'000,  1'000'000'000,  1'000'000'000}
+            };
+            m_sceneOctree = tremor::gfx::Octree<tremor::gfx::RenderableObject>(worldBounds);
+
+            // Add enhanced renderable objects
+            for (int i = 0; i < 25; i++) {
+                tremor::gfx::RenderableObject obj;
+                obj.meshID = m_cubeMeshID;
+                obj.materialID = m_materialIDs[i % m_materialIDs.size()];
+                obj.instanceID = i;
+                obj.flags = 1; // Visible flag
+
+                // Position in a 5x5 grid
+                float x = (i % 5 - 2) * 3.0f;
+                float z = (i / 5 - 2) * 3.0f;
+                float y = sin(i * 0.5f) * 2.0f; // Varying heights
+
+                obj.transform = glm::translate(glm::mat4(1.0f), glm::vec3(x, y, z));
+
+                // Add some rotation variety
+                float angle = i * 0.3f;
+                obj.transform = glm::rotate(obj.transform, angle, glm::vec3(0.0f, 1.0f, 0.0f));
+
+                obj.prevTransform = obj.transform;
+
+                // Calculate bounds
+                AABBF localBounds{ glm::vec3(-0.5f), glm::vec3(0.5f) };
+                AABBF worldBounds = transformAABB(obj.transform, localBounds);
+                obj.bounds = AABBQ::fromFloat(worldBounds);
+
+                // Add to octree
+                m_sceneOctree.insert(obj, obj.bounds);
+
+                Logger::get().info("Added enhanced object {} at ({},{},{})", i, x, y, z);
+            }
+
+            // Create lights
+            std::vector<tremor::gfx::ClusterLight> lights;
+
+            // Main directional light
+            tremor::gfx::ClusterLight sunLight;
+            sunLight.position = glm::vec3(10.0f, 20.0f, 10.0f);
+            sunLight.color = glm::vec3(1.0f, 0.95f, 0.8f);
+            sunLight.intensity = 5.0f;
+            sunLight.radius = 100.0f;
+            sunLight.type = 0; // Point light acting as sun
+            lights.push_back(sunLight);
+
+            // Colored accent lights
+            for (int i = 0; i < 4; i++) {
+                tremor::gfx::ClusterLight accentLight;
+                float angle = i * PI * 0.5f;
+                accentLight.position = glm::vec3(cos(angle) * 8.0f, 3.0f, sin(angle) * 8.0f);
+
+                // Different colors for each light
+                switch (i) {
+                case 0: accentLight.color = glm::vec3(1.0f, 0.3f, 0.3f); break; // Red
+                case 1: accentLight.color = glm::vec3(0.3f, 1.0f, 0.3f); break; // Green
+                case 2: accentLight.color = glm::vec3(0.3f, 0.3f, 1.0f); break; // Blue
+                case 3: accentLight.color = glm::vec3(1.0f, 1.0f, 0.3f); break; // Yellow
+                }
+
+                accentLight.intensity = 2.0f;
+                accentLight.radius = 15.0f;
+                accentLight.type = 0; // Point light
+                lights.push_back(accentLight);
+            }
+
+            m_clusteredRenderer->updateLights(lights);
+            Logger::get().info("Created enhanced scene with {} lights", lights.size());
+        }
+
+        void createSampleMeshes() {
+            // Create a more detailed cube with proper normals and UVs
+            std::vector<tremor::gfx::MeshVertex> cubeVertices = {
+                // Front face
+                {{-0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+
+                // Back face
+                {{ 0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+
+                // Right face
+                {{ 0.5f, -0.5f,  0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+                {{ 0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+                {{ 0.5f,  0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+                {{ 0.5f,  0.5f,  0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+
+                // Left face
+                {{-0.5f, -0.5f, -0.5f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
+                {{-0.5f, -0.5f,  0.5f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
+                {{-0.5f,  0.5f,  0.5f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
+                {{-0.5f,  0.5f, -0.5f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
+
+                // Top face
+                {{-0.5f,  0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 0.5f,  0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 0.5f,  0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-0.5f,  0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+
+                // Bottom face
+                {{-0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 0.5f, -0.5f,  0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-0.5f, -0.5f,  0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}}
+            };
+
+            std::vector<uint32_t> cubeIndices = {
+                // Front
+                0, 1, 2, 2, 3, 0,
+                // Back
+                4, 5, 6, 6, 7, 4,
+                // Right
+                8, 9, 10, 10, 11, 8,
+                // Left
+                12, 13, 14, 14, 15, 12,
+                // Top
+                16, 17, 18, 18, 19, 16,
+                // Bottom
+                20, 21, 22, 22, 23, 20
+            };
+
+            // Load the cube mesh
+            uint32_t cubeMeshID = m_clusteredRenderer->loadMesh(cubeVertices, cubeIndices, "cube");
+
+            // Create materials with different properties
+            tremor::gfx::PBRMaterial redMaterial{};
+            redMaterial.baseColor = glm::vec4(0.8f, 0.2f, 0.2f, 1.0f);
+            redMaterial.metallic = 0.0f;
+            redMaterial.roughness = 0.3f;
+            redMaterial.normalScale = 1.0f;
+            redMaterial.occlusionStrength = 1.0f;
+            redMaterial.emissiveColor = glm::vec3(0.0f);
+            redMaterial.emissiveFactor = 0.0f;
+            redMaterial.albedoTexture = -1;
+            redMaterial.flags = 0;
+            uint32_t redMatID = m_clusteredRenderer->createMaterial(redMaterial);
+
+            tremor::gfx::PBRMaterial metalMaterial{};
+            metalMaterial.baseColor = glm::vec4(0.7f, 0.7f, 0.8f, 1.0f);
+            metalMaterial.metallic = 1.0f;
+            metalMaterial.roughness = 0.1f;
+            metalMaterial.normalScale = 1.0f;
+            metalMaterial.occlusionStrength = 1.0f;
+            metalMaterial.emissiveColor = glm::vec3(0.0f);
+            metalMaterial.emissiveFactor = 0.0f;
+            metalMaterial.albedoTexture = -1;
+            metalMaterial.flags = 0;
+            uint32_t metalMatID = m_clusteredRenderer->createMaterial(metalMaterial);
+
+            tremor::gfx::PBRMaterial roughMaterial{};
+            roughMaterial.baseColor = glm::vec4(0.6f, 0.4f, 0.2f, 1.0f);
+            roughMaterial.metallic = 0.0f;
+            roughMaterial.roughness = 0.9f;
+            roughMaterial.normalScale = 1.0f;
+            roughMaterial.occlusionStrength = 1.0f;
+            roughMaterial.emissiveColor = glm::vec3(0.0f);
+            roughMaterial.emissiveFactor = 0.0f;
+            roughMaterial.albedoTexture = -1;
+            roughMaterial.flags = 0;
+            uint32_t roughMatID = m_clusteredRenderer->createMaterial(roughMaterial);
+
+            // Store material IDs for use in scene creation
+            m_materialIDs = { redMatID, metalMatID, roughMatID };
+            m_cubeMeshID = cubeMeshID;
+
+            Logger::get().info("Created enhanced sample meshes and materials");
+        }
+
         MeshRegistry m_meshRegistry;
 
         std::unique_ptr<tremor::gfx::ClusteredRenderer> m_clusteredRenderer;
@@ -6790,6 +6565,8 @@ namespace tremor::gfx {
             auto currentTime = std::chrono::high_resolution_clock::now();
             float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
+
+            cam.setFov(60.0f);
             cam.setPosition(glm::vec3(sin(time*1.5f)*4, 0.0f, cos(time)*4));
             cam.lookAt(glm::vec3(0.0f, 0.0f, 0.0f));
 
@@ -7434,6 +7211,9 @@ namespace tremor::gfx {
             updateUniformBuffer();
             updateLight();
 
+            m_clusteredRenderer->setCamera(&cam);
+            m_clusteredRenderer->buildClusters(&cam, m_sceneOctree);
+
             // Wait for previous frame to finish
             if (m_inFlightFences.size() > 0) {
                 vkWaitForFences(device, 1, &m_inFlightFences[currentFrame].handle(), VK_TRUE, UINT64_MAX);
@@ -7605,7 +7385,7 @@ namespace tremor::gfx {
             if (m_vertexBuffer) {
                 try {
                     // Bind the vertex buffer
-                    Logger::get().info("Binding vertex buffer with {} vertices", m_vertexBuffer->getVertexCount());
+                    //Logger::get().info("Binding vertex buffer with {} vertices", m_vertexBuffer->getVertexCount());
                     m_vertexBuffer->bind(m_commandBuffers[currentFrame]);
 
                     // Draw without indices
@@ -7621,8 +7401,6 @@ namespace tremor::gfx {
             }
 
 
-            m_clusteredRenderer->setCamera(&cam);
-            m_clusteredRenderer->buildClusters(&cam, m_sceneOctree);
 
             // Render using clustered renderer
             m_clusteredRenderer->render(m_commandBuffers[currentFrame], &cam);
@@ -7785,94 +7563,32 @@ private:
 
             createCubeRenderableObject();
 
-            // Initialize clustered renderer
+            // Replace clustered renderer initialization:
             tremor::gfx::ClusterConfig clusterConfig{};
-            clusterConfig.xSlices = 8;
-            clusterConfig.ySlices = 4;
-            clusterConfig.zSlices = 8;
+            clusterConfig.xSlices = 16;
+            clusterConfig.ySlices = 9;
+            clusterConfig.zSlices = 24;
             clusterConfig.nearPlane = 0.1f;
-            clusterConfig.farPlane = 10000000.0f;
+            clusterConfig.farPlane = 1000.0f;
             clusterConfig.logarithmicZ = true;
 
             m_clusteredRenderer = std::make_unique<tremor::gfx::ClusteredRenderer>(
                 device,
                 physicalDevice,
+                graphicsQueue,        // Add this
+                vkDevice->graphicsQueueFamily(),  // Add this
+                *m_commandPool,       // Add this - pass the command pool
                 clusterConfig
             );
-            /*
-            for (int i = 0; i < 5; i++) {
-                RenderableObject obj;
-                obj.meshID = m_meshRegistry.getMeshID("cube");
-                obj.materialID = 0;
 
-                // Position in front of the camera in a grid
-                float x = (i % 3 - 1) * 2.0f;  // -2, 0, or 2
-                float z = (i / 3 - 1) * 2.0f - 5.0f;  // -6 or -4
-
-                obj.transform = glm::translate(
-                    glm::mat4(1.0f),
-                    glm::vec3(x, 0.0f, z)
-                );
-
-                // Use bigger cubes for testing
-                AABBF localBounds = { glm::vec3(-1.0f), glm::vec3(1.0f) };  // 2x2x2 cube
-                AABBF worldBounds = transformAABB(obj.transform, localBounds);
-                obj.bounds = AABBQ::fromFloat(worldBounds);
-
-                m_sceneOctree.insert(obj, obj.bounds);
-
-                // Log the object position and bounds
-                Logger::get().info("Added test object at ({},{},{}), bounds: min=({},{},{}), max=({},{},{})",
-                    x, 0.0f, z,
-                    worldBounds.min.x, worldBounds.min.y, worldBounds.min.z,
-                    worldBounds.max.x, worldBounds.max.y, worldBounds.max.z);
-            }
-            */
-
-            // In your render function, before calling buildClusters
-            // Add a guaranteed visible object
-            RenderableObject debugObject;
-            debugObject.meshID = 0; // Or whatever mesh ID you're using
-            debugObject.materialID = 0;
-            debugObject.transform = glm::mat4(1.0f); // Identity - at origin
-            debugObject.prevTransform = glm::mat4(1.0f);
-            debugObject.bounds = AABBQ::fromFloat(
-                glm::vec3(-1.0f, -1.0f, -1.0f),
-                glm::vec3(1.0f, 1.0f, 1.0f)
-            );
-
-            // Add to visible objects directly
-            m_clusteredRenderer->m_visibleObjects.push_back(debugObject);
-
-            // Ensure cluster 0 has this object
-            if (m_clusteredRenderer->m_clusters.size() > 0) {
-                m_clusteredRenderer->m_clusters[0].objectCount = 1;
-                m_clusteredRenderer->m_clusters[0].objectOffset = 0;
-
-                // Add the object index 0 to the indices buffer
-                m_clusteredRenderer->m_clusterObjectIndices.clear();
-                m_clusteredRenderer->m_clusterObjectIndices.push_back(0);
-
-                // Update the buffers directly
-                m_clusteredRenderer->m_clusterBuffer->update(m_clusteredRenderer->m_clusters.data(), sizeof(Cluster));
-                m_clusteredRenderer->m_objectBuffer->update(&debugObject, sizeof(RenderableObject));
-                m_clusteredRenderer->m_indexBuffer->update(m_clusteredRenderer->m_clusterObjectIndices.data(), sizeof(uint32_t));
-
+            if (!m_clusteredRenderer->initialize(vkDevice.get()->colorFormat(), vkDevice.get()->depthFormat())) {
+                Logger::get().error("Failed to initialize enhanced clustered renderer");
+                return false;
             }
 
-            m_clusteredRenderer->initialize(vkDevice.get()->colorFormat(), vkDevice.get()->depthFormat());
-
-            // Add point light
-            ClusterLight light;
-            light.position = glm::vec3(0.0f, 5.0f, 0.0f);
-            light.color = glm::vec3(1.0f, 1.0f, 1.0f);
-            light.intensity = 10.0f;
-            light.radius = 20.0f;
-            light.type = 0; // Point light
-
-            std::vector<ClusterLight> lights = { light };
-            m_clusteredRenderer->updateLights(lights);
-            Logger::get().info("Added test light");
+            // Create enhanced content
+            createSampleMeshes();
+            createEnhancedScene();
 
             return true;
         };
@@ -9022,49 +8738,999 @@ private:
 
     };
 
-
-    bool ClusteredRenderer::initialize(VkFormat color, VkFormat depth) {
-        
-        colorFormat = color;
-        depthFormat = depth;
-
-
-        m_clusterBuffer = std::make_unique<Buffer>(
-            m_device, m_physicalDevice,
-			sizeof(Cluster) * 65536, // Pre-allocate for 2048 clusters
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        );
-
-        m_objectBuffer = std::make_unique<Buffer>(
-            m_device, m_physicalDevice,
-            sizeof(RenderableObject) * 65536, // Pre-allocate for 65536 renderables
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        );
-
-        m_indexBuffer = std::make_unique<Buffer>(
-            m_device, m_physicalDevice,
-            sizeof(uint32_t) * 65536, // Pre-allocate for 65536 renderables
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        );
-
-        m_lightBuffer = std::make_unique<Buffer>(
-            m_device, m_physicalDevice,
-            sizeof(ClusterLight) * 65536, // Pre-allocate for 65536 renderables
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        );
-
-
-        // Create cluster grid
-        createClusterGrid();
-
-        // Create shader resources
-        return createShaderResources();
+    uint32_t VulkanBackend::loadMeshFromFile(const std::string& filename) {
+        // This would integrate with your asset loading system
+        // For now, just return the cube mesh
+        return m_cubeMeshID;
     }
 
+    // Function to create materials from descriptions
+    uint32_t VulkanBackend::createMaterialFromDesc(const MaterialDesc& desc) {
+        tremor::gfx::PBRMaterial material{};
+        material.baseColor = desc.baseColor;
+        material.metallic = desc.metallic;
+        material.roughness = desc.roughness;
+        // ... set other properties
 
+        return m_clusteredRenderer->createMaterial(material);
+    }
+
+    // Function to add objects to the scene
+    void VulkanBackend::addObjectToScene(uint32_t meshID, uint32_t materialID, const glm::mat4& transform) {
+        tremor::gfx::RenderableObject obj;
+        obj.meshID = meshID;
+        obj.materialID = materialID;
+        obj.instanceID = 0; // You could track this
+        obj.flags = 1; // Visible
+        obj.transform = transform;
+        obj.prevTransform = transform;
+
+        // Calculate bounds based on mesh
+        AABBF localBounds{ glm::vec3(-0.5f), glm::vec3(0.5f) }; // This should come from mesh data
+        AABBF worldBounds = transformAABB(transform, localBounds);
+        obj.bounds = AABBQ::fromFloat(worldBounds);
+
+        m_sceneOctree.insert(obj, obj.bounds);
+    }
 }
 
+// Complete implementations for the missing ClusteredRenderer methods
+// Add these to your ClusteredRenderer class implementation
+
+namespace tremor::gfx {
+
+    void ClusteredRenderer::updateMeshBuffers() {
+        if (!m_vertexBuffer || !m_meshIndexBuffer || !m_meshInfoBuffer) {
+            Logger::get().error("Mesh buffers not initialized");
+            return;
+        }
+
+        try {
+            // Update vertex buffer
+            if (!m_allVertices.empty()) {
+                VkDeviceSize vertexSize = m_allVertices.size() * sizeof(MeshVertex);
+                if (vertexSize <= m_vertexBuffer->getSize()) {
+                    m_vertexBuffer->update(m_allVertices.data(), vertexSize);
+                }
+                else {
+                    Logger::get().warning("Vertex buffer too small: need {}, have {}",
+                        vertexSize, m_vertexBuffer->getSize());
+                }
+            }
+
+            // Update mesh index buffer
+            if (!m_allIndices.empty()) {
+                VkDeviceSize indexSize = m_allIndices.size() * sizeof(uint32_t);
+                if (indexSize <= m_meshIndexBuffer->getSize()) {
+                    m_meshIndexBuffer->update(m_allIndices.data(), indexSize);
+                }
+                else {
+                    Logger::get().warning("Mesh index buffer too small: need {}, have {}",
+                        indexSize, m_meshIndexBuffer->getSize());
+                }
+            }
+
+            // Update mesh info buffer
+            if (!m_meshInfos.empty()) {
+                VkDeviceSize meshInfoSize = m_meshInfos.size() * sizeof(MeshInfo);
+                if (meshInfoSize <= m_meshInfoBuffer->getSize()) {
+                    m_meshInfoBuffer->update(m_meshInfos.data(), meshInfoSize);
+                }
+                else {
+                    Logger::get().warning("Mesh info buffer too small: need {}, have {}",
+                        meshInfoSize, m_meshInfoBuffer->getSize());
+                }
+            }
+
+            Logger::get().info("Updated mesh buffers: {} vertices, {} indices, {} meshes",
+                m_allVertices.size(), m_allIndices.size(), m_meshInfos.size());
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in updateMeshBuffers: {}", e.what());
+        }
+    }
+
+    void ClusteredRenderer::updateMaterialBuffer() {
+        if (!m_materialBuffer) {
+            Logger::get().error("Material buffer not initialized");
+            return;
+        }
+
+        try {
+            if (!m_materials.empty()) {
+                VkDeviceSize materialSize = m_materials.size() * sizeof(PBRMaterial);
+                if (materialSize <= m_materialBuffer->getSize()) {
+                    m_materialBuffer->update(m_materials.data(), materialSize);
+                    Logger::get().info("Updated material buffer with {} materials", m_materials.size());
+                }
+                else {
+                    Logger::get().warning("Material buffer too small: need {}, have {}",
+                        materialSize, m_materialBuffer->getSize());
+                }
+            }
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in updateMaterialBuffer: {}", e.what());
+        }
+    }
+
+    void ClusteredRenderer::updateGPUBuffers() {
+        try {
+            // Update cluster buffer - FIX: Update ALL clusters, not just one
+            if (!m_clusters.empty() && m_clusterBuffer) {
+                VkDeviceSize clusterSize = m_clusters.size() * sizeof(Cluster);
+                if (clusterSize <= m_clusterBuffer->getSize()) {
+                    m_clusterBuffer->update(m_clusters.data(), clusterSize);
+                    Logger::get().info("Updated cluster buffer: {} clusters", m_clusters.size());
+                }
+                else {
+                    Logger::get().error("Cluster buffer too small: need {}, have {}",
+                        clusterSize, m_clusterBuffer->getSize());
+                }
+            }
+
+            // Update object buffer
+            if (!m_visibleObjects.empty() && m_objectBuffer) {
+                VkDeviceSize objectSize = m_visibleObjects.size() * sizeof(RenderableObject);
+                if (objectSize <= m_objectBuffer->getSize()) {
+                    m_objectBuffer->update(m_visibleObjects.data(), objectSize);
+                    Logger::get().info("Updated object buffer: {} objects", m_visibleObjects.size());
+                }
+                else {
+                    Logger::get().error("Object buffer too small: need {}, have {}",
+                        objectSize, m_objectBuffer->getSize());
+                }
+            }
+
+            // Update lights buffer
+            if (!m_lights.empty() && m_lightBuffer) {
+                VkDeviceSize lightSize = m_lights.size() * sizeof(ClusterLight);
+                if (lightSize <= m_lightBuffer->getSize()) {
+                    m_lightBuffer->update(m_lights.data(), lightSize);
+                    Logger::get().info("Updated light buffer: {} lights", m_lights.size());
+                }
+            }
+
+            // Update index buffer with both object and light indices
+            if (m_indexBuffer) {
+                size_t objectIndicesSize = m_clusterObjectIndices.size() * sizeof(uint32_t);
+                size_t lightIndicesSize = m_clusterLightIndices.size() * sizeof(uint32_t);
+                size_t totalSize = objectIndicesSize + lightIndicesSize;
+
+                if (totalSize <= m_indexBuffer->getSize()) {
+                    // Copy object indices first
+                    if (objectIndicesSize > 0) {
+                        m_indexBuffer->update(m_clusterObjectIndices.data(), objectIndicesSize, 0);
+                    }
+                    // Copy light indices after object indices
+                    if (lightIndicesSize > 0) {
+                        m_indexBuffer->update(m_clusterLightIndices.data(), lightIndicesSize, objectIndicesSize);
+                    }
+                    Logger::get().info("Updated index buffer: {} object indices, {} light indices",
+                        m_clusterObjectIndices.size(), m_clusterLightIndices.size());
+                }
+                else {
+                    Logger::get().error("Index buffer too small: need {}, have {}",
+                        totalSize, m_indexBuffer->getSize());
+                }
+            }
+
+            // Ensure mesh data is updated
+            if (!m_allVertices.empty() && m_vertexBuffer) {
+                VkDeviceSize vertexSize = m_allVertices.size() * sizeof(MeshVertex);
+                if (vertexSize <= m_vertexBuffer->getSize()) {
+                    m_vertexBuffer->update(m_allVertices.data(), vertexSize);
+                    Logger::get().info("Updated vertex buffer: {} vertices", m_allVertices.size());
+                }
+            }
+
+            if (!m_allIndices.empty() && m_meshIndexBuffer) {
+                VkDeviceSize indexSize = m_allIndices.size() * sizeof(uint32_t);
+                if (indexSize <= m_meshIndexBuffer->getSize()) {
+                    m_meshIndexBuffer->update(m_allIndices.data(), indexSize);
+                    Logger::get().info("Updated mesh index buffer: {} indices", m_allIndices.size());
+                }
+            }
+
+            if (!m_meshInfos.empty() && m_meshInfoBuffer) {
+                VkDeviceSize meshInfoSize = m_meshInfos.size() * sizeof(MeshInfo);
+                if (meshInfoSize <= m_meshInfoBuffer->getSize()) {
+                    m_meshInfoBuffer->update(m_meshInfos.data(), meshInfoSize);
+                    Logger::get().info("Updated mesh info buffer: {} meshes", m_meshInfos.size());
+                }
+            }
+
+            if (!m_materials.empty() && m_materialBuffer) {
+                VkDeviceSize materialSize = m_materials.size() * sizeof(PBRMaterial);
+                if (materialSize <= m_materialBuffer->getSize()) {
+                    m_materialBuffer->update(m_materials.data(), materialSize);
+                    Logger::get().info("Updated material buffer: {} materials", m_materials.size());
+                }
+            }
+
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in updateGPUBuffers: {}", e.what());
+        }
+    }
+
+    void ClusteredRenderer::assignLightsToClusters() {
+        // Clear previous assignments
+        for (auto& cluster : m_clusters) {
+            cluster.lightOffset = 0;
+            cluster.lightCount = 0;
+        }
+
+        // Clear and prepare light indices
+        m_clusterLightIndices.clear();
+
+        if (m_lights.empty()) {
+            Logger::get().info("No lights to assign to clusters");
+            return;
+        }
+
+        try {
+            // Temporary storage for lights per cluster
+            std::vector<std::vector<uint32_t>> clusterLights(m_totalClusters);
+
+            // Process each light
+            for (size_t lightIdx = 0; lightIdx < m_lights.size(); lightIdx++) {
+                const auto& light = m_lights[lightIdx];
+
+                if (light.type == 2) {
+                    // Directional light - affects all clusters
+                    for (uint32_t clusterIdx = 0; clusterIdx < m_totalClusters; clusterIdx++) {
+                        clusterLights[clusterIdx].push_back(static_cast<uint32_t>(lightIdx));
+                    }
+                }
+                else {
+                    // Point/spot light - calculate affected clusters based on radius
+                    AABBF lightBounds{
+                        light.position - glm::vec3(light.radius),
+                        light.position + glm::vec3(light.radius)
+                    };
+
+                    std::vector<uint32_t> affectedClusters = findClustersForBounds(lightBounds, m_camera);
+
+                    for (uint32_t clusterIdx : affectedClusters) {
+                        if (clusterIdx < m_totalClusters) {
+                            clusterLights[clusterIdx].push_back(static_cast<uint32_t>(lightIdx));
+                        }
+                    }
+                }
+            }
+
+            // Compact light indices and update cluster data
+            size_t currentOffset = m_clusterObjectIndices.size(); // Light indices start after object indices
+
+            for (uint32_t clusterIdx = 0; clusterIdx < m_totalClusters; clusterIdx++) {
+                m_clusters[clusterIdx].lightOffset = static_cast<uint32_t>(currentOffset);
+                m_clusters[clusterIdx].lightCount = static_cast<uint32_t>(clusterLights[clusterIdx].size());
+
+                // Add light indices to the global array
+                m_clusterLightIndices.insert(
+                    m_clusterLightIndices.end(),
+                    clusterLights[clusterIdx].begin(),
+                    clusterLights[clusterIdx].end()
+                );
+
+                currentOffset += clusterLights[clusterIdx].size();
+            }
+
+            Logger::get().info("Assigned {} lights to clusters, total light indices: {}",
+                m_lights.size(), m_clusterLightIndices.size());
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in assignLightsToClusters: {}", e.what());
+        }
+    }
+
+    std::vector<uint32_t> ClusteredRenderer::findClustersForBounds(const AABBF& bounds, const Camera& camera) {
+        std::vector<uint32_t> result;
+
+        try {
+            // Get the 8 corners of the AABB
+            std::array<glm::vec3, 8> corners = {
+                glm::vec3(bounds.min.x, bounds.min.y, bounds.min.z),
+                glm::vec3(bounds.max.x, bounds.min.y, bounds.min.z),
+                glm::vec3(bounds.min.x, bounds.max.y, bounds.min.z),
+                glm::vec3(bounds.max.x, bounds.max.y, bounds.min.z),
+                glm::vec3(bounds.min.x, bounds.min.y, bounds.max.z),
+                glm::vec3(bounds.max.x, bounds.min.y, bounds.max.z),
+                glm::vec3(bounds.min.x, bounds.max.y, bounds.max.z),
+                glm::vec3(bounds.max.x, bounds.max.y, bounds.max.z)
+            };
+
+            // Track cluster bounds
+            int minX = static_cast<int>(m_config.xSlices);
+            int minY = static_cast<int>(m_config.ySlices);
+            int minZ = static_cast<int>(m_config.zSlices);
+            int maxX = -1;
+            int maxY = -1;
+            int maxZ = -1;
+
+            // Convert each corner to cluster space
+            for (const auto& corner : corners) {
+                glm::vec3 clusterPos = worldToCluster(corner, camera);
+
+                int x = glm::clamp(static_cast<int>(clusterPos.x), 0, static_cast<int>(m_config.xSlices - 1));
+                int y = glm::clamp(static_cast<int>(clusterPos.y), 0, static_cast<int>(m_config.ySlices - 1));
+                int z = glm::clamp(static_cast<int>(clusterPos.z), 0, static_cast<int>(m_config.zSlices - 1));
+
+                minX = std::min(minX, x);
+                minY = std::min(minY, y);
+                minZ = std::min(minZ, z);
+                maxX = std::max(maxX, x);
+                maxY = std::max(maxY, y);
+                maxZ = std::max(maxZ, z);
+            }
+
+            // Ensure we found valid clusters
+            if (minX > maxX || minY > maxY || minZ > maxZ) {
+                return result;
+            }
+
+            // Limit the number of clusters to avoid excessive assignments
+            int clusterCount = (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+            const int MAX_CLUSTERS_PER_OBJECT = 64;
+
+            if (clusterCount > MAX_CLUSTERS_PER_OBJECT) {
+                // Sample clusters instead of taking all
+                for (int i = 0; i < MAX_CLUSTERS_PER_OBJECT; i++) {
+                    float t = i / static_cast<float>(MAX_CLUSTERS_PER_OBJECT - 1);
+                    int x = minX + static_cast<int>(t * (maxX - minX));
+                    int y = minY + static_cast<int>(t * (maxY - minY));
+                    int z = minZ + static_cast<int>(t * (maxZ - minZ));
+
+                    uint32_t clusterIdx = z * m_config.xSlices * m_config.ySlices +
+                        y * m_config.xSlices + x;
+
+                    if (clusterIdx < m_totalClusters) {
+                        result.push_back(clusterIdx);
+                    }
+                }
+            }
+            else {
+                // Add all clusters in range
+                for (int z = minZ; z <= maxZ; z++) {
+                    for (int y = minY; y <= maxY; y++) {
+                        for (int x = minX; x <= maxX; x++) {
+                            uint32_t clusterIdx = z * m_config.xSlices * m_config.ySlices +
+                                y * m_config.xSlices + x;
+
+                            if (clusterIdx < m_totalClusters) {
+                                result.push_back(clusterIdx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in findClustersForBounds: {}", e.what());
+        }
+
+        return result;
+    }
+
+    glm::vec3 ClusteredRenderer::worldToCluster(const glm::vec3& worldPos, const Camera& camera) {
+        try {
+            // Transform to view space
+            glm::vec4 viewPos = camera.getViewMatrix() * glm::vec4(worldPos, 1.0f);
+
+            // Get projection matrix values
+            const glm::mat4& proj = camera.getProjectionMatrix();
+            float projXX = proj[0][0];
+            float projYY = proj[1][1];
+
+            // Calculate NDC coordinates
+            float ndcX = viewPos.x * projXX / -viewPos.z;
+            float ndcY = viewPos.y * projYY / -viewPos.z;
+
+            // Map NDC [-1,1] to cluster coordinates [0,slices-1]
+            float clusterX = (ndcX + 1.0f) * 0.5f * static_cast<float>(m_config.xSlices);
+            float clusterY = (ndcY + 1.0f) * 0.5f * static_cast<float>(m_config.ySlices);
+
+            // Clamp to valid range
+            clusterX = glm::clamp(clusterX, 0.0f, static_cast<float>(m_config.xSlices - 1));
+            clusterY = glm::clamp(clusterY, 0.0f, static_cast<float>(m_config.ySlices - 1));
+
+            // Calculate Z cluster index
+            float zViewSpace = -viewPos.z;
+            zViewSpace = glm::clamp(zViewSpace, camera.getNearClip(), camera.getFarClip());
+
+            float clusterZ;
+            if (m_config.logarithmicZ) {
+                float near = camera.getNearClip();
+                float far = camera.getFarClip();
+                float logRatio = logf(far / near);
+                logRatio = std::max(logRatio, 0.0001f); // Avoid division by zero
+
+                clusterZ = static_cast<float>(m_config.zSlices - 1) * (logf(zViewSpace / near) / logRatio);
+            }
+            else {
+                // Linear mapping
+                clusterZ = static_cast<float>(m_config.zSlices - 1) *
+                    ((zViewSpace - camera.getNearClip()) / (camera.getFarClip() - camera.getNearClip()));
+            }
+
+            clusterZ = glm::clamp(clusterZ, 0.0f, static_cast<float>(m_config.zSlices - 1));
+
+            return glm::vec3(clusterX, clusterY, clusterZ);
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in worldToCluster: {}", e.what());
+            return glm::vec3(0.0f);
+        }
+    }
+
+    void ClusteredRenderer::assignObjectsToClusters() {
+        // Clear previous assignments
+        for (auto& cluster : m_clusters) {
+            cluster.objectOffset = 0;
+            cluster.objectCount = 0;
+        }
+
+        m_clusterObjectIndices.clear();
+
+        if (m_visibleObjects.empty()) {
+            Logger::get().info("No visible objects to assign to clusters");
+            return;
+        }
+
+        try {
+            // Temporary storage for objects per cluster
+            std::vector<std::vector<uint32_t>> clusterObjects(m_totalClusters);
+
+            // Assign each visible object to clusters
+            for (size_t objIdx = 0; objIdx < m_visibleObjects.size(); objIdx++) {
+                const auto& obj = m_visibleObjects[objIdx];
+
+                // Calculate object bounds in world space
+                AABBF worldBounds = obj.bounds.toFloat();
+
+                // Transform bounds through view matrix for cluster space calculation
+                glm::mat4 viewMatrix = m_camera.getViewMatrix();
+                AABBF viewBounds = transformAABB(viewMatrix, worldBounds);
+
+                // Find clusters that contain this object
+                std::vector<uint32_t> clusters = findClustersForBounds(viewBounds, m_camera);
+
+                // Add object index to each cluster
+                for (uint32_t clusterIdx : clusters) {
+                    if (clusterIdx < m_totalClusters) {
+                        clusterObjects[clusterIdx].push_back(static_cast<uint32_t>(objIdx));
+                    }
+                }
+            }
+
+            // Compact object indices and update cluster data
+            for (uint32_t clusterIdx = 0; clusterIdx < m_totalClusters; clusterIdx++) {
+                m_clusters[clusterIdx].objectOffset = static_cast<uint32_t>(m_clusterObjectIndices.size());
+                m_clusters[clusterIdx].objectCount = static_cast<uint32_t>(clusterObjects[clusterIdx].size());
+
+                // Add object indices to the global array
+                m_clusterObjectIndices.insert(
+                    m_clusterObjectIndices.end(),
+                    clusterObjects[clusterIdx].begin(),
+                    clusterObjects[clusterIdx].end()
+                );
+            }
+
+            Logger::get().info("Assigned {} objects to clusters, total object indices: {}",
+                m_visibleObjects.size(), m_clusterObjectIndices.size());
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in assignObjectsToClusters: {}", e.what());
+        }
+    }
+
+    void ClusteredRenderer::cullOctree(const Octree<RenderableObject>& octree, const Frustum& frustum) {
+        const OctreeNode<RenderableObject>* root = octree.getRoot();
+        if (!root) {
+            Logger::get().warning("Octree root is null");
+            return;
+        }
+
+        try {
+            processOctreeNode(root, frustum);
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in cullOctree: {}", e.what());
+        }
+    }
+
+    void ClusteredRenderer::processOctreeNode(const OctreeNode<RenderableObject>* node, const Frustum& frustum) {
+        if (!node) return;
+
+        try {
+            // Get node bounds and test against frustum
+            AABBF nodeBoundsF = node->getBounds().toFloat();
+
+            // Simple frustum test - in a full implementation you'd want a more robust test
+            bool intersects = frustum.containsAABB(nodeBoundsF.min, nodeBoundsF.max);
+
+            if (!intersects) {
+                return; // Skip this node and all children
+            }
+
+            // If this is a leaf node, process objects
+            if (node->isLeaf()) {
+                const auto& objects = node->getObjects();
+
+                for (const auto& obj : objects) {
+                    // Additional per-object tests
+                    if ((obj.flags & 1) == 0) continue; // Check visibility flag
+
+                    // Convert bounds to world space and test again
+                    AABBF objBounds = obj.bounds.toFloat();
+                    bool visible = frustum.containsAABB(objBounds.min, objBounds.max);
+
+                    if (visible) {
+                        m_visibleObjects.push_back(obj);
+                    }
+                }
+            }
+            else {
+                // Recursively process child nodes
+                for (int i = 0; i < 8; i++) {
+                    processOctreeNode(node->getChild(i), frustum);
+                }
+            }
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in processOctreeNode: {}", e.what());
+        }
+    }
+
+    void ClusteredRenderer::updateUniformBuffers(Camera* camera) {
+        if (!camera || !m_uniformBuffer) {
+            Logger::get().error("Camera or uniform buffer is null");
+            return;
+        }
+
+        try {
+            EnhancedClusterUBO ubo{};
+
+            ubo.viewMatrix = camera->getViewMatrix();
+            ubo.projMatrix = camera->getProjectionMatrix();
+            ubo.invViewMatrix = glm::inverse(ubo.viewMatrix);
+            ubo.invProjMatrix = glm::inverse(ubo.projMatrix);
+            ubo.cameraPos = glm::vec4(camera->getLocalPosition(), 1.0f);
+            ubo.clusterDimensions = glm::uvec4(m_config.xSlices, m_config.ySlices, m_config.zSlices, 0);
+            ubo.zPlanes = glm::vec4(m_config.nearPlane, m_config.farPlane, static_cast<float>(m_config.zSlices), 0.0f);
+
+            // Screen size
+            VkExtent2D extent = camera->extent;
+            ubo.screenSize = glm::vec4(
+                static_cast<float>(extent.width),
+                static_cast<float>(extent.height),
+                1.0f / static_cast<float>(extent.width),
+                1.0f / static_cast<float>(extent.height)
+            );
+
+            ubo.numLights = static_cast<uint32_t>(m_lights.size());
+            ubo.numObjects = static_cast<uint32_t>(m_visibleObjects.size());
+            ubo.numClusters = m_totalClusters;
+
+            // Frame data
+            static uint32_t frameCounter = 0;
+            static auto startTime = std::chrono::high_resolution_clock::now();
+            auto currentTime = std::chrono::high_resolution_clock::now();
+
+            ubo.frameNumber = frameCounter++;
+            ubo.time = std::chrono::duration<float>(currentTime - startTime).count();
+            ubo.deltaTime = 1.0f / 60.0f; // You should track real delta time
+            ubo.flags = 0; // Debug flags, etc.
+
+            m_uniformBuffer->update(&ubo, sizeof(ubo));
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in updateUniformBuffers: {}", e.what());
+        }
+    }
+
+    bool ClusteredRenderer::createShaderResources() {
+        try {
+            // Load enhanced shaders
+            m_taskShader = ShaderModule::compileFromFile(m_device, "shaders/diag.task");
+            m_meshShader = ShaderModule::compileFromFile(m_device, "shaders/diag.mesh");
+            m_fragmentShader = ShaderModule::compileFromFile(m_device, "shaders/diag.frag");
+
+            if (!m_taskShader || !m_meshShader || !m_fragmentShader) {
+                Logger::get().error("Failed to compile enhanced cluster shaders");
+                return false;
+            }
+            else {
+                Logger::get().info("ALL CLUSTER SHADERS COMPILED SUCCESSFULLY YOU FUCK");
+            }
+
+            // Extract and combine reflection data
+            ShaderReflection combinedReflection;
+            combinedReflection.merge(*m_taskShader->getReflection());
+            combinedReflection.merge(*m_meshShader->getReflection());
+            combinedReflection.merge(*m_fragmentShader->getReflection());
+
+            // Create descriptor set layout
+            m_descriptorSetLayout = combinedReflection.createDescriptorSetLayout(m_device, 0);
+            if (!m_descriptorSetLayout) {
+                Logger::get().error("Failed to create descriptor set layout");
+                return false;
+            }
+
+            // Create pipeline layout
+            m_pipelineLayout = combinedReflection.createPipelineLayout(m_device);
+            if (!m_pipelineLayout) {
+                Logger::get().error("Failed to create pipeline layout");
+                return false;
+            }
+
+            // Create descriptor pool and allocate sets
+            m_descriptorPool = combinedReflection.createDescriptorPool(m_device);
+            if (!m_descriptorPool) {
+                Logger::get().error("Failed to create descriptor pool");
+                return false;
+            }
+
+            // Allocate descriptor set
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = m_descriptorPool->handle();
+            allocInfo.descriptorSetCount = 1;
+            allocInfo.pSetLayouts = &m_descriptorSetLayout->handle();
+
+            VkDescriptorSet descriptorSet;
+            if (vkAllocateDescriptorSets(m_device, &allocInfo, &descriptorSet) != VK_SUCCESS) {
+                Logger::get().error("Failed to allocate descriptor set");
+                return false;
+            }
+
+            m_descriptorSet = std::make_unique<DescriptorSetResource>(m_device, descriptorSet);
+
+            // Update descriptor set with buffer bindings
+            updateDescriptorSet();
+
+            // Create graphics pipeline
+            if (!createGraphicsPipeline()) {
+                Logger::get().error("Failed to create graphics pipeline");
+                return false;
+            }
+
+            Logger::get().info("Enhanced shader resources created successfully");
+            return true;
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in createShaderResources: {}", e.what());
+            return false;
+        }
+    }
+
+    bool ClusteredRenderer::createGraphicsPipeline() {
+        try {
+            // Create shader stages
+            std::vector<VkPipelineShaderStageCreateInfo> shaderStages = {
+                m_taskShader->createShaderStageInfo(),
+                m_meshShader->createShaderStageInfo(),
+                m_fragmentShader->createShaderStageInfo()
+            };
+
+            // Pipeline state setup
+            VkPipelineViewportStateCreateInfo viewportState{};
+            viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            viewportState.viewportCount = 1;
+            viewportState.scissorCount = 1;
+
+            VkPipelineRasterizationStateCreateInfo rasterizer{};
+            rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            rasterizer.depthClampEnable = VK_FALSE;
+            rasterizer.rasterizerDiscardEnable = VK_FALSE;
+            rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+            rasterizer.lineWidth = 1.0f;
+            rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+            rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+            rasterizer.depthBiasEnable = VK_FALSE;
+
+            VkPipelineMultisampleStateCreateInfo multisampling{};
+            multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            multisampling.sampleShadingEnable = VK_FALSE;
+            multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+            VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+            colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            colorBlendAttachment.blendEnable = VK_FALSE;
+
+            VkPipelineColorBlendStateCreateInfo colorBlending{};
+            colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            colorBlending.logicOpEnable = VK_FALSE;
+            colorBlending.attachmentCount = 1;
+            colorBlending.pAttachments = &colorBlendAttachment;
+
+            VkPipelineDepthStencilStateCreateInfo depthStencil{};
+            depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            depthStencil.depthTestEnable = VK_TRUE;
+            depthStencil.depthWriteEnable = VK_TRUE;
+            depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER; // Reverse depth
+            depthStencil.depthBoundsTestEnable = VK_FALSE;
+            depthStencil.stencilTestEnable = VK_FALSE;
+
+            VkDynamicState dynamicStates[] = {
+                VK_DYNAMIC_STATE_VIEWPORT,
+                VK_DYNAMIC_STATE_SCISSOR
+            };
+
+            VkPipelineDynamicStateCreateInfo dynamicState{};
+            dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            dynamicState.dynamicStateCount = 2;
+            dynamicState.pDynamicStates = dynamicStates;
+
+            // Setup for dynamic rendering
+            VkPipelineRenderingCreateInfoKHR renderingInfo{};
+            renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+            renderingInfo.colorAttachmentCount = 1;
+            renderingInfo.pColorAttachmentFormats = &m_colorFormat;
+            renderingInfo.depthAttachmentFormat = m_depthFormat;
+
+            VkGraphicsPipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            pipelineInfo.pNext = &renderingInfo;
+            pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+            pipelineInfo.pStages = shaderStages.data();
+            pipelineInfo.pViewportState = &viewportState;
+            pipelineInfo.pRasterizationState = &rasterizer;
+            pipelineInfo.pMultisampleState = &multisampling;
+            pipelineInfo.pDepthStencilState = &depthStencil;
+            pipelineInfo.pColorBlendState = &colorBlending;
+            pipelineInfo.pDynamicState = &dynamicState;
+            pipelineInfo.layout = m_pipelineLayout->handle();
+
+            VkPipeline pipeline;
+            VkResult result = vkCreateGraphicsPipelines(
+                m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
+
+            if (result != VK_SUCCESS) {
+                Logger::get().error("Failed to create graphics pipeline: {}", static_cast<int>(result));
+                return false;
+            }
+
+            m_pipeline = std::make_unique<PipelineResource>(m_device, pipeline);
+            Logger::get().info("Created enhanced graphics pipeline successfully");
+
+            return true;
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in createGraphicsPipeline: {}", e.what());
+            return false;
+        }
+    }
+
+    void ClusteredRenderer::updateDescriptorSet() {
+        if (!m_descriptorSet) return;
+
+        // Check all buffers before binding
+        if (!m_uniformBuffer) { Logger::get().error("UBO is null!"); return; }
+        if (!m_clusterBuffer) { Logger::get().error("Cluster buffer is null!"); return; }
+        if (!m_objectBuffer) { Logger::get().error("Object buffer is null!"); return; }
+        if (!m_lightBuffer) { Logger::get().error("Light buffer is null!"); return; }
+        if (!m_indexBuffer) { Logger::get().error("Index buffer is null!"); return; }
+
+        Logger::get().info("All buffers valid, proceeding with descriptor update...");
+
+        // Create descriptor writes with inline buffer/image info (no separate vectors!)
+        std::vector<VkWriteDescriptorSet> descriptorWrites;
+
+        // Binding 0: Enhanced UBO
+        VkDescriptorBufferInfo uboInfo{
+            m_uniformBuffer->getBuffer(),
+            0,
+            sizeof(EnhancedClusterUBO)
+        };
+
+        descriptorWrites.push_back({
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            m_descriptorSet->handle(),
+            0, 0, 1,
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            nullptr,
+            &uboInfo,
+            nullptr
+            });
+
+        // Binding 1: Cluster Buffer
+        VkDescriptorBufferInfo clusterInfo{
+            m_clusterBuffer->getBuffer(),
+            0,
+            VK_WHOLE_SIZE
+        };
+
+        descriptorWrites.push_back({
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            m_descriptorSet->handle(),
+            1, 0, 1,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            nullptr,
+            &clusterInfo,
+            nullptr
+            });
+
+        // Binding 2: Object Buffer
+        VkDescriptorBufferInfo objectInfo{
+            m_objectBuffer->getBuffer(),
+            0,
+            VK_WHOLE_SIZE
+        };
+
+        descriptorWrites.push_back({
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            m_descriptorSet->handle(),
+            2, 0, 1,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            nullptr,
+            &objectInfo,
+            nullptr
+            });
+
+        // Binding 3: Light Buffer
+        VkDescriptorBufferInfo lightInfo{
+            m_lightBuffer->getBuffer(),
+            0,
+            VK_WHOLE_SIZE
+        };
+
+        descriptorWrites.push_back({
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            m_descriptorSet->handle(),
+            3, 0, 1,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            nullptr,
+            &lightInfo,
+            nullptr
+            });
+
+        // Binding 4: Index Buffer
+        VkDescriptorBufferInfo indexInfo{
+            m_indexBuffer->getBuffer(),
+            0,
+            VK_WHOLE_SIZE
+        };
+
+        descriptorWrites.push_back({
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            m_descriptorSet->handle(),
+            4, 0, 1,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            nullptr,
+            &indexInfo,
+            nullptr
+            });
+
+        // Binding 5: Mesh Info Buffer
+        VkDescriptorBufferInfo meshInfoInfo{
+            m_meshInfoBuffer->getBuffer(),
+            0,
+            VK_WHOLE_SIZE
+        };
+
+        descriptorWrites.push_back({
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            m_descriptorSet->handle(),
+            5, 0, 1,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            nullptr,
+            &meshInfoInfo,
+            nullptr
+            });
+
+        // Binding 6: Vertex Buffer
+        VkDescriptorBufferInfo vertexInfo{
+            m_vertexBuffer->getBuffer(),
+            0,
+            VK_WHOLE_SIZE
+        };
+
+        descriptorWrites.push_back({
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            m_descriptorSet->handle(),
+            6, 0, 1,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            nullptr,
+            &vertexInfo,
+            nullptr
+            });
+
+        // Binding 7: Mesh Index Buffer
+        VkDescriptorBufferInfo meshIndexInfo{
+            m_meshIndexBuffer->getBuffer(),
+            0,
+            VK_WHOLE_SIZE
+        };
+
+        descriptorWrites.push_back({
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            m_descriptorSet->handle(),
+            7, 0, 1,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            nullptr,
+            &meshIndexInfo,
+            nullptr
+            });
+
+        // Binding 8: Material Buffer
+        VkDescriptorBufferInfo materialInfo{
+            m_materialBuffer->getBuffer(),
+            0,
+            VK_WHOLE_SIZE
+        };
+
+        descriptorWrites.push_back({
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            m_descriptorSet->handle(),
+            8, 0, 1,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            nullptr,
+            &materialInfo,
+            nullptr
+            });
+
+        // Only add texture bindings if textures exist
+        VkDescriptorImageInfo albedoImageInfo{};
+        VkDescriptorImageInfo normalImageInfo{};
+
+        // Binding 9: Default Albedo Texture
+        if (m_defaultAlbedoView && m_defaultSampler) {
+            albedoImageInfo = {
+                m_defaultSampler->handle(),
+                m_defaultAlbedoView->handle(),
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            };
+
+            descriptorWrites.push_back({
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                m_descriptorSet->handle(),
+                9, 0, 1,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                &albedoImageInfo,
+                nullptr,
+                nullptr
+                });
+        }
+
+        // Binding 10: Default Normal Texture
+        if (m_defaultNormalView && m_defaultSampler) {
+            normalImageInfo = {
+                m_defaultSampler->handle(),
+                m_defaultNormalView->handle(),
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            };
+
+            descriptorWrites.push_back({
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                m_descriptorSet->handle(),
+                10, 0, 1,
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                &normalImageInfo,
+                nullptr,
+                nullptr
+                });
+        }
+
+        Logger::get().info("About to update {} descriptor writes", descriptorWrites.size());
+
+        // Now all the buffer/image info structs are in scope when we call this!
+        vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(descriptorWrites.size()),
+            descriptorWrites.data(), 0, nullptr);
+
+        Logger::get().info("Descriptor set updated successfully!");
+    }
+} // namespace tremor::gfx

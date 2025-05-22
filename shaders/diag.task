@@ -1,0 +1,37 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+// Keep the same descriptor layout as your main shader
+layout(set = 0, binding = 0) uniform ClusterUBO {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    vec4 cameraPos;
+    uvec4 clusterDimensions;
+    vec4 zPlanes;
+    uint numLights;
+    uint numObjects;
+    uint numClusters;
+    uint padding;
+};
+
+layout(set = 0, binding = 1) readonly buffer ClusterBuffer {
+    uint clusterData[];  // Simplified for testing
+};
+
+layout(set = 0, binding = 2) readonly buffer ObjectBuffer {
+    uint objectData[];  // Simplified for testing  
+};
+
+layout(set = 0, binding = 3) readonly buffer LightBuffer {
+    uint lightData[];  // Simplified for testing
+};
+
+layout(set = 0, binding = 4) readonly buffer IndexBuffer {
+    uint indices[];
+};
+
+// Simple task shader that emits a single mesh workgroup
+void main() {
+    // Just emit a single mesh workgroup
+    EmitMeshTasksEXT(1, 1, 1);
+}

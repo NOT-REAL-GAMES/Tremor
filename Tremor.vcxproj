@@ -179,6 +179,9 @@
     <None Include="shaders\cluster_frag.frag" />
     <None Include="shaders\cluster_mesh.mesh" />
     <None Include="shaders\cluster_task.task" />
+    <None Include="shaders\diag.frag" />
+    <None Include="shaders\diag.mesh" />
+    <None Include="shaders\diag.task" />
     <None Include="shaders\minimal.frag" />
     <None Include="shaders\minimal.mesh" />
     <None Include="shaders\minimal.task" />
