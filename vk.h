@@ -301,19 +301,9 @@ namespace tremor::gfx {
             // Set proper SPIR-V version (1.6 is good for Vulkan 1.4)
             m_options->SetTargetSpirv(shaderc_spirv_version_1_6);
 
+            m_options->SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
+
             // Set target environment
-            m_options->SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_4);
-
-            m_options->SetVulkanRulesRelaxed(true);
-
-            // Enable optimization
-            m_options->SetOptimizationLevel(shaderc_optimization_level_performance);
-
-            // For your 64-bit coordinate system, enable double precision
-            m_options->AddMacroDefinition("ENABLE_DOUBLE_PRECISION", "1");
-
-            // For mesh shaders (when you get to Phase 6)
-            m_options->AddMacroDefinition("MESH_SHADER_SUPPORT", "1");
 
             // Suppress warnings that might clutter your output
             //m_options->SetSuppressWarnings(); // Set to true if too verbose
@@ -327,39 +317,28 @@ namespace tremor::gfx {
             const std::string& filename,
             int flags = 0) {
 
-            // Set up options
-            //m_options->SetOptimizationLevel(options.optimize ?
-            //    shaderc_optimization_level_performance :
-            //    shaderc_optimization_level_zero);
+            // Create completely fresh options for this compilation
+            shaderc::CompileOptions options;
+            options.SetTargetSpirv(shaderc_spirv_version_1_6);
+            options.SetTargetEnvironment(shaderc_target_env_vulkan, shaderc_env_version_vulkan_1_3);
 
-            //if (options.generateDebugInfo) {
-            //    m_options->SetGenerateDebugInfo();
-            //}
+            std::cout << "=== COMPILING: " << filename << " ===" << std::endl;
+            std::cout << "Source preview: " << source.substr(0, 100) << std::endl;
 
-            // Add macros
-            //for (const auto& [name, value] : options.macros) {
-            //    m_options->AddMacroDefinition(name, value);
-            //}
-
-            // Add include directories
-            // Requires implementing a custom include resolver if needed
-
-            // Determine shader stage
             shaderc_shader_kind kind = getShaderKind(type);
 
-            // Compile
+            // Use the fresh options, not m_options
             shaderc::SpvCompilationResult result = m_compiler->CompileGlslToSpv(
-                source, kind, filename.c_str(), *m_options);
+                source, kind, filename.c_str(), options);  // Use 'options', not '*m_options'
 
-            // Check for errors
             if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
-                Logger::get().error("Shader compilation failed: {}", result.GetErrorMessage());
-                return {}; // Return empty vector on error
+                std::cout << "FULL ERROR MESSAGE:" << std::endl;
+                std::cout << result.GetErrorMessage() << std::endl;
+                return {};
             }
 
-            // Return SPIR-V binary
-            std::vector<uint32_t> spirv(result.cbegin(), result.cend());
-            return spirv;
+            std::cout << "SUCCESS!" << std::endl;
+            return std::vector<uint32_t>(result.cbegin(), result.cend());
         }
 
         // Compile a shader file to SPIR-V
@@ -369,7 +348,7 @@ namespace tremor::gfx {
             const CompileOptions& options = {}) {
 
             // Read file content
-            std::ifstream file(filename, std::ios::ate | std::ios::binary);
+            std::ifstream file(filename);
             if (!file.is_open()) {
                 Logger::get().error("Failed to open shader file: {}", filename);
                 return {};
@@ -1123,7 +1102,7 @@ namespace tremor::gfx {
             ShaderType type = ShaderType::Vertex,
             const std::string& entryPoint = "main") {
             // Read file...
-            std::ifstream file(filename, std::ios::ate | std::ios::binary);
+            std::ifstream file(filename);
 
             if (!file.is_open()) {
                 Logger::get().error("Failed to open shader file: {}", filename);
@@ -7390,7 +7369,7 @@ namespace tremor::gfx {
 
                     // Draw without indices
                     //Logger::get().info("Drawing {} vertices", m_vertexBuffer->getVertexCount());
-                    //vkCmdDraw(m_commandBuffers[currentFrame], m_vertexBuffer->getVertexCount(), 1, 0, 0);
+                    vkCmdDraw(m_commandBuffers[currentFrame], m_vertexBuffer->getVertexCount(), 1, 0, 0);
                 }
                 catch (const std::exception& e) {
                     Logger::get().error("Exception during triangle drawing: {}", e.what());
@@ -8294,13 +8273,13 @@ private:
                 Logger::get().info("Loading and compiling shaders...");
                 m_pipelineShaders.clear();
 
-                auto vertShader = sm->loadShader("shaders/pbr.vert");
+                auto vertShader = sm->loadShader("shaders/basic.vert");
                 if (!vertShader) {
                     Logger::get().error("Failed to load vertex shader: shaders/pbr.vert");
                     return false;
                 }
 
-                auto fragShader = sm->loadShader("shaders/pbr.frag");
+                auto fragShader = sm->loadShader("shaders/basic.frag");
                 if (!fragShader) {
                     Logger::get().error("Failed to load fragment shader: shaders/pbr.frag");
                     return false;
@@ -8687,7 +8666,7 @@ private:
         // Helper method to load shader modules
         VkShaderModule loadShader(const std::string& filename) {
             // Read the file
-            std::ifstream file(filename, std::ios::ate | std::ios::binary);
+            std::ifstream file(filename);
 
             if (!file.is_open()) {
                 Logger::get().error("Failed to open shader file: {}", filename);

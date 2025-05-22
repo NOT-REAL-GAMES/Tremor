@@ -90,7 +90,7 @@ layout(location = 7) out flat uint outMaterialID[];
 layout(location = 8) out flat uint outClusterIndex[];
 layout(location = 9) out flat uint outInstanceID[];
 
-void main() {
+void schmain() {
     uint objectIndex = gl_WorkGroupID.x;
     
     // Debug fallback: render a simple triangle if no valid objects
@@ -209,5 +209,23 @@ void main() {
                 gl_PrimitiveTriangleIndicesEXT[triangleIndex] = uvec3(i0, i1, i2);
             }
         }
+    }
+}
+
+void main() {
+    if (gl_LocalInvocationIndex == 0) {
+        SetMeshOutputsEXT(3, 1); // 3 vertices, 1 triangle
+        
+        // Simple triangle in clip space
+        gl_MeshVerticesEXT[0].gl_Position = vec4(-0.5, -0.5, 0.0, 1.0);
+        gl_MeshVerticesEXT[1].gl_Position = vec4( 0.5, -0.5, 0.0, 1.0);
+        gl_MeshVerticesEXT[2].gl_Position = vec4( 0.0,  0.5, 0.0, 1.0);
+        
+        gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
+        
+        // Simple outputs
+        outWorldPos[0] = outWorldPos[1] = outWorldPos[2] = vec3(0);
+        outNormal[0] = outNormal[1] = outNormal[2] = vec3(0, 0, 1);
+        // ... set other outputs to reasonable defaults
     }
 }
