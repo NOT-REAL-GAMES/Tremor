@@ -818,7 +818,7 @@ namespace tremor::gfx {
 
             if (bindings.empty()) {
                 Logger::get().info("No bindings found for set {}", setNumber);
-                return nullptr;  // No bindings for this set
+                //return nullptr;  // No bindings for this set, continue anyway...
             }
 
             VkDescriptorSetLayoutCreateInfo layoutInfo{};
@@ -1094,8 +1094,8 @@ namespace tremor::gfx {
 
         std::unique_ptr<ShaderReflection> m_reflection;
 
-        const ShaderReflection* getReflection() const { return m_reflection.get(); }
-        ShaderReflection* getReflection() { return m_reflection.get(); }
+        const ShaderReflection* getReflection() const { if (!m_reflection) { Logger::get().error("NO REFLECTION FOUND"); } return m_reflection.get(); }
+        ShaderReflection* getReflection() { if (!m_reflection) { Logger::get().error("NO REFLECTION FOUND"); } return m_reflection.get(); }
 
         // Load from precompiled SPIR-V file
         static std::unique_ptr<ShaderModule> loadFromFile(VkDevice device, const std::string& filename,
@@ -1830,6 +1830,8 @@ namespace tremor::gfx {
 
         ~OctreeNode() = default;
 
+        void getAllObjects(std::vector<T>& results) const;
+
         // Check if this node is a leaf
         bool isLeaf() const { return m_isLeaf; }
 
@@ -1882,6 +1884,69 @@ namespace tremor::gfx {
         std::vector<AABBQ> m_objectBounds;               // Bounds of each object
         std::array<std::unique_ptr<OctreeNode>, 8> m_children; // Child nodes
     };
+
+    template<typename T>
+    void OctreeNode<T>::getAllObjects(std::vector<T>& results) const {
+        // Add objects from this node
+        results.insert(results.end(), m_objects.begin(), m_objects.end());
+
+        // Recursively get objects from children
+        if (!m_isLeaf) {
+            for (int i = 0; i < 8; i++) {
+                if (m_children[i]) {
+                    m_children[i]->getAllObjects(results);
+                }
+            }
+        }
+    }
+
+    template<typename T>
+    bool OctreeNode<T>::remove(const T& object, const AABBQ& objectBounds) {
+        // Check if the object could be in this node
+        if (!m_bounds.intersects(objectBounds)) {
+            return false;
+        }
+
+        // If this is a leaf node, try to remove from this node
+        if (m_isLeaf) {
+            for (size_t i = 0; i < m_objects.size(); i++) {
+                // Simple comparison - you might need to customize this
+                if (m_objects[i].instanceID == object.instanceID) { // Assuming instanceID is unique
+                    m_objects.erase(m_objects.begin() + i);
+                    m_objectBounds.erase(m_objectBounds.begin() + i);
+                    return true;
+                }
+            }
+            return false;
+        }
+        else {
+            // Try to remove from child nodes
+            for (int i = 0; i < 8; i++) {
+                if (m_children[i] && m_children[i]->remove(object, objectBounds)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+
+    template<typename T>
+    bool OctreeNode<T>::update(const T& object, const AABBQ& oldBounds, const AABBQ& newBounds) {
+        // Remove from old location
+        if (!remove(object, oldBounds)) {
+            return false; // Object not found
+        }
+
+        // Insert at new location (this might be in a different part of the tree)
+        // For now, just insert into this node if bounds fit
+        if (m_bounds.intersects(newBounds)) {
+            insert(object, newBounds);
+            return true;
+        }
+
+        return false; // New bounds don't fit in this subtree
+    }
 
     template<typename T>
     void OctreeNode<T>::insert(const T& object, const AABBQ& objectBounds) {
@@ -2004,14 +2069,74 @@ namespace tremor::gfx {
         }
     }
 
+    template<typename T>
+    void OctreeNode<T>::query(const AABBQ& queryBounds, std::vector<T>& results) const {
+        // Check if query bounds intersect with this node's bounds
+        if (!m_bounds.intersects(queryBounds)) {
+            return; // No intersection, skip this node
+        }
+
+        // If this is a leaf node, check objects
+        if (m_isLeaf) {
+            for (size_t i = 0; i < m_objects.size(); i++) {
+                // Check if object bounds intersect with query bounds
+                if (m_objectBounds[i].intersects(queryBounds)) {
+                    results.push_back(m_objects[i]);
+                }
+            }
+        }
+        else {
+            // Recursively query child nodes
+            for (int i = 0; i < 8; i++) {
+                if (m_children[i]) {
+                    m_children[i]->query(queryBounds, results);
+                }
+            }
+        }
+    }
+
+    template<typename T>
+    void OctreeNode<T>::query(const Frustum& frustum, std::vector<T>& results) const {
+        // Convert node bounds to float for frustum test
+        AABBF nodeBoundsF = m_bounds.toFloat();
+
+        // Test if frustum intersects with this node
+        if (!frustum.containsAABB(nodeBoundsF.min, nodeBoundsF.max)) {
+            return; // No intersection, skip this node
+        }
+
+        // If this is a leaf node, check objects
+        if (m_isLeaf) {
+            for (size_t i = 0; i < m_objects.size(); i++) {
+                // Convert object bounds to float for frustum test
+                AABBF objBoundsF = m_objectBounds[i].toFloat();
+
+                // Check if object is visible in frustum
+                if (frustum.containsAABB(objBoundsF.min, objBoundsF.max)) {
+                    results.push_back(m_objects[i]);
+                }
+            }
+        }
+        else {
+            // Recursively query child nodes
+            for (int i = 0; i < 8; i++) {
+                if (m_children[i]) {
+                    m_children[i]->query(frustum, results);
+                }
+            }
+        }
+    }
+
     // Helper method to estimate total objects in tree (call from root)
     template<typename T>
     size_t OctreeNode<T>::estimateTotalObjects() const {
         size_t count = m_objects.size();
 
-        for (int i = 0; i < 8; i++) {
-            if (m_children[i]) {
-                count += m_children[i]->estimateTotalObjects();
+        if (!m_isLeaf) {
+            for (int i = 0; i < 8; i++) {
+                if (m_children[i]) {
+                    count += m_children[i]->estimateTotalObjects();
+                }
             }
         }
 
@@ -2113,7 +2238,7 @@ namespace tremor::gfx {
         {
         }
 
-
+        std::vector<T> getAllObjects() const;
 
         // Add an object to the octree
         void insert(const T& object, const AABBQ& bounds) {
@@ -2143,13 +2268,7 @@ namespace tremor::gfx {
             m_root->query(frustum, results);
             return results;
         }
-
-        // Get all objects in the octree
-        std::vector<T> getAllObjects() const {
-            std::vector<T> results;
-            m_root->getAllObjects(results);
-            return results;
-        }
+        
 
         // Get the root node
         const OctreeNode<T>* getRoot() const {
@@ -2160,6 +2279,15 @@ namespace tremor::gfx {
         std::unique_ptr<OctreeNode<T>> m_root;
     };
 
+    template<typename T>
+    std::vector<T> Octree<T>::getAllObjects() const {
+        std::vector<T> results;
+        if (m_root) {
+            m_root->getAllObjects(results);
+        }
+        return results;
+    }
+    
     // ===============================
     // Clustered Renderer
     // ===============================
@@ -2232,6 +2360,71 @@ namespace tremor::gfx {
 
     class ClusteredRenderer {
     public:
+
+        void renderWorkingMeshTest(VkCommandBuffer cmdBuffer, Camera* camera);
+
+        void createWorkingMeshShaderPipeline();
+
+        void renderDebug(VkCommandBuffer cmdBuffer, Camera* camera);
+
+        bool createDebugPipeline();
+
+		std::unique_ptr<PipelineResource> m_workingMeshPipeline;
+		std::unique_ptr<PipelineLayoutResource> m_workingMeshPipelineLayout;
+        
+        void debugShaderReflection() {
+            Logger::get().info("=== SHADER REFLECTION DEBUG ===");
+
+            // Check what each shader reflection found
+            if (m_taskShader && m_taskShader->getReflection()) {
+                const auto& taskReflection = *m_taskShader->getReflection();
+                Logger::get().info("Task shader bindings: {}", taskReflection.getResourceBindings().size());
+                for (const auto& binding : taskReflection.getResourceBindings()) {
+                    Logger::get().info("  Task: set={}, binding={}, type={}",
+                        binding.set, binding.binding, static_cast<int>(binding.descriptorType));
+                }
+            }
+
+            if (m_meshShader && m_meshShader->getReflection()) {
+                const auto& meshReflection = *m_meshShader->getReflection();
+                Logger::get().info("Mesh shader bindings: {}", meshReflection.getResourceBindings().size());
+                for (const auto& binding : meshReflection.getResourceBindings()) {
+                    Logger::get().info("  Mesh: set={}, binding={}, type={}",
+                        binding.set, binding.binding, static_cast<int>(binding.descriptorType));
+                }
+            }
+
+            if (m_fragmentShader && m_fragmentShader->getReflection()) {
+                const auto& fragReflection = *m_fragmentShader->getReflection();
+                Logger::get().info("Fragment shader bindings: {}", fragReflection.getResourceBindings().size());
+                for (const auto& binding : fragReflection.getResourceBindings()) {
+                    Logger::get().info("  Frag: set={}, binding={}, type={}",
+                        binding.set, binding.binding, static_cast<int>(binding.descriptorType));
+                }
+            }
+        }
+
+        void logAllDescriptorInfo() {
+
+            // Log descriptor pool
+            if (m_descriptorPool) {
+                Logger::get().info("Descriptor Pool created: Yes");
+            }
+            else {
+                Logger::get().error("Descriptor Pool created: No");
+            }
+
+            // Log descriptor set layouts
+                Logger::get().info("Descriptor Set Layout: {}",
+                    m_descriptorSetLayout ? "Valid" : "NULL");
+
+            // Log descriptor sets
+                Logger::get().info("Descriptor Set: {}",
+                    m_descriptorSet ? "Valid" : "NULL");
+
+            Logger::get().info("===================================");
+        }
+
 
 
         ClusteredRenderer(VkDevice device, VkPhysicalDevice physicalDevice,
@@ -2593,10 +2786,26 @@ namespace tremor::gfx {
     }
 
     void ClusteredRenderer::render(VkCommandBuffer cmdBuffer, Camera* camera) {
+		//renderDebug(cmdBuffer, camera);
+        
+        Logger::get().info("=== CLUSTERED RENDERER START ===");
+
         if (!m_pipeline) {
-            Logger::get().error("Pipeline not created, cannot render");
+            Logger::get().error("Pipeline is NULL!");
             return;
         }
+
+        if (!m_pipelineLayout) {
+            Logger::get().error("Pipeline layout is NULL!");
+            return;
+        }
+
+        if (!m_descriptorSet) {
+            Logger::get().error("Descriptor set is NULL!");
+            return;
+        }
+
+        Logger::get().info("All pipeline resources valid");
 
         // Memory barriers for buffer updates
         std::vector<VkBufferMemoryBarrier> barriers;
@@ -2614,11 +2823,12 @@ namespace tremor::gfx {
             barriers.push_back(barrier);
             };
 
-        addBarrier(m_uniformBuffer->getBuffer(), sizeof(EnhancedClusterUBO));
-        addBarrier(m_clusterBuffer->getBuffer(), VK_WHOLE_SIZE);
-        addBarrier(m_objectBuffer->getBuffer(), VK_WHOLE_SIZE);
-        addBarrier(m_lightBuffer->getBuffer(), VK_WHOLE_SIZE);
-        addBarrier(m_indexBuffer->getBuffer(), VK_WHOLE_SIZE);
+        addBarrier(m_uniformBuffer->getBuffer(), m_uniformBuffer->getSize());
+        addBarrier(m_clusterBuffer->getBuffer(), m_clusterBuffer->getSize());
+        addBarrier(m_objectBuffer->getBuffer(), m_objectBuffer->getSize());
+        addBarrier(m_lightBuffer->getBuffer(), m_lightBuffer->getSize());
+        addBarrier(m_indexBuffer->getBuffer(), m_indexBuffer->getSize());
+
 
         vkCmdPipelineBarrier(
             cmdBuffer,
@@ -2635,10 +2845,23 @@ namespace tremor::gfx {
             (m_debugPipeline ? m_debugPipeline->handle() : m_pipeline->handle()) :
             (m_wireframeMode && m_wireframePipeline ? m_wireframePipeline->handle() : m_pipeline->handle());
 
-        // Bind pipeline
-        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
+		Logger::get().info("Using pipeline: {} | (bind {})",
+			m_wireframeMode ? "Wireframe" : (m_debugClusters ? "Debug" : "Normal"), (void*)currentPipeline);
 
-        // Bind descriptor sets
+        if (currentPipeline) {
+            vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
+            Logger::get().info("Pipeline bound successfully");
+        } else {
+			Logger::get().error("Failed to bind pipeline!");
+			return;
+		}
+
+        // Bind pipeline
+
+        updateDescriptorSet();
+
+		logAllDescriptorInfo();
+        
         if (m_descriptorSet) {
             vkCmdBindDescriptorSets(
                 cmdBuffer,
@@ -2648,10 +2871,18 @@ namespace tremor::gfx {
                 &m_descriptorSet->handle(),
                 0, nullptr
             );
+            Logger::get().info("Descriptor sets bound successfully");
+        }
+        else {
+            Logger::get().error("No descriptor set to bind!");
+            return;
         }
 
         // Set viewport and scissor
         VkExtent2D extent = camera->extent;
+
+        Logger::get().info("EXTENT: ({}, {})", extent.width, extent.height);
+
         VkViewport viewport{};
         viewport.x = 0.0f;
         viewport.y = 0.0f;
@@ -2670,11 +2901,11 @@ namespace tremor::gfx {
         uint32_t taskGroupX = (m_totalClusters + 31) / 32;
         taskGroupX = std::max(taskGroupX, 1u);
 
-        Logger::get().info("Rendering: {} clusters, {} visible objects, {} workgroups",
-            m_totalClusters, m_visibleObjects.size(), taskGroupX);
+        Logger::get().info("Dispatching {} task groups", taskGroupX);
 
         // Dispatch mesh shaders
         vkCmdDrawMeshTasksEXT(cmdBuffer, taskGroupX, 1, 1);
+        
     }
 
     // Private implementation methods...
@@ -2769,13 +3000,40 @@ namespace tremor::gfx {
         }
     }
 
+    // Fixed createDefaultTextures method for ClusteredRenderer
     bool ClusteredRenderer::createDefaultTextures() {
         try {
-            // Create a simple 4x4 white texture for albedo
-            const uint32_t size = 4;
-            std::vector<uint8_t> whitePixels(size * size * 4, 255); // RGBA white
+            Logger::get().info("Creating default textures for ClusteredRenderer...");
 
-            // Create albedo texture
+            // Create a simple 4x4 white texture for debugging
+            const uint32_t size = 4;
+            const uint32_t pixelCount = size * size;
+            std::vector<uint8_t> whitePixels(pixelCount * 4);
+
+            // Fill with pure white pixels
+            for (uint32_t i = 0; i < pixelCount; i++) {
+                whitePixels[i * 4 + 0] = 255; // R
+                whitePixels[i * 4 + 1] = 255; // G  
+                whitePixels[i * 4 + 2] = 255; // B
+                whitePixels[i * 4 + 3] = 255; // A
+            }
+
+            Logger::get().info("Creating staging buffer for texture data...");
+
+            // Create staging buffer
+            VkDeviceSize imageSize = whitePixels.size();
+
+            auto stagingBuffer = std::make_unique<Buffer>(
+                m_device, m_physicalDevice, imageSize,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            // Upload data to staging buffer
+            stagingBuffer->update(whitePixels.data(), imageSize);
+            Logger::get().info("Uploaded {} bytes to staging buffer", imageSize);
+
+            // Create albedo texture image
             VkImageCreateInfo imageInfo{};
             imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
             imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -2796,10 +3054,6 @@ namespace tremor::gfx {
                 return false;
             }
 
-            // Get memory properties once
-            VkPhysicalDeviceMemoryProperties memProperties;
-            vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProperties);
-
             // Allocate memory for albedo
             VkMemoryRequirements memRequirements;
             vkGetImageMemoryRequirements(m_device, m_defaultAlbedoTexture->handle(), &memRequirements);
@@ -2807,25 +3061,11 @@ namespace tremor::gfx {
             VkMemoryAllocateInfo allocInfo{};
             allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
             allocInfo.allocationSize = memRequirements.size;
+            allocInfo.memoryTypeIndex = findMemoryType(
+                memRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
 
-            // Find suitable memory type
-            uint32_t memoryTypeIndex = UINT32_MAX;
-            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-                if ((memRequirements.memoryTypeBits & (1 << i)) &&
-                    (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
-                    memoryTypeIndex = i;
-                    break;
-                }
-            }
-
-            if (memoryTypeIndex == UINT32_MAX) {
-                Logger::get().error("Failed to find suitable memory type for default textures");
-                return false;
-            }
-
-            allocInfo.memoryTypeIndex = memoryTypeIndex;
-
-            // Allocate albedo memory
             VkDeviceMemory albedoMemory;
             if (vkAllocateMemory(m_device, &allocInfo, nullptr, &albedoMemory) != VK_SUCCESS) {
                 Logger::get().error("Failed to allocate albedo memory");
@@ -2834,34 +3074,7 @@ namespace tremor::gfx {
 
             vkBindImageMemory(m_device, m_defaultAlbedoTexture->handle(), albedoMemory, 0);
 
-            // Create image view for albedo
-            VkImageViewCreateInfo viewInfo{};
-            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            viewInfo.image = m_defaultAlbedoTexture->handle();
-            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
-            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            viewInfo.subresourceRange.baseMipLevel = 0;
-            viewInfo.subresourceRange.levelCount = 1;
-            viewInfo.subresourceRange.baseArrayLayer = 0;
-            viewInfo.subresourceRange.layerCount = 1;
-
-            m_defaultAlbedoView = std::make_unique<ImageViewResource>(m_device);
-            if (vkCreateImageView(m_device, &viewInfo, nullptr, &m_defaultAlbedoView->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create albedo image view");
-                return false;
-            }
-
-            // Create normal texture (flat normal map - 128, 128, 255, 255)
-            std::vector<uint8_t> normalPixels(size * size * 4);
-            for (int i = 0; i < size * size; i++) {
-                normalPixels[i * 4 + 0] = 128; // R
-                normalPixels[i * 4 + 1] = 128; // G  
-                normalPixels[i * 4 + 2] = 255; // B
-                normalPixels[i * 4 + 3] = 255; // A
-            }
-
-            // Create normal image
+            // Create normal texture (same process)
             m_defaultNormalTexture = std::make_unique<ImageResource>(m_device);
             if (vkCreateImage(m_device, &imageInfo, nullptr, &m_defaultNormalTexture->handle()) != VK_SUCCESS) {
                 Logger::get().error("Failed to create default normal image");
@@ -2871,17 +3084,10 @@ namespace tremor::gfx {
             // Allocate memory for normal texture
             vkGetImageMemoryRequirements(m_device, m_defaultNormalTexture->handle(), &memRequirements);
             allocInfo.allocationSize = memRequirements.size;
-
-            // Find memory type for normal texture
-            memoryTypeIndex = UINT32_MAX;
-            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-                if ((memRequirements.memoryTypeBits & (1 << i)) &&
-                    (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
-                    memoryTypeIndex = i;
-                    break;
-                }
-            }
-            allocInfo.memoryTypeIndex = memoryTypeIndex;
+            allocInfo.memoryTypeIndex = findMemoryType(
+                memRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
 
             VkDeviceMemory normalMemory;
             if (vkAllocateMemory(m_device, &allocInfo, nullptr, &normalMemory) != VK_SUCCESS) {
@@ -2891,7 +3097,139 @@ namespace tremor::gfx {
 
             vkBindImageMemory(m_device, m_defaultNormalTexture->handle(), normalMemory, 0);
 
-            // Create normal image view
+            Logger::get().info("Transitioning image layouts and copying data...");
+
+            // Transition image layouts and copy data
+            VkCommandBufferAllocateInfo cmdAllocInfo{};
+            cmdAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cmdAllocInfo.commandPool = m_commandPool;
+            cmdAllocInfo.commandBufferCount = 1;
+
+            VkCommandBuffer commandBuffer;
+            vkAllocateCommandBuffers(m_device, &cmdAllocInfo, &commandBuffer);
+
+            VkCommandBufferBeginInfo beginInfo{};
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+            vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+            // Transition both images to transfer destination
+            VkImageMemoryBarrier barriers[2] = {};
+
+            // Albedo image barrier
+            barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barriers[0].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[0].image = m_defaultAlbedoTexture->handle();
+            barriers[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barriers[0].subresourceRange.baseMipLevel = 0;
+            barriers[0].subresourceRange.levelCount = 1;
+            barriers[0].subresourceRange.baseArrayLayer = 0;
+            barriers[0].subresourceRange.layerCount = 1;
+            barriers[0].srcAccessMask = 0;
+            barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+            // Normal image barrier (same settings)
+            barriers[1] = barriers[0];
+            barriers[1].image = m_defaultNormalTexture->handle();
+
+            vkCmdPipelineBarrier(
+                commandBuffer,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0, nullptr,
+                0, nullptr,
+                2, barriers
+            );
+
+            // Copy data from staging buffer to both images
+            VkBufferImageCopy region{};
+            region.bufferOffset = 0;
+            region.bufferRowLength = 0;
+            region.bufferImageHeight = 0;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.mipLevel = 0;
+            region.imageSubresource.baseArrayLayer = 0;
+            region.imageSubresource.layerCount = 1;
+            region.imageOffset = { 0, 0, 0 };
+            region.imageExtent = { size, size, 1 };
+
+            vkCmdCopyBufferToImage(
+                commandBuffer,
+                stagingBuffer->getBuffer(),
+                m_defaultAlbedoTexture->handle(),
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                &region
+            );
+
+            vkCmdCopyBufferToImage(
+                commandBuffer,
+                stagingBuffer->getBuffer(),
+                m_defaultNormalTexture->handle(),
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                &region
+            );
+
+            // Transition both images to shader read layout
+            barriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barriers[0].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+            barriers[1] = barriers[0];
+            barriers[1].image = m_defaultNormalTexture->handle();
+
+            vkCmdPipelineBarrier(
+                commandBuffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                0,
+                0, nullptr,
+                0, nullptr,
+                2, barriers
+            );
+
+            vkEndCommandBuffer(commandBuffer);
+
+            // Submit command buffer
+            VkSubmitInfo submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &commandBuffer;
+
+            vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+            vkQueueWaitIdle(m_graphicsQueue);
+
+            // Free command buffer
+            vkFreeCommandBuffers(m_device, m_commandPool, 1, &commandBuffer);
+
+            Logger::get().info("Creating image views...");
+
+            // Create image views
+            VkImageViewCreateInfo viewInfo{};
+            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewInfo.subresourceRange.baseMipLevel = 0;
+            viewInfo.subresourceRange.levelCount = 1;
+            viewInfo.subresourceRange.baseArrayLayer = 0;
+            viewInfo.subresourceRange.layerCount = 1;
+
+            // Albedo view
+            viewInfo.image = m_defaultAlbedoTexture->handle();
+            m_defaultAlbedoView = std::make_unique<ImageViewResource>(m_device);
+            if (vkCreateImageView(m_device, &viewInfo, nullptr, &m_defaultAlbedoView->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to create albedo image view");
+                return false;
+            }
+
+            // Normal view
             viewInfo.image = m_defaultNormalTexture->handle();
             m_defaultNormalView = std::make_unique<ImageViewResource>(m_device);
             if (vkCreateImageView(m_device, &viewInfo, nullptr, &m_defaultNormalView->handle()) != VK_SUCCESS) {
@@ -2899,20 +3237,25 @@ namespace tremor::gfx {
                 return false;
             }
 
+            Logger::get().info("Creating sampler...");
+
             // Create sampler
             VkSamplerCreateInfo samplerInfo{};
             samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-            samplerInfo.magFilter = VK_FILTER_LINEAR;
-            samplerInfo.minFilter = VK_FILTER_LINEAR;
-            samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            samplerInfo.anisotropyEnable = VK_TRUE;
-            samplerInfo.maxAnisotropy = 16.0f;
-            samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+            samplerInfo.magFilter = VK_FILTER_NEAREST; // Use NEAREST for debugging
+            samplerInfo.minFilter = VK_FILTER_NEAREST;
+            samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            samplerInfo.anisotropyEnable = VK_FALSE;
+            samplerInfo.maxAnisotropy = 1.0f;
+            samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
             samplerInfo.unnormalizedCoordinates = VK_FALSE;
             samplerInfo.compareEnable = VK_FALSE;
-            samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+            samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            samplerInfo.mipLodBias = 0.0f;
+            samplerInfo.minLod = 0.0f;
+            samplerInfo.maxLod = 0.0f;
 
             m_defaultSampler = std::make_unique<SamplerResource>(m_device);
             if (vkCreateSampler(m_device, &samplerInfo, nullptr, &m_defaultSampler->handle()) != VK_SUCCESS) {
@@ -2920,7 +3263,11 @@ namespace tremor::gfx {
                 return false;
             }
 
-            Logger::get().info("Created default textures successfully");
+            Logger::get().info("Default textures created successfully!");
+            Logger::get().info("  Albedo texture: {}x{} white", size, size);
+            Logger::get().info("  Normal texture: {}x{} white", size, size);
+            Logger::get().info("  Sampler: NEAREST filtering");
+
             return true;
         }
         catch (const std::exception& e) {
@@ -3545,7 +3892,6 @@ namespace tremor::gfx {
         }
 
         ~CommandPoolResource() {
-            cleanup();
         }
 
         // Disable copying
@@ -6189,6 +6535,8 @@ namespace tremor::gfx {
             };
             m_sceneOctree = tremor::gfx::Octree<tremor::gfx::RenderableObject>(worldBounds);
 
+            Logger::get().info("=== CREATING ENHANCED SCENE ===");
+
             // Add enhanced renderable objects
             for (int i = 0; i < 25; i++) {
                 tremor::gfx::RenderableObject obj;
@@ -6215,11 +6563,25 @@ namespace tremor::gfx {
                 AABBF worldBounds = transformAABB(obj.transform, localBounds);
                 obj.bounds = AABBQ::fromFloat(worldBounds);
 
+                // DEBUG: Log object details
+                Logger::get().info("Object {}: pos=({:.2f},{:.2f},{:.2f}), bounds=({:.2f},{:.2f},{:.2f}) to ({:.2f},{:.2f},{:.2f})",
+                    i, x, y, z,
+                    worldBounds.min.x, worldBounds.min.y, worldBounds.min.z,
+                    worldBounds.max.x, worldBounds.max.y, worldBounds.max.z);
+
                 // Add to octree
                 m_sceneOctree.insert(obj, obj.bounds);
-
-                Logger::get().info("Added enhanced object {} at ({},{},{})", i, x, y, z);
+                Logger::get().info("Inserted object {} into octree", i);
             }
+
+            // DEBUG: Verify octree has objects
+            auto allObjects = m_sceneOctree.getAllObjects();
+            Logger::get().info("Octree now contains {} objects total", allObjects.size());
+
+            // Test a simple query to make sure octree works
+            AABBQ testQuery = AABBQ::fromFloat(glm::vec3(-10, -10, -10), glm::vec3(10, 10, 10));
+            auto queryResults = m_sceneOctree.query(testQuery);
+            Logger::get().info("Test query found {} objects in large region", queryResults.size());
 
             // Create lights
             std::vector<tremor::gfx::ClusterLight> lights;
@@ -6255,6 +6617,8 @@ namespace tremor::gfx {
 
             m_clusteredRenderer->updateLights(lights);
             Logger::get().info("Created enhanced scene with {} lights", lights.size());
+            Logger::get().info("=== SCENE CREATION COMPLETE ===");
+
         }
 
         void createSampleMeshes() {
@@ -6432,9 +6796,9 @@ namespace tremor::gfx {
 
         bool createMinimalMeshShaderPipeline() {
             // Load shaders
-            auto taskShader = ShaderModule::compileFromFile(device, "shaders/minimal.task");
-            auto meshShader = ShaderModule::compileFromFile(device, "shaders/minimal.mesh");
-            auto fragShader = ShaderModule::compileFromFile(device, "shaders/minimal.frag");
+            auto taskShader = ShaderModule::compileFromFile(device, "shaders/diag.task");
+            auto meshShader = ShaderModule::compileFromFile(device, "shaders/diag.mesh");
+            auto fragShader = ShaderModule::compileFromFile(device, "shaders/diag.frag");
 
             if (!taskShader || !meshShader || !fragShader) {
                 Logger::get().error("Failed to compile mesh shaders");
@@ -6545,10 +6909,9 @@ namespace tremor::gfx {
             float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
 
-            cam.setFov(60.0f);
-            cam.setPosition(glm::vec3(sin(time*1.5f)*4, 0.0f, cos(time)*4));
-            cam.lookAt(glm::vec3(0.0f, 0.0f, 0.0f));
-
+            float radius = 15.0f; // Far enough to see all objects
+            cam.setPosition(glm::vec3(sin(time * 0.5f) * radius, 8.0f, cos(time * 0.5f) * radius));
+            cam.lookAt(glm::vec3(0.0f, 0.0f, 0.0f)); // Look at center of object grid
             cam.update(0.0f);
 
             UniformBufferObject ubo{};
@@ -6569,7 +6932,7 @@ namespace tremor::gfx {
 
 
             // Set camera position (same as view matrix eye position)
-            ubo.cameraPos = glm::vec3(0.0f, 0.0f, 4.0f);
+            ubo.cameraPos = cam.getLocalPosition();
 
             // Update the buffer data
             m_uniformBuffer->update(&ubo, sizeof(ubo));
@@ -7190,6 +7553,12 @@ namespace tremor::gfx {
             updateUniformBuffer();
             updateLight();
 
+            // Add camera debug info
+            glm::vec3 camPos = cam.getLocalPosition();
+            glm::vec3 camForward = cam.getForward();
+            Logger::get().info("Camera pos: ({:.2f}, {:.2f}, {:.2f}), forward: ({:.2f}, {:.2f}, {:.2f})",
+                camPos.x, camPos.y, camPos.z, camForward.x, camForward.y, camForward.z);
+
             m_clusteredRenderer->setCamera(&cam);
             m_clusteredRenderer->buildClusters(&cam, m_sceneOctree);
 
@@ -7266,7 +7635,7 @@ namespace tremor::gfx {
                 depthStencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
                 depthStencilAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
                 depthStencilAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                depthStencilAttachment.clearValue.depthStencil = { 0.0f, 0 };
+                depthStencilAttachment.clearValue.depthStencil = { 1.0f, 0 };  
 
                 // Add to the renderingInfo
                 renderingInfo.depthStencilAttachment = depthStencilAttachment;
@@ -7290,7 +7659,7 @@ namespace tremor::gfx {
                 // Clear values for each attachment
                 std::array<VkClearValue, 2> clearValues{};
                 clearValues[0].color = { {1.0f, 0.0f, 0.3f, 1.0f} };  // Dark blue
-                clearValues[1].depthStencil = { 0.0f, 0 };
+                clearValues[1].depthStencil = { 1.0f, 0 };
 
                 renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
                 renderPassInfo.pClearValues = clearValues.data();
@@ -7303,29 +7672,13 @@ namespace tremor::gfx {
             }
 
             // Bind the pipeline
-            vkCmdBindPipeline(m_commandBuffers[currentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, *m_graphicsPipeline);
+            //vkCmdBindPipeline(m_commandBuffers[currentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, *m_graphicsPipeline);
 
             // Set viewport and scissor
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-
-            VkExtent2D ext = vkSwapchain.get()->extent();
-
-            viewport.width = static_cast<float>(ext.width);
-            viewport.height = static_cast<float>(ext.height);
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-            vkCmdSetViewport(m_commandBuffers[currentFrame], 0, 1, &viewport);
-
-            VkRect2D scissor{};
-            scissor.offset = { 0, 0 };
-            scissor.extent = vkSwapchain->extent();
-            vkCmdSetScissor(m_commandBuffers[currentFrame], 0, 1, &scissor);
 
 
             // Bind the descriptor set for the texture
-            if (!m_descriptorSets.empty()) {
+            /*if (!m_descriptorSets.empty()) {
                 try {
                     Logger::get().info("Binding descriptor set");
 
@@ -7357,11 +7710,11 @@ namespace tremor::gfx {
                     Logger::get().error("Exception during descriptor set binding: {}", e.what());
                     return; // Early return to avoid crash
                 }
-            }
+            }*/
 
 
             // Draw triangle if buffers are available
-            if (m_vertexBuffer) {
+            /*if (m_vertexBuffer) {
                 try {
                     // Bind the vertex buffer
                     //Logger::get().info("Binding vertex buffer with {} vertices", m_vertexBuffer->getVertexCount());
@@ -7377,7 +7730,7 @@ namespace tremor::gfx {
             }
             else {
                 Logger::get().warning("No vertex buffer available for drawing");
-            }
+            }*/
 
 
 
@@ -7389,17 +7742,20 @@ namespace tremor::gfx {
         }
 
         void endFrame() override {
-            if (vkDevice.get()->capabilities().dynamicRendering) {
+            if (vkDevice->capabilities().dynamicRendering) {
                 dr.get()->end(m_commandBuffers[currentFrame]);
             }
             else {
-                // End the render pass
                 vkCmdEndRenderPass(m_commandBuffers[currentFrame]);
             }
+
             // End command buffer recording
-            if (vkEndCommandBuffer(m_commandBuffers[currentFrame]) != VK_SUCCESS) {
-                throw std::runtime_error("Failed to record command buffer");
+            VkResult endResult = vkEndCommandBuffer(m_commandBuffers[currentFrame]);
+            if (endResult != VK_SUCCESS) {
+                Logger::get().error("Failed to end command buffer: {}", static_cast<int>(endResult));
+                return;
             }
+            Logger::get().info("Command buffer ended successfully");
 
             // Submit command buffer
             VkSubmitInfo submitInfo{};
@@ -7417,21 +7773,27 @@ namespace tremor::gfx {
             submitInfo.signalSemaphoreCount = 1;
             submitInfo.pSignalSemaphores = signalSemaphores;
 
-            if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, m_inFlightFences[currentFrame].handle()) != VK_SUCCESS) {
-                throw std::runtime_error("Failed to submit draw command buffer");
+            VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo, m_inFlightFences[currentFrame].handle());
+            if (submitResult != VK_SUCCESS) {
+                Logger::get().error("Failed to submit command buffer: {}", static_cast<int>(submitResult));
+                return;
             }
+            Logger::get().info("Command buffer submitted successfully");
 
             // Present the image
-            VkResult result = vkSwapchain.get()->present(m_currentImageIndex, m_renderFinishedSemaphores[currentFrame]);
+            VkResult presentResult = vkSwapchain.get()->present(m_currentImageIndex, m_renderFinishedSemaphores[currentFrame]);
 
-            if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-                // Recreate swapchain
+            Logger::get().info("Present result: {}", static_cast<int>(presentResult));
+
+            if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
+                Logger::get().info("Recreating swapchain");
                 int width, height;
                 SDL_GetWindowSize(w, &width, &height);
                 vkSwapchain.get()->recreate(width, height);
             }
-            else if (result != VK_SUCCESS) {
-                throw std::runtime_error("Failed to present swap chain image");
+            else if (presentResult != VK_SUCCESS) {
+                Logger::get().error("Failed to present: {}", static_cast<int>(presentResult));
+                return;
             }
 
             // Move to next frame
@@ -7503,6 +7865,7 @@ private:
             createCommandPool();
             createCommandBuffers();
 
+
             createDepthResources();
             createUniformBuffer();
             createLightBuffer();
@@ -7568,6 +7931,8 @@ private:
             // Create enhanced content
             createSampleMeshes();
             createEnhancedScene();
+
+            m_clusteredRenderer->createWorkingMeshShaderPipeline();
 
             return true;
         };
@@ -7963,9 +8328,9 @@ private:
                 // Fill with a checkerboard pattern
                 for (uint32_t y = 0; y < size; y++) {
                     for (uint32_t x = 0; x < size; x++) {
-                        uint8_t color = ((x / 32 + y / 32) % 2) ? 255 : 0;
+                        uint8_t color = 255; //((x / 32 + y / 32) % 2) ? 255 : 0;
                         pixels[(y * size + x) * 4 + 0] = color;     // R
-                        pixels[(y * size + x) * 4 + 1] = 0;     // G
+                        pixels[(y * size + x) * 4 + 1] = color;     // G
                         pixels[(y * size + x) * 4 + 2] = color;     // B
                         pixels[(y * size + x) * 4 + 3] = 255;       // A
                     }
@@ -8204,13 +8569,18 @@ private:
         void endSingleTimeCommands(VkCommandBuffer commandBuffer) {
             vkEndCommandBuffer(commandBuffer);
 
+			Logger::get().info("Ending command buffer...");
+
             VkSubmitInfo submitInfo{};
             submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             submitInfo.commandBufferCount = 1;
             submitInfo.pCommandBuffers = &commandBuffer;
 
-            vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-            vkQueueWaitIdle(graphicsQueue);
+            VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+            Logger::get().info("Queue submit result: {}", static_cast<int>(submitResult));
+
+            VkResult waitResult = vkQueueWaitIdle(graphicsQueue);
+            Logger::get().info("Queue wait result: {}", static_cast<int>(waitResult));
 
             vkFreeCommandBuffers(device, *m_commandPool, 1, &commandBuffer);
         }
@@ -8263,339 +8633,572 @@ private:
             return true;
         }
 
+        //bool createGraphicsPipeline() {
+        //    try {
+        //        m_resourceBindings = m_combinedReflection.getResourceBindings();
+        //        m_uniformBuffers = m_combinedReflection.getUniformBuffers();
+
+
+        //        // ===== 1. LOAD SHADERS =====
+        //        Logger::get().info("Loading and compiling shaders...");
+        //        m_pipelineShaders.clear();
+
+        //        auto vertShader = sm->loadShader("shaders/pbr.vert");
+        //        if (!vertShader) {
+        //            Logger::get().error("Failed to load vertex shader: shaders/pbr.vert");
+        //            return false;
+        //        }
+
+        //        auto fragShader = sm->loadShader("shaders/pbr.frag");
+        //        if (!fragShader) {
+        //            Logger::get().error("Failed to load fragment shader: shaders/pbr.frag");
+        //            return false;
+        //        }
+
+        //        m_pipelineShaders.push_back(vertShader);
+        //        m_pipelineShaders.push_back(fragShader);
+
+        //        // ===== 2. PREPARE SHADER STAGES =====
+        //        std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+        //        shaderStages.reserve(m_pipelineShaders.size());
+
+        //        for (const auto& shader : m_pipelineShaders) {
+        //            shaderStages.push_back(shader->createShaderStageInfo());
+        //        }
+
+        //        // ===== 3. EXTRACT REFLECTION DATA =====
+        //        Logger::get().info("Extracting shader reflection data...");
+        //        ShaderReflection combinedReflection;
+
+        //        for (const auto& shader : m_pipelineShaders) {
+        //            const ShaderReflection* reflection = shader->getReflection();
+        //            if (reflection) {
+        //                combinedReflection.merge(*reflection);
+        //            }
+        //        }
+
+        //        // ===== 4. CREATE DESCRIPTOR SET LAYOUTS =====
+        //        Logger::get().info("Creating descriptor set layouts...");
+        //        uint32_t maxSetNumber = 0;
+
+        //        for (const auto& binding : combinedReflection.getResourceBindings()) {
+        //            maxSetNumber = std::max(maxSetNumber, binding.set);
+        //        }
+
+        //        Logger::get().info("Shader requires {} descriptor sets", maxSetNumber + 1);
+        //        m_descriptorSetLayouts.clear();
+        //        m_descriptorSetLayouts.resize(maxSetNumber + 1);
+
+        //        std::vector<VkDescriptorSetLayout> rawSetLayouts;
+        //        rawSetLayouts.reserve(maxSetNumber + 1);
+
+        //        for (uint32_t i = 0; i <= maxSetNumber; i++) {
+        //            auto layout = combinedReflection.createDescriptorSetLayout(device, i);
+        //            if (layout) {
+        //                Logger::get().info("Created layout for set {} with bindings", i);
+        //                m_descriptorSetLayouts[i] = std::move(layout);
+        //                rawSetLayouts.push_back(m_descriptorSetLayouts[i]->handle());
+        //            }
+        //            else {
+        //                // Create empty layout
+        //                Logger::get().info("Creating empty layout for set {}", i);
+        //                VkDescriptorSetLayoutCreateInfo emptyInfo{};
+        //                emptyInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        //                emptyInfo.bindingCount = 0;
+
+        //                auto emptyLayout = std::make_unique<DescriptorSetLayoutResource>(device);
+        //                VkResult result = vkCreateDescriptorSetLayout(device, &emptyInfo, nullptr, &emptyLayout->handle());
+        //                if (result != VK_SUCCESS) {
+        //                    Logger::get().error("Failed to create empty descriptor set layout: {}", static_cast<int>(result));
+        //                    return false;
+        //                }
+
+        //                m_descriptorSetLayouts[i] = std::move(emptyLayout);
+        //                rawSetLayouts.push_back(m_descriptorSetLayouts[i]->handle());
+        //            }
+        //        }
+
+        //        // ===== 5. CREATE PIPELINE LAYOUT =====
+        //        Logger::get().info("Creating pipeline layout...");
+        //        // Set up push constant ranges
+        //        std::vector<VkPushConstantRange> pushConstantRanges;
+        //        for (const auto& range : combinedReflection.getPushConstantRanges()) {
+        //            VkPushConstantRange vkRange{};
+        //            vkRange.stageFlags = range.stageFlags;
+        //            vkRange.offset = range.offset;
+        //            vkRange.size = range.size;
+        //            pushConstantRanges.push_back(vkRange);
+        //        }
+
+        //        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        //        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        //        pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(rawSetLayouts.size());
+        //        pipelineLayoutInfo.pSetLayouts = rawSetLayouts.data();
+        //        pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size());
+        //        pipelineLayoutInfo.pPushConstantRanges = pushConstantRanges.empty() ? nullptr : pushConstantRanges.data();
+
+        //        VkPipelineLayout pipelineLayoutHandle;
+        //        VkResult layoutResult = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayoutHandle);
+        //        if (layoutResult != VK_SUCCESS) {
+        //            Logger::get().error("Failed to create pipeline layout: {}", static_cast<int>(layoutResult));
+        //            return false;
+        //        }
+
+        //        m_pipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayoutHandle);
+
+        //        auto descriptorAllocator = std::make_unique<DescriptorAllocator>(device);
+        //        auto descriptorLayoutCache = std::make_unique<DescriptorLayoutCache>(device);
+
+        //        DescriptorWriter writer(*descriptorLayoutCache, *descriptorAllocator);
+
+
+
+        //        // ===== 6. CREATE DESCRIPTOR POOL =====
+        //        Logger::get().info("Creating descriptor pool...");
+        //        m_descriptorPool = combinedReflection.createDescriptorPool(device);
+        //        if (!m_descriptorPool) {
+        //            Logger::get().error("Failed to create descriptor pool");
+        //            return false;
+        //        }
+
+
+        //        DescriptorBuilder builder(device, combinedReflection, m_descriptorPool);
+
+        //        builder.registerUniformBuffer("UniformBufferObject", m_uniformBuffer.get(), sizeof(UniformBufferObject))
+        //            .registerUniformBuffer("LightUBO", m_lightBuffer.get(), sizeof(LightUBO))
+        //            .registerUniformBuffer("MaterialUBO", m_materialBuffer.get(), sizeof(MaterialUBO))
+        //            //.registerTexture("albedoMap", m_albedoTexture, m_textureSampler)
+        //            //.registerTexture("normalMap", m_normalTexture, m_textureSampler)
+        //            .setDefaultTexture(m_missingTextureImageView.get(), m_textureSampler.get());
+
+        //        if (!builder.buildFromReflection()) {
+        //            Logger::get().error("Failed to build descriptor sets");
+        //            return false;
+        //        }
+
+        //        builder.takeDescriptorSets(m_descriptorSets);
+
+        //        
+
+        //        Logger::get().info("Descriptor sets created successfully");
+
+
+        //        // ===== 9. CONFIGURE PIPELINE STATE =====
+        //        Logger::get().info("Configuring pipeline state...");
+        //        PipelineState pipelineState;
+
+        //        // Configure vertex input state
+        //        auto bindingDescription = BlinnPhongVertex::getBindingDescription();
+        //        auto attributeDescriptions = BlinnPhongVertex::getAttributeDescriptions();
+
+        //        pipelineState.vertexInputState = {};
+        //        pipelineState.vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        //        pipelineState.vertexInputState.vertexBindingDescriptionCount = 1;
+        //        pipelineState.vertexInputState.pVertexBindingDescriptions = &bindingDescription;
+        //        pipelineState.vertexInputState.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        //        pipelineState.vertexInputState.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+        //        // Configure input assembly
+        //        pipelineState.inputAssemblyState = {};
+        //        pipelineState.inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        //        pipelineState.inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        //        pipelineState.inputAssemblyState.primitiveRestartEnable = VK_FALSE;
+
+        //        // Configure viewport and scissor state
+        //        VkViewport viewport{};
+        //        viewport.x = 0.0f;
+        //        viewport.y = 0.0f;
+        //        viewport.width = static_cast<float>(vkSwapchain->extent().width);
+        //        viewport.height = static_cast<float>(vkSwapchain->extent().height);
+        //        viewport.minDepth = 0.0f;
+        //        viewport.maxDepth = 1.0f;
+
+        //        VkRect2D scissor{};
+        //        scissor.offset = { 0, 0 };
+        //        scissor.extent = vkSwapchain->extent();
+
+        //        pipelineState.viewportState = {};
+        //        pipelineState.viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        //        pipelineState.viewportState.viewportCount = 1;
+        //        pipelineState.viewportState.pViewports = &viewport;
+        //        pipelineState.viewportState.scissorCount = 1;
+        //        pipelineState.viewportState.pScissors = &scissor;
+
+        //        // Configure rasterization state
+        //        pipelineState.rasterizationState = {};
+        //        pipelineState.rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        //        pipelineState.rasterizationState.depthClampEnable = VK_FALSE;
+        //        pipelineState.rasterizationState.rasterizerDiscardEnable = VK_FALSE;
+        //        pipelineState.rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
+        //        pipelineState.rasterizationState.lineWidth = 1.0f;
+        //        pipelineState.rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
+        //        pipelineState.rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        //        pipelineState.rasterizationState.depthBiasEnable = VK_FALSE;
+
+        //        // Configure multisample state
+        //        pipelineState.multisampleState = {};
+        //        pipelineState.multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        //        pipelineState.multisampleState.sampleShadingEnable = VK_FALSE;
+        //        pipelineState.multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        //        // Configure depth/stencil state
+        //        pipelineState.depthStencilState = {};
+        //        pipelineState.depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        //        pipelineState.depthStencilState.depthTestEnable = VK_TRUE;
+        //        pipelineState.depthStencilState.depthWriteEnable = VK_TRUE;
+        //        pipelineState.depthStencilState.depthCompareOp = VK_COMPARE_OP_GREATER;
+        //        pipelineState.depthStencilState.depthBoundsTestEnable = VK_FALSE;
+        //        pipelineState.depthStencilState.stencilTestEnable = VK_FALSE;
+
+        //        // Configure color blend state
+        //        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+        //        colorBlendAttachment.colorWriteMask =
+        //            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+        //            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        //        colorBlendAttachment.blendEnable = VK_TRUE;
+        //        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        //        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        //        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        //        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        //        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        //        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+        //        pipelineState.colorBlendState = {};
+        //        pipelineState.colorBlendState.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        //        pipelineState.colorBlendState.logicOpEnable = VK_FALSE;
+        //        pipelineState.colorBlendState.attachmentCount = 1;
+        //        pipelineState.colorBlendState.pAttachments = &colorBlendAttachment;
+
+        //        // Configure dynamic state
+        //        std::vector<VkDynamicState> dynamicStates = {
+        //            VK_DYNAMIC_STATE_VIEWPORT,
+        //            VK_DYNAMIC_STATE_SCISSOR
+        //        };
+
+        //        pipelineState.dynamicState = {};
+        //        pipelineState.dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        //        pipelineState.dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+        //        pipelineState.dynamicState.pDynamicStates = dynamicStates.data();
+
+        //        // ===== 10. CREATE GRAPHICS PIPELINE =====
+        //        Logger::get().info("Creating graphics pipeline...");
+        //        if (vkDevice->capabilities().dynamicRendering) {
+        //            // Dynamic rendering pipeline
+        //            VkPipelineRenderingCreateInfoKHR renderingInfo{};
+        //            renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+        //            renderingInfo.colorAttachmentCount = 1;
+        //            VkFormat colorFormat = vkSwapchain->imageFormat();
+        //            renderingInfo.pColorAttachmentFormats = &colorFormat;
+        //            renderingInfo.depthAttachmentFormat = vkDevice->depthFormat();
+
+        //            VkGraphicsPipelineCreateInfo pipelineInfo{};
+        //            pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        //            pipelineInfo.pNext = &renderingInfo;
+        //            pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+        //            pipelineInfo.pStages = shaderStages.data();
+        //            pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
+        //            pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
+        //            pipelineInfo.pViewportState = &pipelineState.viewportState;
+        //            pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
+        //            pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
+        //            pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
+        //            pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
+        //            pipelineInfo.pDynamicState = &pipelineState.dynamicState;
+        //            pipelineInfo.layout = m_pipelineLayout->handle();
+        //            pipelineInfo.renderPass = VK_NULL_HANDLE; // Not used with dynamic rendering
+        //            pipelineInfo.subpass = 0;
+        //            pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+
+        //            VkPipeline graphicsPipeline;
+        //            VkResult result = vkCreateGraphicsPipelines(
+        //                device,
+        //                VK_NULL_HANDLE,
+        //                1,
+        //                &pipelineInfo,
+        //                nullptr,
+        //                &graphicsPipeline
+        //            );
+
+        //            if (result != VK_SUCCESS) {
+        //                Logger::get().error("Failed to create graphics pipeline with dynamic rendering: {}", static_cast<int>(result));
+        //                return false;
+        //            }
+
+        //            m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
+        //            Logger::get().info("Created dynamic rendering pipeline successfully");
+        //        }
+        //        else {
+        //            // Traditional render pass pipeline
+        //            VkGraphicsPipelineCreateInfo pipelineInfo{};
+        //            pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        //            pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+        //            pipelineInfo.pStages = shaderStages.data();
+        //            pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
+        //            pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
+        //            pipelineInfo.pViewportState = &pipelineState.viewportState;
+        //            pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
+        //            pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
+        //            pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
+        //            pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
+        //            pipelineInfo.pDynamicState = &pipelineState.dynamicState;
+        //            pipelineInfo.layout = m_pipelineLayout->handle();
+        //            pipelineInfo.renderPass = rp->handle();
+        //            pipelineInfo.subpass = 0;
+        //            pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+
+        //            VkPipeline graphicsPipeline;
+        //            VkResult result = vkCreateGraphicsPipelines(
+        //                device,
+        //                VK_NULL_HANDLE,
+        //                1,
+        //                &pipelineInfo,
+        //                nullptr,
+        //                &graphicsPipeline
+        //            );
+
+        //            if (result != VK_SUCCESS) {
+        //                Logger::get().error("Failed to create graphics pipeline with render pass: {}", static_cast<int>(result));
+        //                return false;
+        //            }
+
+        //            m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
+        //            Logger::get().info("Created render pass pipeline successfully");
+        //        }
+
+        //        return true;
+        //    }
+        //    catch (const std::exception& e) {
+        //        Logger::get().error("Exception in createGraphicsPipeline: {}", e.what());
+        //        return false;
+        //    }
+        //}
+
+
+        // STEP 5: Check command buffer submission
+        // Add this validation to your endFrame:
         bool createGraphicsPipeline() {
             try {
-                m_resourceBindings = m_combinedReflection.getResourceBindings();
-                m_uniformBuffers = m_combinedReflection.getUniformBuffers();
+                Logger::get().info("=== CREATING BASIC GRAPHICS PIPELINE ===");
 
+                // VERIFY: Are you using the right shaders?
+                Logger::get().info("Loading basic vertex/fragment shaders...");
 
-                // ===== 1. LOAD SHADERS =====
-                Logger::get().info("Loading and compiling shaders...");
+                auto vertShader = sm->loadShader("shaders/pbr.vert");
+                auto fragShader = sm->loadShader("shaders/pbr.frag");
+
+                if (!vertShader || !fragShader) {
+                    Logger::get().error("Failed to load basic shaders!");
+
+                    // FALLBACK: Try to create simple embedded shaders
+                    Logger::get().info("Trying fallback shaders...");
+
+                    std::string simpleVertSource = R"(
+        #version 450
+
+        layout(location = 0) in vec3 inPosition;
+        layout(location = 1) in vec3 inNormal;
+        layout(location = 2) in vec2 inTexCoord;
+
+        layout(binding = 0) uniform UniformBufferObject {
+            mat4 model;
+            mat4 view;
+            mat4 proj;
+            vec3 cameraPos;
+        } ubo;
+
+        void main() {
+            gl_Position = ubo.proj * ubo.view * ubo.model * vec4(inPosition, 1.0);
+        }
+        )";
+
+                    std::string simpleFragSource = R"(
+        #version 450
+
+        layout(location = 0) out vec4 outColor;
+
+        void main() {
+            outColor = vec4(1.0, 0.5, 0.0, 1.0); // Orange color
+        }
+        )";
+
+                    vertShader = ShaderModule::compileFromSource(device, simpleVertSource, ShaderType::Vertex, "fallback_vert");
+                    fragShader = ShaderModule::compileFromSource(device, simpleFragSource, ShaderType::Fragment, "fallback_frag");
+
+                    if (!vertShader || !fragShader) {
+                        Logger::get().error("Even fallback shaders failed!");
+                        return false;
+                    }
+
+                    Logger::get().info("Using fallback shaders");
+                }
+
                 m_pipelineShaders.clear();
-
-                auto vertShader = sm->loadShader("shaders/basic.vert");
-                if (!vertShader) {
-                    Logger::get().error("Failed to load vertex shader: shaders/pbr.vert");
-                    return false;
-                }
-
-                auto fragShader = sm->loadShader("shaders/basic.frag");
-                if (!fragShader) {
-                    Logger::get().error("Failed to load fragment shader: shaders/pbr.frag");
-                    return false;
-                }
-
                 m_pipelineShaders.push_back(vertShader);
                 m_pipelineShaders.push_back(fragShader);
 
-                // ===== 2. PREPARE SHADER STAGES =====
+                // Create shader stages
                 std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
-                shaderStages.reserve(m_pipelineShaders.size());
-
                 for (const auto& shader : m_pipelineShaders) {
                     shaderStages.push_back(shader->createShaderStageInfo());
                 }
 
-                // ===== 3. EXTRACT REFLECTION DATA =====
-                Logger::get().info("Extracting shader reflection data...");
-                ShaderReflection combinedReflection;
+                Logger::get().info("Created {} shader stages", shaderStages.size());
 
-                for (const auto& shader : m_pipelineShaders) {
-                    const ShaderReflection* reflection = shader->getReflection();
-                    if (reflection) {
-                        combinedReflection.merge(*reflection);
-                    }
-                }
-
-                // ===== 4. CREATE DESCRIPTOR SET LAYOUTS =====
-                Logger::get().info("Creating descriptor set layouts...");
-                uint32_t maxSetNumber = 0;
-
-                for (const auto& binding : combinedReflection.getResourceBindings()) {
-                    maxSetNumber = std::max(maxSetNumber, binding.set);
-                }
-
-                Logger::get().info("Shader requires {} descriptor sets", maxSetNumber + 1);
-                m_descriptorSetLayouts.clear();
-                m_descriptorSetLayouts.resize(maxSetNumber + 1);
-
-                std::vector<VkDescriptorSetLayout> rawSetLayouts;
-                rawSetLayouts.reserve(maxSetNumber + 1);
-
-                for (uint32_t i = 0; i <= maxSetNumber; i++) {
-                    auto layout = combinedReflection.createDescriptorSetLayout(device, i);
-                    if (layout) {
-                        Logger::get().info("Created layout for set {} with bindings", i);
-                        m_descriptorSetLayouts[i] = std::move(layout);
-                        rawSetLayouts.push_back(m_descriptorSetLayouts[i]->handle());
-                    }
-                    else {
-                        // Create empty layout
-                        Logger::get().info("Creating empty layout for set {}", i);
-                        VkDescriptorSetLayoutCreateInfo emptyInfo{};
-                        emptyInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                        emptyInfo.bindingCount = 0;
-
-                        auto emptyLayout = std::make_unique<DescriptorSetLayoutResource>(device);
-                        VkResult result = vkCreateDescriptorSetLayout(device, &emptyInfo, nullptr, &emptyLayout->handle());
-                        if (result != VK_SUCCESS) {
-                            Logger::get().error("Failed to create empty descriptor set layout: {}", static_cast<int>(result));
-                            return false;
-                        }
-
-                        m_descriptorSetLayouts[i] = std::move(emptyLayout);
-                        rawSetLayouts.push_back(m_descriptorSetLayouts[i]->handle());
-                    }
-                }
-
-                // ===== 5. CREATE PIPELINE LAYOUT =====
-                Logger::get().info("Creating pipeline layout...");
-                // Set up push constant ranges
-                std::vector<VkPushConstantRange> pushConstantRanges;
-                for (const auto& range : combinedReflection.getPushConstantRanges()) {
-                    VkPushConstantRange vkRange{};
-                    vkRange.stageFlags = range.stageFlags;
-                    vkRange.offset = range.offset;
-                    vkRange.size = range.size;
-                    pushConstantRanges.push_back(vkRange);
-                }
-
-                VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-                pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-                pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(rawSetLayouts.size());
-                pipelineLayoutInfo.pSetLayouts = rawSetLayouts.data();
-                pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size());
-                pipelineLayoutInfo.pPushConstantRanges = pushConstantRanges.empty() ? nullptr : pushConstantRanges.data();
-
-                VkPipelineLayout pipelineLayoutHandle;
-                VkResult layoutResult = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayoutHandle);
-                if (layoutResult != VK_SUCCESS) {
-                    Logger::get().error("Failed to create pipeline layout: {}", static_cast<int>(layoutResult));
-                    return false;
-                }
-
-                m_pipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayoutHandle);
-
-                auto descriptorAllocator = std::make_unique<DescriptorAllocator>(device);
-                auto descriptorLayoutCache = std::make_unique<DescriptorLayoutCache>(device);
-
-                DescriptorWriter writer(*descriptorLayoutCache, *descriptorAllocator);
-
-
-
-                // ===== 6. CREATE DESCRIPTOR POOL =====
-                Logger::get().info("Creating descriptor pool...");
-                m_descriptorPool = combinedReflection.createDescriptorPool(device);
-                if (!m_descriptorPool) {
-                    Logger::get().error("Failed to create descriptor pool");
-                    return false;
-                }
-
-
-                DescriptorBuilder builder(device, combinedReflection, m_descriptorPool);
-
-                builder.registerUniformBuffer("UniformBufferObject", m_uniformBuffer.get(), sizeof(UniformBufferObject))
-                    .registerUniformBuffer("LightUBO", m_lightBuffer.get(), sizeof(LightUBO))
-                    .registerUniformBuffer("MaterialUBO", m_materialBuffer.get(), sizeof(MaterialUBO))
-                    //.registerTexture("albedoMap", m_albedoTexture, m_textureSampler)
-                    //.registerTexture("normalMap", m_normalTexture, m_textureSampler)
-                    .setDefaultTexture(m_missingTextureImageView.get(), m_textureSampler.get());
-
-                if (!builder.buildFromReflection()) {
-                    Logger::get().error("Failed to build descriptor sets");
-                    return false;
-                }
-
-                builder.takeDescriptorSets(m_descriptorSets);
-
-                
-
-                Logger::get().info("Descriptor sets created successfully");
-
-
-                // ===== 9. CONFIGURE PIPELINE STATE =====
-                Logger::get().info("Configuring pipeline state...");
-                PipelineState pipelineState;
-
-                // Configure vertex input state
+                // CRITICAL: Check if your vertex input state is correct
                 auto bindingDescription = BlinnPhongVertex::getBindingDescription();
                 auto attributeDescriptions = BlinnPhongVertex::getAttributeDescriptions();
 
-                pipelineState.vertexInputState = {};
-                pipelineState.vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-                pipelineState.vertexInputState.vertexBindingDescriptionCount = 1;
-                pipelineState.vertexInputState.pVertexBindingDescriptions = &bindingDescription;
-                pipelineState.vertexInputState.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
-                pipelineState.vertexInputState.pVertexAttributeDescriptions = attributeDescriptions.data();
+                Logger::get().info("Vertex binding stride: {}", bindingDescription.stride);
+                Logger::get().info("Vertex attributes: {}", attributeDescriptions.size());
 
-                // Configure input assembly
-                pipelineState.inputAssemblyState = {};
-                pipelineState.inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-                pipelineState.inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-                pipelineState.inputAssemblyState.primitiveRestartEnable = VK_FALSE;
+                VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+                vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+                vertexInputInfo.vertexBindingDescriptionCount = 1;
+                vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+                vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+                vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 
-                // Configure viewport and scissor state
-                VkViewport viewport{};
-                viewport.x = 0.0f;
-                viewport.y = 0.0f;
-                viewport.width = static_cast<float>(vkSwapchain->extent().width);
-                viewport.height = static_cast<float>(vkSwapchain->extent().height);
-                viewport.minDepth = 0.0f;
-                viewport.maxDepth = 1.0f;
+                // SIMPLIFIED pipeline layout - just UBO for now
+                VkDescriptorSetLayoutBinding uboLayoutBinding{};
+                uboLayoutBinding.binding = 0;
+                uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                uboLayoutBinding.descriptorCount = 1;
+                uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
-                VkRect2D scissor{};
-                scissor.offset = { 0, 0 };
-                scissor.extent = vkSwapchain->extent();
+                VkDescriptorSetLayoutCreateInfo layoutInfo{};
+                layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+                layoutInfo.bindingCount = 1;
+                layoutInfo.pBindings = &uboLayoutBinding;
 
-                pipelineState.viewportState = {};
-                pipelineState.viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-                pipelineState.viewportState.viewportCount = 1;
-                pipelineState.viewportState.pViewports = &viewport;
-                pipelineState.viewportState.scissorCount = 1;
-                pipelineState.viewportState.pScissors = &scissor;
+                // Create simple descriptor set layout
+                VkDescriptorSetLayout descriptorSetLayout;
+                if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS) {
+                    Logger::get().error("Failed to create simple descriptor set layout");
+                    return false;
+                }
 
-                // Configure rasterization state
-                pipelineState.rasterizationState = {};
-                pipelineState.rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-                pipelineState.rasterizationState.depthClampEnable = VK_FALSE;
-                pipelineState.rasterizationState.rasterizerDiscardEnable = VK_FALSE;
-                pipelineState.rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
-                pipelineState.rasterizationState.lineWidth = 1.0f;
-                pipelineState.rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
-                pipelineState.rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-                pipelineState.rasterizationState.depthBiasEnable = VK_FALSE;
+                // Create pipeline layout
+                VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+                pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+                pipelineLayoutInfo.setLayoutCount = 1;
+                pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
 
-                // Configure multisample state
-                pipelineState.multisampleState = {};
-                pipelineState.multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-                pipelineState.multisampleState.sampleShadingEnable = VK_FALSE;
-                pipelineState.multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+                VkPipelineLayout pipelineLayout;
+                if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+                    Logger::get().error("Failed to create pipeline layout");
+                    return false;
+                }
 
-                // Configure depth/stencil state
-                pipelineState.depthStencilState = {};
-                pipelineState.depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-                pipelineState.depthStencilState.depthTestEnable = VK_TRUE;
-                pipelineState.depthStencilState.depthWriteEnable = VK_TRUE;
-                pipelineState.depthStencilState.depthCompareOp = VK_COMPARE_OP_GREATER;
-                pipelineState.depthStencilState.depthBoundsTestEnable = VK_FALSE;
-                pipelineState.depthStencilState.stencilTestEnable = VK_FALSE;
+                // Store the layout
+                m_pipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayout);
 
-                // Configure color blend state
+                // Simple input assembly
+                VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+                inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+                inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+                inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+                // Simple viewport state
+                VkPipelineViewportStateCreateInfo viewportState{};
+                viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+                viewportState.viewportCount = 1;
+                viewportState.scissorCount = 1;
+
+                // Simple rasterizer
+                VkPipelineRasterizationStateCreateInfo rasterizer{};
+                rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+                rasterizer.depthClampEnable = VK_FALSE;
+                rasterizer.rasterizerDiscardEnable = VK_FALSE;
+                rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+                rasterizer.lineWidth = 1.0f;
+                rasterizer.cullMode = VK_CULL_MODE_NONE; // No culling for debugging
+                rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+                rasterizer.depthBiasEnable = VK_FALSE;
+
+                // No multisampling
+                VkPipelineMultisampleStateCreateInfo multisampling{};
+                multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+                multisampling.sampleShadingEnable = VK_FALSE;
+                multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+                // Simple color blending
                 VkPipelineColorBlendAttachmentState colorBlendAttachment{};
                 colorBlendAttachment.colorWriteMask =
                     VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                     VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-                colorBlendAttachment.blendEnable = VK_TRUE;
-                colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-                colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-                colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-                colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-                colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-                colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+                colorBlendAttachment.blendEnable = VK_FALSE;
 
-                pipelineState.colorBlendState = {};
-                pipelineState.colorBlendState.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-                pipelineState.colorBlendState.logicOpEnable = VK_FALSE;
-                pipelineState.colorBlendState.attachmentCount = 1;
-                pipelineState.colorBlendState.pAttachments = &colorBlendAttachment;
+                VkPipelineColorBlendStateCreateInfo colorBlending{};
+                colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+                colorBlending.logicOpEnable = VK_FALSE;
+                colorBlending.attachmentCount = 1;
+                colorBlending.pAttachments = &colorBlendAttachment;
 
-                // Configure dynamic state
-                std::vector<VkDynamicState> dynamicStates = {
+                // DISABLE depth testing for debugging
+                VkPipelineDepthStencilStateCreateInfo depthStencil{};
+                depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+                depthStencil.depthTestEnable = VK_FALSE;
+                depthStencil.depthWriteEnable = VK_FALSE;
+
+                // Dynamic state
+                VkDynamicState dynamicStates[] = {
                     VK_DYNAMIC_STATE_VIEWPORT,
                     VK_DYNAMIC_STATE_SCISSOR
                 };
 
-                pipelineState.dynamicState = {};
-                pipelineState.dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-                pipelineState.dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-                pipelineState.dynamicState.pDynamicStates = dynamicStates.data();
+                VkPipelineDynamicStateCreateInfo dynamicState{};
+                dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+                dynamicState.dynamicStateCount = 2;
+                dynamicState.pDynamicStates = dynamicStates;
 
-                // ===== 10. CREATE GRAPHICS PIPELINE =====
-                Logger::get().info("Creating graphics pipeline...");
+                // Create the pipeline
+                VkGraphicsPipelineCreateInfo pipelineInfo{};
+                pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+
                 if (vkDevice->capabilities().dynamicRendering) {
-                    // Dynamic rendering pipeline
+                    // Dynamic rendering
                     VkPipelineRenderingCreateInfoKHR renderingInfo{};
                     renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
                     renderingInfo.colorAttachmentCount = 1;
                     VkFormat colorFormat = vkSwapchain->imageFormat();
                     renderingInfo.pColorAttachmentFormats = &colorFormat;
-                    renderingInfo.depthAttachmentFormat = m_depthFormat;
 
-                    VkGraphicsPipelineCreateInfo pipelineInfo{};
-                    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
                     pipelineInfo.pNext = &renderingInfo;
-                    pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-                    pipelineInfo.pStages = shaderStages.data();
-                    pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
-                    pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
-                    pipelineInfo.pViewportState = &pipelineState.viewportState;
-                    pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
-                    pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
-                    pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
-                    pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
-                    pipelineInfo.pDynamicState = &pipelineState.dynamicState;
-                    pipelineInfo.layout = m_pipelineLayout->handle();
-                    pipelineInfo.renderPass = VK_NULL_HANDLE; // Not used with dynamic rendering
-                    pipelineInfo.subpass = 0;
-                    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
-
-                    VkPipeline graphicsPipeline;
-                    VkResult result = vkCreateGraphicsPipelines(
-                        device,
-                        VK_NULL_HANDLE,
-                        1,
-                        &pipelineInfo,
-                        nullptr,
-                        &graphicsPipeline
-                    );
-
-                    if (result != VK_SUCCESS) {
-                        Logger::get().error("Failed to create graphics pipeline with dynamic rendering: {}", static_cast<int>(result));
-                        return false;
-                    }
-
-                    m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
-                    Logger::get().info("Created dynamic rendering pipeline successfully");
+                    Logger::get().info("Using dynamic rendering");
                 }
                 else {
-                    // Traditional render pass pipeline
-                    VkGraphicsPipelineCreateInfo pipelineInfo{};
-                    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-                    pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-                    pipelineInfo.pStages = shaderStages.data();
-                    pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
-                    pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
-                    pipelineInfo.pViewportState = &pipelineState.viewportState;
-                    pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
-                    pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
-                    pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
-                    pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
-                    pipelineInfo.pDynamicState = &pipelineState.dynamicState;
-                    pipelineInfo.layout = m_pipelineLayout->handle();
+                    // Traditional render pass
                     pipelineInfo.renderPass = rp->handle();
                     pipelineInfo.subpass = 0;
-                    pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
-
-                    VkPipeline graphicsPipeline;
-                    VkResult result = vkCreateGraphicsPipelines(
-                        device,
-                        VK_NULL_HANDLE,
-                        1,
-                        &pipelineInfo,
-                        nullptr,
-                        &graphicsPipeline
-                    );
-
-                    if (result != VK_SUCCESS) {
-                        Logger::get().error("Failed to create graphics pipeline with render pass: {}", static_cast<int>(result));
-                        return false;
-                    }
-
-                    m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
-                    Logger::get().info("Created render pass pipeline successfully");
+                    Logger::get().info("Using traditional render pass");
                 }
 
+                pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+                pipelineInfo.pStages = shaderStages.data();
+                pipelineInfo.pVertexInputState = &vertexInputInfo;
+                pipelineInfo.pInputAssemblyState = &inputAssembly;
+                pipelineInfo.pViewportState = &viewportState;
+                pipelineInfo.pRasterizationState = &rasterizer;
+                pipelineInfo.pMultisampleState = &multisampling;
+                pipelineInfo.pDepthStencilState = &depthStencil;
+                pipelineInfo.pColorBlendState = &colorBlending;
+                pipelineInfo.pDynamicState = &dynamicState;
+                pipelineInfo.layout = pipelineLayout;
+
+                VkPipeline graphicsPipeline;
+                VkResult result = vkCreateGraphicsPipelines(
+                    device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline);
+
+                if (result != VK_SUCCESS) {
+                    Logger::get().error("Failed to create graphics pipeline: {}", static_cast<int>(result));
+                    return false;
+                }
+
+                m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
+
+                Logger::get().info("=== BASIC GRAPHICS PIPELINE CREATED SUCCESSFULLY ===");
                 return true;
+
             }
             catch (const std::exception& e) {
                 Logger::get().error("Exception in createGraphicsPipeline: {}", e.what());
@@ -8619,49 +9222,6 @@ private:
 
         ShaderReflection m_combinedReflection;
 
-
-        void logAllDescriptorInfo() {
-            Logger::get().info("==== DESCRIPTOR SYSTEM DIAGNOSTIC ====");
-
-            // Log all resource bindings
-            Logger::get().info("Resource Bindings ({})", m_resourceBindings.size());
-            for (size_t i = 0; i < m_resourceBindings.size(); i++) {
-                const auto& binding = m_resourceBindings[i];
-                Logger::get().info("[{}] Set: {}, Binding: {}, Type: {}, Name: {}, Stages: 0x{:X}",
-                    i, binding.set, binding.binding, getDescriptorTypeName(binding.descriptorType), binding.name, binding.stageFlags);
-            }
-
-            // Log UBOs
-            Logger::get().info("Uniform Buffers ({})",  m_uniformBuffers.size());
-            for (const auto& ubo : m_uniformBuffers) {
-                Logger::get().info("UBO: {}, Set: {}, Binding: {}, Size: {}",
-                    ubo.name, ubo.set, ubo.binding, ubo.size);
-            }
-
-            // Log descriptor pool
-            if (m_descriptorPool) {
-                Logger::get().info("Descriptor Pool created: Yes");
-            }
-            else {
-                Logger::get().error("Descriptor Pool created: No");
-            }
-
-            // Log descriptor set layouts
-            Logger::get().info("Descriptor Set Layouts: {}", m_descriptorSetLayouts.size());
-            for (size_t i = 0; i < m_descriptorSetLayouts.size(); i++) {
-                Logger::get().info("Layout {}: {}", i,
-                    m_descriptorSetLayouts[i] ? "Valid" : "NULL");
-            }
-
-            // Log descriptor sets
-            Logger::get().info("Descriptor Sets: {}", m_descriptorSets.size());
-            for (size_t i = 0; i < m_descriptorSets.size(); i++) {
-                Logger::get().info("Set {}: {}", i,
-                    m_descriptorSets[i] ? "Valid" : "NULL");
-            }
-
-            Logger::get().info("===================================");
-        }
 
         // Helper method to load shader modules
         VkShaderModule loadShader(const std::string& filename) {
@@ -9211,8 +9771,30 @@ namespace tremor::gfx {
             return;
         }
 
+        Logger::get().info("=== STARTING OCTREE CULLING ===");
+
+        // DEBUG: Check if octree has any objects at all
+        auto allObjects = octree.getAllObjects();
+        Logger::get().info("Octree contains {} total objects before culling", allObjects.size());
+
+        if (allObjects.empty()) {
+            Logger::get().error("OCTREE IS EMPTY! Objects were not inserted properly!");
+            return;
+        }
+
+        // DEBUG: Log some objects from octree
+        for (size_t i = 0; i < std::min(size_t(5), allObjects.size()); i++) {
+            const auto& obj = allObjects[i];
+            AABBF bounds = obj.bounds.toFloat();
+            Logger::get().info("Octree object {}: bounds=({:.2f},{:.2f},{:.2f}) to ({:.2f},{:.2f},{:.2f}), flags={}",
+                i, bounds.min.x, bounds.min.y, bounds.min.z,
+                bounds.max.x, bounds.max.y, bounds.max.z, obj.flags);
+        }
+
         try {
+            m_visibleObjects.clear(); // Make sure this is clear
             processOctreeNode(root, frustum);
+            Logger::get().info("Culling completed, found {} visible objects", m_visibleObjects.size());
         }
         catch (const std::exception& e) {
             Logger::get().error("Exception in cullOctree: {}", e.what());
@@ -9226,34 +9808,69 @@ namespace tremor::gfx {
             // Get node bounds and test against frustum
             AABBF nodeBoundsF = node->getBounds().toFloat();
 
-            // Simple frustum test - in a full implementation you'd want a more robust test
-            bool intersects = frustum.containsAABB(nodeBoundsF.min, nodeBoundsF.max);
+            //Logger::get().info("Processing octree node: bounds=({:.2f},{:.2f},{:.2f}) to ({:.2f},{:.2f},{:.2f}), isLeaf={}",
+            //    nodeBoundsF.min.x, nodeBoundsF.min.y, nodeBoundsF.min.z,
+            //    nodeBoundsF.max.x, nodeBoundsF.max.y, nodeBoundsF.max.z, node->isLeaf());
+
+            // DEBUG: Try a more lenient frustum test first - just check if bounds are reasonable
+            bool boundsReasonable = (nodeBoundsF.min.x < 1000 && nodeBoundsF.max.x > -1000 &&
+                nodeBoundsF.min.y < 1000 && nodeBoundsF.max.y > -1000 &&
+                nodeBoundsF.min.z < 1000 && nodeBoundsF.max.z > -1000);
+
+            if (!boundsReasonable) {
+                Logger::get().warning("Node bounds seem unreasonable, skipping");
+                return;
+            }
+
+            // TEMPORARILY DISABLE FRUSTUM CULLING FOR DEBUGGING
+            bool intersects = true; // frustum.containsAABB(nodeBoundsF.min, nodeBoundsF.max);
+            //Logger::get().info("Frustum test result: {}", intersects ? "PASS" : "FAIL");
 
             if (!intersects) {
+                Logger::get().info("Node rejected by frustum culling");
                 return; // Skip this node and all children
             }
 
             // If this is a leaf node, process objects
             if (node->isLeaf()) {
                 const auto& objects = node->getObjects();
+                //Logger::get().info("Leaf node contains {} objects", objects.size());
 
-                for (const auto& obj : objects) {
-                    // Additional per-object tests
-                    if ((obj.flags & 1) == 0) continue; // Check visibility flag
+                for (size_t i = 0; i < objects.size(); i++) {
+                    const auto& obj = objects[i];
 
-                    // Convert bounds to world space and test again
+                    // Check visibility flag
+                    if ((obj.flags & 1) == 0) {
+                        Logger::get().info("Object {} rejected: visibility flag is 0", i);
+                        continue;
+                    }
+
+                    // Convert bounds to world space and test again (DISABLED FOR NOW)
                     AABBF objBounds = obj.bounds.toFloat();
-                    bool visible = frustum.containsAABB(objBounds.min, objBounds.max);
+                    bool visible = true; // frustum.containsAABB(objBounds.min, objBounds.max);
+
+                    //Logger::get().info("Object {}: bounds=({:.2f},{:.2f},{:.2f}) to ({:.2f},{:.2f},{:.2f}), visible={}",
+                    //    i, objBounds.min.x, objBounds.min.y, objBounds.min.z,
+                    //    objBounds.max.x, objBounds.max.y, objBounds.max.z, visible);
 
                     if (visible) {
                         m_visibleObjects.push_back(obj);
+                        //Logger::get().info("Added object {} to visible list (total: {})", i, m_visibleObjects.size());
                     }
                 }
             }
             else {
+                Logger::get().info("Processing {} children of non-leaf node", 8);
                 // Recursively process child nodes
                 for (int i = 0; i < 8; i++) {
-                    processOctreeNode(node->getChild(i), frustum);
+                    const auto* child = node->getChild(i);
+                    if (child) {
+                        //Logger::get().info("Processing child {}", i);
+                        processOctreeNode(child, frustum);
+                    }
+                    else {
+                        Logger::get().info("Child {} is null", i);
+                    }
                 }
             }
         }
@@ -9309,9 +9926,13 @@ namespace tremor::gfx {
         }
     }
 
+    // In ClusteredRenderer::createShaderResources(), restore the full pipeline creation:
+
     bool ClusteredRenderer::createShaderResources() {
+        //return createDebugPipeline();
+        
         try {
-            // Load enhanced shaders
+            // Load shaders with CORRECTED UBO layout
             m_taskShader = ShaderModule::compileFromFile(m_device, "shaders/diag.task");
             m_meshShader = ShaderModule::compileFromFile(m_device, "shaders/diag.mesh");
             m_fragmentShader = ShaderModule::compileFromFile(m_device, "shaders/diag.frag");
@@ -9320,15 +9941,16 @@ namespace tremor::gfx {
                 Logger::get().error("Failed to compile enhanced cluster shaders");
                 return false;
             }
-            else {
-                Logger::get().info("ALL CLUSTER SHADERS COMPILED SUCCESSFULLY YOU FUCK");
-            }
+
+            Logger::get().info("All cluster shaders compiled successfully");
 
             // Extract and combine reflection data
             ShaderReflection combinedReflection;
             combinedReflection.merge(*m_taskShader->getReflection());
             combinedReflection.merge(*m_meshShader->getReflection());
             combinedReflection.merge(*m_fragmentShader->getReflection());
+
+            debugShaderReflection();
 
             // Create descriptor set layout
             m_descriptorSetLayout = combinedReflection.createDescriptorSetLayout(m_device, 0);
@@ -9338,11 +9960,29 @@ namespace tremor::gfx {
             }
 
             // Create pipeline layout
-            m_pipelineLayout = combinedReflection.createPipelineLayout(m_device);
-            if (!m_pipelineLayout) {
-                Logger::get().error("Failed to create pipeline layout");
+            //m_pipelineLayout = combinedReflection.createPipelineLayout(m_device);
+            //if (!m_pipelineLayout) {
+            //    Logger::get().error("Failed to create pipeline layout");
+            //    return false;
+            //} //FIXME: REIMPLEMENT
+
+            std::vector<VkDescriptorSetLayout> layouts = { m_descriptorSetLayout->handle() };
+
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            pipelineLayoutInfo.setLayoutCount = 1;
+            pipelineLayoutInfo.pSetLayouts = layouts.data();
+
+            VkPipelineLayout pipelineLayout;
+            if (vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
                 return false;
             }
+
+            m_pipelineLayout = std::make_unique<PipelineLayoutResource>(m_device, pipelineLayout);
+			if (!m_pipelineLayout) {
+				Logger::get().error("Failed to create pipeline layout");
+				return false;
+			}
 
             // Create descriptor pool and allocate sets
             m_descriptorPool = combinedReflection.createDescriptorPool(m_device);
@@ -9369,6 +10009,8 @@ namespace tremor::gfx {
             // Update descriptor set with buffer bindings
             updateDescriptorSet();
 
+            
+
             // Create graphics pipeline
             if (!createGraphicsPipeline()) {
                 Logger::get().error("Failed to create graphics pipeline");
@@ -9382,6 +10024,176 @@ namespace tremor::gfx {
             Logger::get().error("Exception in createShaderResources: {}", e.what());
             return false;
         }
+        
+    }
+
+    bool ClusteredRenderer::createDebugPipeline() {
+        try {
+            Logger::get().info("Creating debug mesh shader pipeline...");
+
+            // Load debug shaders (no descriptor bindings)
+            auto taskShader = ShaderModule::compileFromFile(m_device, "shaders/debug.task");
+            auto meshShader = ShaderModule::compileFromFile(m_device, "shaders/debug.mesh");
+            auto fragShader = ShaderModule::compileFromFile(m_device, "shaders/debug.frag");
+
+            if (!taskShader || !meshShader || !fragShader) {
+                Logger::get().error("Failed to compile debug shaders");
+                return false;
+            }
+
+            // Create empty pipeline layout (no descriptors)
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            pipelineLayoutInfo.setLayoutCount = 0;
+            pipelineLayoutInfo.pushConstantRangeCount = 0;
+
+            VkPipelineLayout pipelineLayout;
+            if (vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+                Logger::get().error("Failed to create debug pipeline layout");
+                return false;
+            }
+
+            m_pipelineLayout = std::make_unique<PipelineLayoutResource>(m_device, pipelineLayout);
+
+            // Create shader stages
+            std::vector<VkPipelineShaderStageCreateInfo> shaderStages = {
+                taskShader->createShaderStageInfo(),
+                meshShader->createShaderStageInfo(),
+                fragShader->createShaderStageInfo()
+            };
+
+            // Pipeline state
+            VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+            vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+            VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+            inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+            VkPipelineViewportStateCreateInfo viewportState{};
+            viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            viewportState.viewportCount = 1;
+            viewportState.scissorCount = 1;
+
+            VkPipelineRasterizationStateCreateInfo rasterizer{};
+            rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            rasterizer.depthClampEnable = VK_FALSE;
+            rasterizer.rasterizerDiscardEnable = VK_FALSE;
+            rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+            rasterizer.lineWidth = 1.0f;
+            rasterizer.cullMode = VK_CULL_MODE_NONE;
+            rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+            rasterizer.depthBiasEnable = VK_FALSE;
+
+            VkPipelineMultisampleStateCreateInfo multisampling{};
+            multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            multisampling.sampleShadingEnable = VK_FALSE;
+            multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+            VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+            colorBlendAttachment.colorWriteMask =
+                VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            colorBlendAttachment.blendEnable = VK_FALSE;
+
+            VkPipelineColorBlendStateCreateInfo colorBlending{};
+            colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            colorBlending.logicOpEnable = VK_FALSE;
+            colorBlending.attachmentCount = 1;
+            colorBlending.pAttachments = &colorBlendAttachment;
+
+            VkPipelineDepthStencilStateCreateInfo depthStencil{};
+            depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            depthStencil.depthTestEnable = VK_FALSE;
+            depthStencil.depthWriteEnable = VK_FALSE;
+
+            VkDynamicState dynamicStates[] = {
+                VK_DYNAMIC_STATE_VIEWPORT,
+                VK_DYNAMIC_STATE_SCISSOR
+            };
+
+            VkPipelineDynamicStateCreateInfo dynamicState{};
+            dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            dynamicState.dynamicStateCount = 2;
+            dynamicState.pDynamicStates = dynamicStates;
+
+            // Dynamic rendering setup
+            VkPipelineRenderingCreateInfoKHR renderingInfo{};
+            renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+            renderingInfo.colorAttachmentCount = 1;
+            renderingInfo.pColorAttachmentFormats = &m_colorFormat;
+
+            VkGraphicsPipelineCreateInfo pipelineInfo{};
+            pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            pipelineInfo.pNext = &renderingInfo;
+            pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+            pipelineInfo.pStages = shaderStages.data();
+            pipelineInfo.pVertexInputState = &vertexInputInfo;
+            pipelineInfo.pInputAssemblyState = &inputAssembly;
+            pipelineInfo.pViewportState = &viewportState;
+            pipelineInfo.pRasterizationState = &rasterizer;
+            pipelineInfo.pMultisampleState = &multisampling;
+            pipelineInfo.pDepthStencilState = &depthStencil;
+            pipelineInfo.pColorBlendState = &colorBlending;
+            pipelineInfo.pDynamicState = &dynamicState;
+            pipelineInfo.layout = pipelineLayout;
+
+            VkPipeline pipeline;
+            VkResult result = vkCreateGraphicsPipelines(
+                m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
+
+            if (result != VK_SUCCESS) {
+                Logger::get().error("Failed to create debug pipeline: {}", static_cast<int>(result));
+                return false;
+            }
+
+            m_pipeline = std::make_unique<PipelineResource>(m_device, pipeline);
+            Logger::get().info("Debug pipeline created successfully");
+
+            return true;
+        }
+        catch (const std::exception& e) {
+            Logger::get().error("Exception in createDebugPipeline: {}", e.what());
+            return false;
+        }
+    }
+
+    void ClusteredRenderer::renderDebug(VkCommandBuffer cmdBuffer, Camera* camera) {
+        Logger::get().info("=== DEBUG RENDERER START ===");
+
+        if (!m_pipeline) {
+            Logger::get().error("Debug pipeline is NULL!");
+            return;
+        }
+
+        // Bind pipeline
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline->handle());
+
+        // Set viewport
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(camera->extent.width);
+        viewport.height = static_cast<float>(camera->extent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
+
+        VkRect2D scissor{};
+        scissor.offset = { 0, 0 };
+        scissor.extent = camera->extent;
+        vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
+
+        Logger::get().info("Viewport: {}x{}, Scissor: {}x{}",
+            camera->extent.width, camera->extent.height,
+            scissor.extent.width, scissor.extent.height);
+
+        Logger::get().info("Drawing debug fullscreen triangle");
+
+        // Draw - no descriptor sets needed for debug
+        vkCmdDrawMeshTasksEXT(cmdBuffer, 1, 0, 0);
+
+        Logger::get().info("=== DEBUG RENDER COMPLETE ===");
     }
 
     bool ClusteredRenderer::createGraphicsPipeline() {
@@ -9392,6 +10204,21 @@ namespace tremor::gfx {
                 m_meshShader->createShaderStageInfo(),
                 m_fragmentShader->createShaderStageInfo()
             };
+
+            // CRITICAL: Mesh shader pipelines need NULL vertex input state
+            VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+            vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            vertexInputInfo.vertexBindingDescriptionCount = 0;
+            vertexInputInfo.pVertexBindingDescriptions = nullptr;
+            vertexInputInfo.vertexAttributeDescriptionCount = 0;
+            vertexInputInfo.pVertexAttributeDescriptions = nullptr;
+
+            // Input assembly (not used by mesh shaders but required)
+            VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+            inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            inputAssembly.primitiveRestartEnable = VK_FALSE;
+
 
             // Pipeline state setup
             VkPipelineViewportStateCreateInfo viewportState{};
@@ -9405,7 +10232,7 @@ namespace tremor::gfx {
             rasterizer.rasterizerDiscardEnable = VK_FALSE;
             rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
             rasterizer.lineWidth = 1.0f;
-            rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+            rasterizer.cullMode = VK_CULL_MODE_NONE;
             rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
             rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -9427,9 +10254,9 @@ namespace tremor::gfx {
 
             VkPipelineDepthStencilStateCreateInfo depthStencil{};
             depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-            depthStencil.depthTestEnable = VK_TRUE;
-            depthStencil.depthWriteEnable = VK_TRUE;
-            depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER; // Reverse depth
+            depthStencil.depthTestEnable = VK_FALSE;
+            depthStencil.depthWriteEnable = VK_FALSE;
+            depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS; // Reverse depth
             depthStencil.depthBoundsTestEnable = VK_FALSE;
             depthStencil.stencilTestEnable = VK_FALSE;
 
@@ -9450,11 +10277,21 @@ namespace tremor::gfx {
             renderingInfo.pColorAttachmentFormats = &m_colorFormat;
             renderingInfo.depthAttachmentFormat = m_depthFormat;
 
+            if (m_pipelineLayout) {
+				Logger::get().info("Pipeline layout is valid");
+            }
+            else {
+                Logger::get().error("Pipeline layout is null!!!");
+                return false;
+            }
+
             VkGraphicsPipelineCreateInfo pipelineInfo{};
             pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
             pipelineInfo.pNext = &renderingInfo;
             pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
             pipelineInfo.pStages = shaderStages.data();
+            pipelineInfo.pVertexInputState = &vertexInputInfo;     // IMPORTANT: Include this even if empty
+            pipelineInfo.pInputAssemblyState = &inputAssembly;     // IMPORTANT: Include this too
             pipelineInfo.pViewportState = &viewportState;
             pipelineInfo.pRasterizationState = &rasterizer;
             pipelineInfo.pMultisampleState = &multisampling;
@@ -9493,16 +10330,25 @@ namespace tremor::gfx {
         if (!m_lightBuffer) { Logger::get().error("Light buffer is null!"); return; }
         if (!m_indexBuffer) { Logger::get().error("Index buffer is null!"); return; }
 
+        Logger::get().info("Checking texture bindings:");
+        Logger::get().info("  m_defaultAlbedoTexture: {}", m_defaultAlbedoTexture ? "Valid" : "NULL");
+        Logger::get().info("  m_defaultAlbedoView: {}", m_defaultAlbedoView ? "Valid" : "NULL");
+        Logger::get().info("  m_defaultNormalTexture: {}", m_defaultNormalTexture ? "Valid" : "NULL");
+        Logger::get().info("  m_defaultNormalView: {}", m_defaultNormalView ? "Valid" : "NULL");
+        Logger::get().info("  m_defaultSampler: {}", m_defaultSampler ? "Valid" : "NULL");
+
         Logger::get().info("All buffers valid, proceeding with descriptor update...");
 
         // Create descriptor writes with inline buffer/image info (no separate vectors!)
         std::vector<VkWriteDescriptorSet> descriptorWrites;
 
+        Logger::get().info("Uniform buffer size: {}", m_uniformBuffer->getSize());
+        
         // Binding 0: Enhanced UBO
         VkDescriptorBufferInfo uboInfo{
             m_uniformBuffer->getBuffer(),
             0,
-            sizeof(EnhancedClusterUBO)
+			m_uniformBuffer->getSize()
         };
 
         descriptorWrites.push_back({
@@ -9516,11 +10362,14 @@ namespace tremor::gfx {
             nullptr
             });
 
+        Logger::get().info("Cluster buffer size: {}", m_clusterBuffer->getSize());
+
+
         // Binding 1: Cluster Buffer
         VkDescriptorBufferInfo clusterInfo{
             m_clusterBuffer->getBuffer(),
             0,
-            VK_WHOLE_SIZE
+			m_clusterBuffer->getSize()
         };
 
         descriptorWrites.push_back({
@@ -9534,11 +10383,14 @@ namespace tremor::gfx {
             nullptr
             });
 
+        Logger::get().info("Object buffer size: {}", m_objectBuffer->getSize());
+
+
         // Binding 2: Object Buffer
         VkDescriptorBufferInfo objectInfo{
             m_objectBuffer->getBuffer(),
             0,
-            VK_WHOLE_SIZE
+			m_objectBuffer->getSize()
         };
 
         descriptorWrites.push_back({
@@ -9552,11 +10404,13 @@ namespace tremor::gfx {
             nullptr
             });
 
+        Logger::get().info("Light buffer size: {}", m_lightBuffer->getSize());
+
         // Binding 3: Light Buffer
         VkDescriptorBufferInfo lightInfo{
             m_lightBuffer->getBuffer(),
             0,
-            VK_WHOLE_SIZE
+			m_lightBuffer->getSize()
         };
 
         descriptorWrites.push_back({
@@ -9570,11 +10424,13 @@ namespace tremor::gfx {
             nullptr
             });
 
+        Logger::get().info("Index buffer size: {}", m_indexBuffer->getSize());
+
         // Binding 4: Index Buffer
         VkDescriptorBufferInfo indexInfo{
             m_indexBuffer->getBuffer(),
             0,
-            VK_WHOLE_SIZE
+			m_indexBuffer->getSize()
         };
 
         descriptorWrites.push_back({
@@ -9588,11 +10444,13 @@ namespace tremor::gfx {
             nullptr
             });
 
+        Logger::get().info("Mesh info buffer size: {}", m_meshInfoBuffer->getSize());
+
         // Binding 5: Mesh Info Buffer
         VkDescriptorBufferInfo meshInfoInfo{
             m_meshInfoBuffer->getBuffer(),
             0,
-            VK_WHOLE_SIZE
+			m_meshInfoBuffer->getSize()
         };
 
         descriptorWrites.push_back({
@@ -9606,11 +10464,14 @@ namespace tremor::gfx {
             nullptr
             });
 
+        Logger::get().info("Vertex buffer size: {}", m_vertexBuffer->getSize());
+
+
         // Binding 6: Vertex Buffer
         VkDescriptorBufferInfo vertexInfo{
             m_vertexBuffer->getBuffer(),
             0,
-            VK_WHOLE_SIZE
+            m_vertexBuffer->getSize()
         };
 
         descriptorWrites.push_back({
@@ -9624,11 +10485,13 @@ namespace tremor::gfx {
             nullptr
             });
 
+        Logger::get().info("Mesh index buffer size: {}", m_meshIndexBuffer->getSize());
+
         // Binding 7: Mesh Index Buffer
         VkDescriptorBufferInfo meshIndexInfo{
             m_meshIndexBuffer->getBuffer(),
             0,
-            VK_WHOLE_SIZE
+			m_meshIndexBuffer->getSize()
         };
 
         descriptorWrites.push_back({
@@ -9642,11 +10505,14 @@ namespace tremor::gfx {
             nullptr
             });
 
+        Logger::get().info("Material buffer size: {}", m_materialBuffer->getSize());
+
+
         // Binding 8: Material Buffer
         VkDescriptorBufferInfo materialInfo{
             m_materialBuffer->getBuffer(),
             0,
-            VK_WHOLE_SIZE
+			m_materialBuffer->getSize()
         };
 
         descriptorWrites.push_back({
@@ -9704,6 +10570,30 @@ namespace tremor::gfx {
                 });
         }
 
+        Logger::get().info("=== DESCRIPTOR UPDATE DEBUG ===");
+
+        // Validate each buffer before binding
+        std::vector<std::pair<std::string, VkBuffer>> buffers = {
+            {"UBO", m_uniformBuffer->getBuffer()},
+            {"Cluster", m_clusterBuffer->getBuffer()},
+            {"Object", m_objectBuffer->getBuffer()},
+            {"Light", m_lightBuffer->getBuffer()},
+            {"Index", m_indexBuffer->getBuffer()},
+            {"MeshInfo", m_meshInfoBuffer->getBuffer()},
+            {"Vertex", m_vertexBuffer->getBuffer()},
+            {"MeshIndex", m_meshIndexBuffer->getBuffer()},
+            {"Material", m_materialBuffer->getBuffer()}
+        };
+
+        for (const auto& [name, buffer] : buffers) {
+            if (buffer == VK_NULL_HANDLE) {
+                Logger::get().error("{} buffer is NULL!", name);
+            }
+            else {
+                Logger::get().info("{} buffer: valid", name);
+            }
+        }
+
         Logger::get().info("About to update {} descriptor writes", descriptorWrites.size());
 
         // Now all the buffer/image info structs are in scope when we call this!
@@ -9712,4 +10602,261 @@ namespace tremor::gfx {
 
         Logger::get().info("Descriptor set updated successfully!");
     }
+
+    void ClusteredRenderer::createWorkingMeshShaderPipeline() {
+        Logger::get().info("=== CREATING WORKING MESH SHADER PIPELINE ===");
+
+        // First, verify mesh shaders are actually available
+        VkPhysicalDeviceFeatures2 features2{};
+        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+
+        VkPhysicalDeviceMeshShaderFeaturesEXT meshFeatures{};
+        meshFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+        features2.pNext = &meshFeatures;
+
+        vkGetPhysicalDeviceFeatures2(m_physicalDevice, &features2);
+
+        if (!meshFeatures.meshShader || !meshFeatures.taskShader) {
+            Logger::get().error("Mesh shaders not supported on this device!");
+            return;
+        }
+
+        // Your shader source code is fine
+        std::string taskSource = R"(
+#version 450
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 1) in;
+
+void main() {
+    EmitMeshTasksEXT(1, 1, 1);
+}
+)";
+
+        std::string meshSource = R"(
+#version 450
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 1) in;
+layout(triangles, max_vertices = 3, max_primitives = 1) out;
+
+void main() {
+    SetMeshOutputsEXT(3, 1);
+    
+    gl_MeshVerticesEXT[0].gl_Position = vec4(-0.5, -0.5, 0.5, 1.0);
+    gl_MeshVerticesEXT[1].gl_Position = vec4( 0.5, -0.5, 0.5, 1.0);
+    gl_MeshVerticesEXT[2].gl_Position = vec4( 0.0,  0.5, 0.5, 1.0);
+    
+    gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
+}
+)";
+
+        std::string fragSource = R"(
+#version 450
+
+layout(location = 0) out vec4 outColor;
+
+void main() {
+    outColor = vec4(1.0, 1.0, 0.0, 1.0); // Bright yellow
+}
+)";
+
+        auto taskShader = ShaderModule::compileFromSource(m_device, taskSource, ShaderType::Task, "working_task");
+        auto meshShader = ShaderModule::compileFromSource(m_device, meshSource, ShaderType::Mesh, "working_mesh");
+        auto fragShader = ShaderModule::compileFromSource(m_device, fragSource, ShaderType::Fragment, "working_frag");
+
+        if (!taskShader || !meshShader || !fragShader) {
+            Logger::get().error("Failed to compile working mesh shaders");
+            return;
+        }
+
+        // Empty pipeline layout
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.setLayoutCount = 0;
+        pipelineLayoutInfo.pSetLayouts = nullptr;
+        pipelineLayoutInfo.pushConstantRangeCount = 0;
+        pipelineLayoutInfo.pPushConstantRanges = nullptr;
+
+        VkPipelineLayout pipelineLayout;
+        if (vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+            Logger::get().error("Failed to create mesh shader pipeline layout");
+            return;
+        }
+
+        m_workingMeshPipelineLayout = std::make_unique<PipelineLayoutResource>(m_device, pipelineLayout);
+
+        // Create shader stages
+        std::vector<VkPipelineShaderStageCreateInfo> shaderStages = {
+            taskShader->createShaderStageInfo(),
+            meshShader->createShaderStageInfo(),
+            fragShader->createShaderStageInfo()
+        };
+
+        // CRITICAL: For mesh shader pipelines, these MUST be nullptr!
+        // Don't create empty structures - use nullptr
+        VkPipelineVertexInputStateCreateInfo* pVertexInputState = nullptr;
+        VkPipelineInputAssemblyStateCreateInfo* pInputAssemblyState = nullptr;
+
+        // Viewport state
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.scissorCount = 1;
+
+        // Rasterization state
+        VkPipelineRasterizationStateCreateInfo rasterizer{};
+        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer.depthClampEnable = VK_FALSE;
+        rasterizer.rasterizerDiscardEnable = VK_FALSE;
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.lineWidth = 1.0f;
+        rasterizer.cullMode = VK_CULL_MODE_NONE;
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterizer.depthBiasEnable = VK_FALSE;
+
+        // Multisample state
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.sampleShadingEnable = VK_FALSE;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        // Color blend state
+        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+        colorBlendAttachment.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachment.blendEnable = VK_FALSE;
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.logicOpEnable = VK_FALSE;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &colorBlendAttachment;
+
+        // Depth stencil state
+        VkPipelineDepthStencilStateCreateInfo depthStencil{};
+        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depthStencil.depthTestEnable = VK_TRUE;
+        depthStencil.depthWriteEnable = VK_TRUE;
+        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+        depthStencil.depthBoundsTestEnable = VK_FALSE;
+        depthStencil.stencilTestEnable = VK_FALSE;
+
+        // Dynamic state
+        VkDynamicState dynamicStates[] = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR
+        };
+
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = 2;
+        dynamicState.pDynamicStates = dynamicStates;
+
+        // Dynamic rendering setup
+        VkPipelineRenderingCreateInfoKHR renderingInfo{};
+        renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
+        renderingInfo.colorAttachmentCount = 1;
+        renderingInfo.pColorAttachmentFormats = &m_colorFormat;
+        renderingInfo.depthAttachmentFormat = m_depthFormat;
+
+        // Create the pipeline
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.pNext = &renderingInfo;
+        pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+        pipelineInfo.pStages = shaderStages.data();
+        pipelineInfo.pVertexInputState = pVertexInputState;     // MUST be nullptr!
+        pipelineInfo.pInputAssemblyState = pInputAssemblyState; // MUST be nullptr!
+        pipelineInfo.pTessellationState = nullptr;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pDepthStencilState = &depthStencil;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = pipelineLayout;
+        pipelineInfo.renderPass = VK_NULL_HANDLE;
+        pipelineInfo.subpass = 0;
+        pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
+        pipelineInfo.basePipelineIndex = -1;
+
+        VkPipeline pipeline;
+        VkResult result = vkCreateGraphicsPipelines(
+            m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
+
+        if (result != VK_SUCCESS) {
+            Logger::get().error("Failed to create working mesh shader pipeline: {}", static_cast<int>(result));
+
+            // More detailed error info
+            switch (result) {
+            case VK_ERROR_OUT_OF_HOST_MEMORY:
+                Logger::get().error("VK_ERROR_OUT_OF_HOST_MEMORY");
+                break;
+            case VK_ERROR_OUT_OF_DEVICE_MEMORY:
+                Logger::get().error("VK_ERROR_OUT_OF_DEVICE_MEMORY");
+                break;
+            case VK_ERROR_INVALID_SHADER_NV:
+                Logger::get().error("VK_ERROR_INVALID_SHADER_NV");
+                break;
+            default:
+                Logger::get().error("Unknown error: {}", static_cast<int>(result));
+            }
+            return;
+        }
+
+        m_workingMeshPipeline = std::make_unique<PipelineResource>(m_device, pipeline);
+        Logger::get().info("Working mesh shader pipeline created successfully");
+    }
+
+    void ClusteredRenderer::renderWorkingMeshTest(VkCommandBuffer cmdBuffer, Camera* camera) {
+        if (!m_workingMeshPipeline || !m_workingMeshPipelineLayout) {
+            Logger::get().error("Working mesh shader pipeline not initialized");
+            return;
+        }
+
+        Logger::get().info("=== RENDERING WORKING MESH SHADER TEST ===");
+
+        // Memory barrier to ensure previous operations complete
+        VkMemoryBarrier memBarrier{};
+        memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        memBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            cmdBuffer,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
+            0,
+            1, &memBarrier,
+            0, nullptr,
+            0, nullptr
+        );
+
+        // Bind the pipeline
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_workingMeshPipeline->handle());
+
+        // Set viewport
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(camera->extent.width);
+        viewport.height = static_cast<float>(camera->extent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
+
+        // Set scissor
+        VkRect2D scissor{};
+        scissor.offset = { 0, 0 };
+        scissor.extent = camera->extent;
+        vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
+
+        // Draw with mesh shaders
+        vkCmdDrawMeshTasksEXT(cmdBuffer, 1, 1, 1);
+
+        Logger::get().info("Working mesh shader draw complete");
+    }
+
 } // namespace tremor::gfx

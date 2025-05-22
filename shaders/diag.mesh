@@ -1,142 +1,170 @@
+// diag.mesh - Diagnostic mesh shader with buffer validation
 #version 460
 #extension GL_EXT_mesh_shader : require
 
-// Keep the same descriptor bindings
+// All buffer bindings
 layout(set = 0, binding = 0) uniform ClusterUBO {
     mat4 viewMatrix;
     mat4 projMatrix;
+    mat4 invViewMatrix;
+    mat4 invProjMatrix;
     vec4 cameraPos;
     uvec4 clusterDimensions;
     vec4 zPlanes;
+    vec4 screenSize;
     uint numLights;
     uint numObjects;
     uint numClusters;
-    uint padding;
+    uint frameNumber;
+    float time;
+    float deltaTime;
+    uint flags;
+} ubo;
+
+struct Cluster {
+    uint lightOffset;
+    uint lightCount;
+    uint objectOffset;
+    uint objectCount;
 };
 
 layout(set = 0, binding = 1) readonly buffer ClusterBuffer {
-    uint clusterData[];  // Simplified for testing
+    Cluster clusters[];
 };
 
 layout(set = 0, binding = 2) readonly buffer ObjectBuffer {
-    uint objectData[];  // Simplified for testing
+    uint objectData[];
 };
 
 layout(set = 0, binding = 3) readonly buffer LightBuffer {
-    uint lightData[];  // Simplified for testing
+    uint lightData[];
 };
 
 layout(set = 0, binding = 4) readonly buffer IndexBuffer {
     uint indices[];
 };
 
-// Simple mesh shader that outputs a single triangle
+layout(set = 0, binding = 5) readonly buffer MeshInfoBuffer {
+    uint meshInfoData[];
+};
+
+layout(set = 0, binding = 6) readonly buffer VertexBuffer {
+    float vertexData[];
+};
+
+layout(set = 0, binding = 7) readonly buffer MeshIndexBuffer {
+    uint meshIndices[];
+};
+
+layout(set = 0, binding = 8) readonly buffer MaterialBuffer {
+    uint materialData[];
+};
+
 layout(local_size_x = 1) in;
-layout(triangles, max_vertices = 3, max_primitives = 1) out;
+layout(triangles, max_vertices = 33, max_primitives = 11) out;  // 11 triangles for 11 resources
 
-// Output vertex attributes
-layout(location = 0) out vec3 outPosition[];
-layout(location = 1) out vec3 outNormal[];
-layout(location = 2) out vec4 outColor[];  // Add a color output
-
-// Buffer validity flags
-shared bool clusterBufferValid;
-shared bool objectBufferValid; 
-shared bool lightBufferValid;
-shared bool indexBufferValid;
-shared bool uboValid;
+layout(location = 0) out vec4 meshColor[];
+layout(location = 1) flat out uint bufferIndex[];
 
 void main() {
-    // We'll only use one thread for simplicity
-    if (gl_LocalInvocationIndex == 0) {
-        // Test UBO access - try to read values
-        uboValid = true;
-        if (projMatrix[0][0] == 0.0 && projMatrix[1][1] == 0.0) {
-            // Unlikely that both are zero in a valid projection matrix
-            uboValid = false;
-        }
+    // We'll create 11 triangles in a grid pattern
+    const uint NUM_BUFFERS = 11;
+    
+    SetMeshOutputsEXT(NUM_BUFFERS * 3, NUM_BUFFERS);
+    
+    // Test each buffer and assign colors
+    vec4 bufferColors[NUM_BUFFERS];
+    
+    // 0. UBO - Test by checking if values are non-zero
+    bufferColors[0] = (ubo.numClusters > 0) ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, 0.0, 1.0);
+    
+    // 1. ClusterBuffer - Check if we can read first cluster
+    bufferColors[1] = vec4(1.0, 0.0, 0.0, 1.0); // Red = missing
+    if (ubo.numClusters > 0) {
+        uint testVal = clusters[0].objectCount + clusters[0].lightCount;
+        bufferColors[1] = vec4(0.0, 1.0, 0.0, 1.0); // Green = valid
+    }
+    
+    // 2. ObjectBuffer - Try to read first element
+    bufferColors[2] = vec4(1.0, 0.0, 0.0, 1.0);
+    if (ubo.numObjects > 0) {
+        uint testVal = objectData[0];
+        bufferColors[2] = vec4(0.0, 1.0, 0.0, 1.0);
+    }
+    
+    // 3. LightBuffer
+    bufferColors[3] = vec4(1.0, 0.0, 0.0, 1.0);
+    if (ubo.numLights > 0) {
+        uint testVal = lightData[0];
+        bufferColors[3] = vec4(0.0, 1.0, 0.0, 1.0);
+    }
+    
+    // 4. IndexBuffer - Always try to read (should have cluster indices)
+    bufferColors[4] = vec4(1.0, 0.0, 0.0, 1.0);
+    {
+        uint testVal = indices[0];
+        bufferColors[4] = vec4(0.0, 1.0, 0.0, 1.0);
+    }
+    
+    // 5. MeshInfoBuffer
+    bufferColors[5] = vec4(1.0, 0.0, 0.0, 1.0);
+    {
+        uint testVal = meshInfoData[0];
+        bufferColors[5] = vec4(0.0, 1.0, 0.0, 1.0);
+    }
+    
+    // 6. VertexBuffer
+    bufferColors[6] = vec4(1.0, 0.0, 0.0, 1.0);
+    {
+        float testVal = vertexData[0];
+        bufferColors[6] = vec4(0.0, 1.0, 0.0, 1.0);
+    }
+    
+    // 7. MeshIndexBuffer
+    bufferColors[7] = vec4(1.0, 0.0, 0.0, 1.0);
+    {
+        uint testVal = meshIndices[0];
+        bufferColors[7] = vec4(0.0, 1.0, 0.0, 1.0);
+    }
+    
+    // 8. MaterialBuffer
+    bufferColors[8] = vec4(1.0, 0.0, 0.0, 1.0);
+    {
+        uint testVal = materialData[0];
+        bufferColors[8] = vec4(0.0, 1.0, 0.0, 1.0);
+    }
+    
+    // 9-10. Textures - shown as blue (can't test from mesh shader)
+    bufferColors[9] = vec4(0.0, 0.0, 1.0, 1.0);   // Albedo texture
+    bufferColors[10] = vec4(0.0, 0.0, 1.0, 1.0);  // Normal texture
+    
+    // Create triangles in a 4x3 grid
+    for (uint i = 0; i < NUM_BUFFERS; i++) {
+        uint row = i / 4;
+        uint col = i % 4;
         
-        // Test each buffer by trying to read from index 0
-        // These checks aren't perfect but should catch unbound buffers
+        float x = -0.8 + col * 0.4;
+        float y = 0.6 - row * 0.4;
+        float size = 0.15;
         
-        // Test cluster buffer
-        clusterBufferValid = true;
-        if (numClusters > 0) {
-            // Safe read - no exception handling needed
-            uint clusterTest = clusterData[0]; 
-        } else {
-            clusterBufferValid = false;
-        }
+        uint baseVertex = i * 3;
         
-        // Test object buffer
-        objectBufferValid = true;
-        if (numObjects > 0) {
-            uint objectTest = objectData[0]; 
-        } else {
-            objectBufferValid = false;
-        }
+        // Triangle vertices
+        gl_MeshVerticesEXT[baseVertex + 0].gl_Position = vec4(x - size, y - size, 0.0, 1.0);
+        gl_MeshVerticesEXT[baseVertex + 1].gl_Position = vec4(x + size, y - size, 0.0, 1.0);
+        gl_MeshVerticesEXT[baseVertex + 2].gl_Position = vec4(x, y + size, 0.0, 1.0);
         
-        // Test light buffer
-        lightBufferValid = true;
-        if (numLights > 0) {
-            uint lightTest = lightData[0]; 
-        } else {
-            lightBufferValid = false;
-        }
+        // Assign colors
+        meshColor[baseVertex + 0] = bufferColors[i];
+        meshColor[baseVertex + 1] = bufferColors[i];
+        meshColor[baseVertex + 2] = bufferColors[i];
         
-        // Test index buffer - this one might be empty
-        indexBufferValid = true;
-        uint indexTest = 0;
-        // FIXED: No try-catch, just use a conditional
-        if (numClusters > 0 && numObjects > 0) {
-            indexTest = indices[0]; 
-        } else {
-            indexBufferValid = false;
-        }
+        // Buffer index for fragment shader
+        bufferIndex[baseVertex + 0] = i;
+        bufferIndex[baseVertex + 1] = i;
+        bufferIndex[baseVertex + 2] = i;
         
-        // Output triangle vertices
-        SetMeshOutputsEXT(3, 1);
-        
-        // Create a simple triangle in NDC space
-        // Vertex 0 (bottom-left)
-        gl_MeshVerticesEXT[0].gl_Position = vec4(-0.5, -0.5, 0.0, 1.0);
-        outPosition[0] = vec3(-0.5, -0.5, 0.0);
-        outNormal[0] = vec3(0.0, 0.0, 1.0);
-        
-        // Vertex 1 (bottom-right)
-        gl_MeshVerticesEXT[1].gl_Position = vec4(0.5, -0.5, 0.0, 1.0);
-        outPosition[1] = vec3(0.5, -0.5, 0.0);
-        outNormal[1] = vec3(0.0, 0.0, 1.0);
-        
-        // Vertex 2 (top)
-        gl_MeshVerticesEXT[2].gl_Position = vec4(0.0, 0.5, 0.0, 1.0);
-        outPosition[2] = vec3(0.0, 0.5, 0.0);
-        outNormal[2] = vec3(0.0, 0.0, 1.0);
-        
-        // Determine color based on buffer validity
-        vec4 vertexColor;
-        if (uboValid && clusterBufferValid && objectBufferValid && lightBufferValid && indexBufferValid) {
-            // All buffers are valid - GREEN
-            vertexColor = vec4(0.0, 1.0, 0.0, 1.0);
-        } else {
-            // Some buffers are invalid - RED with indicators in other channels
-            float blue = 0.0;
-            // Encode which buffers are invalid in the blue channel
-            if (!uboValid) blue += 0.2;
-            if (!clusterBufferValid) blue += 0.4;
-            if (!objectBufferValid) blue += 0.1;
-            if (!lightBufferValid) blue += 0.05;
-            if (!indexBufferValid) blue += 0.025;
-            
-            vertexColor = vec4(1.0, 0.0, blue, 1.0);
-        }
-        
-        // Set same color for all vertices
-        outColor[0] = vertexColor;
-        outColor[1] = vertexColor;
-        outColor[2] = vertexColor;
-        
-        // Set single triangle
-        gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
+        // Triangle indices
+        gl_PrimitiveTriangleIndicesEXT[i] = uvec3(baseVertex, baseVertex + 1, baseVertex + 2);
     }
 }

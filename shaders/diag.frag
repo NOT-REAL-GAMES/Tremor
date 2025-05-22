@@ -1,23 +1,34 @@
+// diag.frag - Diagnostic fragment shader with labels
 #version 460
 
-// Input from mesh shader
-layout(location = 0) in vec3 inPosition;
-layout(location = 1) in vec3 inNormal;
-layout(location = 2) in vec4 inColor;
+layout(location = 0) in vec4 meshColor;
+layout(location = 1) flat in uint bufferIndex;
 
-// Output color
-layout(location = 0) out vec4 outColor;
+layout(location = 0) out vec4 fragColor;
+
+// Test texture bindings
+layout(set = 0, binding = 9) uniform sampler2D albedoTexture;
+layout(set = 0, binding = 10) uniform sampler2D normalTexture;
 
 void main() {
-    // Just output the color determined in the mesh shader
-    outColor = inColor;
+    vec4 color = meshColor;
     
-    // If you need to visualize which specific buffers are valid/invalid,
-    // you can add a debug grid pattern
-    float gridFactor = 0.9;
-    if (mod(gl_FragCoord.x, 20.0) < 1.0 || mod(gl_FragCoord.y, 20.0) < 1.0) {
-        gridFactor = 1.0;
+    // For texture triangles, test if we can sample
+    if (bufferIndex == 9) {
+        // Try to sample albedo texture
+        vec4 texColor = texture(albedoTexture, vec2(0.5, 0.5));
+        // If texture is valid, it should return non-zero
+        color = vec4(texColor.rgb, 1.0); 
+    } else if (bufferIndex == 10) {
+        // Try to sample normal texture
+        vec4 texColor = texture(normalTexture, vec2(0.5, 0.5));
+        color = vec4(texColor.rgb, 1.0); 
     }
     
-    outColor *= gridFactor;
+    // Add some shading to make triangles more visible
+    vec2 fragCoord = gl_FragCoord.xy;
+    float pattern = sin(fragCoord.x * 0.1) * sin(fragCoord.y * 0.1);
+    color.rgb *= 0.8 + 0.2 * pattern;
+    
+    fragColor = color;
 }

@@ -188,7 +188,6 @@ public:
     }
 
     ~VulkanResource() {
-        cleanup();
     }
 
     // Disable copying
@@ -242,7 +241,6 @@ private:
         if (m_handle != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
             destroy(m_device, m_handle);
         }
-        m_handle = VK_NULL_HANDLE;
     }
 
     static void destroy(VkDevice device, T handle);

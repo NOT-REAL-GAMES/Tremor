@@ -1,0 +1,84 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+// Enhanced structures
+struct Cluster {
+    uint lightOffset;
+    uint lightCount;
+    uint objectOffset;
+    uint objectCount;
+};
+
+struct EnhancedRenderableObject {
+    mat4 transform;
+    mat4 prevTransform;
+    uint meshID;
+    uint materialID;
+    uint instanceID;
+    uint flags;
+};
+
+// Enhanced UBO
+layout(set = 0, binding = 0) uniform EnhancedClusterUBO {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    mat4 invViewMatrix;
+    mat4 invProjMatrix;
+    vec4 cameraPos;
+    uvec4 clusterDimensions;
+    vec4 zPlanes;
+    vec4 screenSize;
+    uint numLights;
+    uint numObjects;
+    uint numClusters;
+    uint frameNumber;
+    float time;
+    float deltaTime;
+    uint flags;
+} ubo;
+
+layout(set = 0, binding = 1) readonly buffer ClusterBuffer {
+    Cluster clusters[];
+};
+
+layout(set = 0, binding = 2) readonly buffer ObjectBuffer {
+    EnhancedRenderableObject objects[];
+};
+
+// Task payload
+struct TaskPayload {
+    uint clusterIndex;
+    uint objectCount;
+    uint objectIndices[32];
+    uint lightCount;
+    uint lightIndices[16];
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+void main() {
+    uint clusterIndex = gl_WorkGroupID.x;
+    
+    if (gl_LocalInvocationIndex == 0) {
+        payload.clusterIndex = clusterIndex;
+        payload.objectCount = 0;
+        payload.lightCount = 0;
+        
+        // For testing: always emit something for the first few clusters
+        if (clusterIndex == 0) {
+            payload.objectCount = 1;
+            payload.objectIndices[0] = 0; // Use first object
+        }
+        
+        // In full implementation, you'd do frustum culling here
+        // For now, just emit mesh tasks for clusters with objects
+        if (payload.objectCount > 0) {
+            EmitMeshTasksEXT(payload.objectCount, 0, 0);
+        } else if (clusterIndex == 0) {
+            // Always emit at least one for testing
+            EmitMeshTasksEXT(1, 0, 0);
+        }
+    }
+}
