@@ -27,8 +27,12 @@ void main() {
     
     // Add some shading to make triangles more visible
     vec2 fragCoord = gl_FragCoord.xy;
-    float pattern = sin(fragCoord.x * 0.1) * sin(fragCoord.y * 0.1);
-    color.rgb *= 0.8 + 0.2 * pattern;
+    float gridFactor = 0.0;
+    if (mod(gl_FragCoord.x, 20.0) < 1.0 || mod(gl_FragCoord.y, 20.0) < 1.0) {
+        gridFactor = 1.0;
+    }
+    
+    color.rgb *= 1.0 - 0.2 * gridFactor;
     
     fragColor = color;
 }
