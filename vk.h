@@ -124,10 +124,10 @@ namespace tremor::gfx {
     const float PI = 3.14159265359f;
 
     struct MeshVertex {
-        glm::vec3 position;
-        glm::vec3 normal;
-        glm::vec2 texCoord;
-        glm::vec4 tangent; // w component stores handedness
+        alignas(16) glm::vec3 position;
+        alignas(16) glm::vec3 normal;
+        alignas(16) glm::vec2 texCoord;
+        alignas(16) glm::vec4 tangent; // w component stores handedness
 
         static std::vector<VkVertexInputAttributeDescription> getAttributeDescriptions() {
             std::vector<VkVertexInputAttributeDescription> attributes(4);
@@ -1952,29 +1952,16 @@ namespace tremor::gfx {
     void OctreeNode<T>::insert(const T& object, const AABBQ& objectBounds) {
         // Root-level entry logging and validation
         if (m_isRoot) {
-            Logger::get().info("Beginning insertion into octree: bounds=({},{},{}) to ({},{},{})",
+            Logger::get().info("ROOT: Inserting object with bounds=({},{},{}) to ({},{},{})",
                 objectBounds.min.x, objectBounds.min.y, objectBounds.min.z,
                 objectBounds.max.x, objectBounds.max.y, objectBounds.max.z);
-
-            if (m_isLeaf) {
-                Logger::get().info("Root node is still leaf! Splitting...");
-                split();
-            }
-
-            // Special world-bounds check at root level
-            if (!m_bounds.intersects(objectBounds)) {
-                Logger::get().error("Object completely outside world bounds - rejected!");
-                return;
-            }
-        }
-        else {
-            // Regular node entry logging
-            Logger::get().debug("Checking node at depth {} for insertion", m_depth);
         }
 
         // Check if the object's bounds intersect with this node
         if (!m_bounds.intersects(objectBounds)) {
-            Logger::get().warning("Object is outside this node's bounds");
+            if (m_isRoot) {
+                Logger::get().error("ROOT: Object outside world bounds - rejected!");
+            }
             return; // Object is outside this node's bounds
         }
 
@@ -1984,87 +1971,52 @@ namespace tremor::gfx {
             m_objectBounds.push_back(objectBounds);
 
             if (m_isRoot) {
-                Logger::get().info("Object inserted directly into root node ({} objects total)",
+                Logger::get().info("ROOT: Object inserted directly ({} objects total)",
                     m_objects.size());
-            }
-            else {
-                Logger::get().info("Object inserted successfully at depth {}", m_depth);
             }
             return;
         }
 
         // If we're a leaf but full, split the node
-        // Root can hold more objects before splitting if desired
         if (m_isLeaf) {
-            if (m_isRoot) {
-                Logger::get().info("Root node full ({} objects), splitting...", m_objects.size());
-            }
-            else {
-                Logger::get().debug("Node at depth {} full, splitting...", m_depth);
-            }
-
             // Don't split if we've reached max depth
             if (m_depth >= m_maxDepth) {
                 // Just add the object to this node even though it's over capacity
-                Logger::get().warning("Max depth {} reached, adding object to full node", m_depth);
+                Logger::get().info("Max depth {} reached, adding to full node (depth {})",
+                    m_maxDepth, m_depth);
                 m_objects.push_back(object);
                 m_objectBounds.push_back(objectBounds);
                 return;
             }
 
             split();
-
-            if (m_isRoot) {
-                Logger::get().info("Root node split complete, redistributing {} objects",
-                    m_objects.size() + 1); // +1 for current object
-            }
         }
 
-        // Determine which child(ren) the object belongs to and insert
-        int childIndex = getChildIndex(objectBounds);
+        // Now we're not a leaf anymore - try to place object in children
+        int bestChildIndex = getChildIndex(objectBounds);
 
-        if (childIndex != -1) {
-            // Object fits entirely in one child
-            if (m_children[childIndex]) {
-                Logger::get().debug("Object fits in child {}", childIndex);
-                m_children[childIndex]->insert(object, objectBounds);
+        if (bestChildIndex != -1) {
+            // Object fits entirely in one child - insert there
+            if (m_children[bestChildIndex]) {
+                Logger::get().info("Object fits in child {}, inserting...", bestChildIndex);
+                m_children[bestChildIndex]->insert(object, objectBounds);
             }
             else {
-                // This should never happen if split() worked correctly
-                Logger::get().error("Child node {} is null after split() in OctreeNode::insert", childIndex);
-
-                // Fallback: add to this node
+                Logger::get().error("Child {} is null after split!", bestChildIndex);
+                // Fallback: store in this node
                 m_objects.push_back(object);
                 m_objectBounds.push_back(objectBounds);
-                Logger::get().warning("Added to current node as fallback");
             }
         }
         else {
-            // Object spans multiple children
-            Logger::get().debug("Object spans multiple children, checking all intersecting nodes");
-            bool inserted = false;
-
-            for (int i = 0; i < 8; i++) {
-                if (m_children[i] && m_children[i]->m_bounds.intersects(objectBounds)) {
-                    m_children[i]->insert(object, objectBounds);
-                    inserted = true;
-                }
-            }
-
-            if (!inserted) {
-                // If the object wasn't inserted in any child (unusual but possible edge case)
-                Logger::get().warning("Object spans multiple children but wasn't inserted in any");
-
-                // Add to this node as fallback
-                m_objects.push_back(object);
-                m_objectBounds.push_back(objectBounds);
-                Logger::get().info("Added to current node as fallback");
-            }
+            // Object spans multiple children - store it in THIS node (don't duplicate!)
+            Logger::get().info("Object spans multiple children, storing in current node (depth {})", m_depth);
+            m_objects.push_back(object);
+            m_objectBounds.push_back(objectBounds);
         }
 
-        // Final confirmation at root level
         if (m_isRoot) {
-            Logger::get().info("Insertion complete, tree now has ~{} objects total",
+            Logger::get().info("ROOT: Insertion complete, total objects in tree: {}",
                 estimateTotalObjects());
         }
     }
@@ -2169,29 +2121,42 @@ namespace tremor::gfx {
             // Create child with new bounds
             AABBQ childBounds = AABBQ(min, max);
 
-            // Create the child node with proper constructor parameters
             m_children[i] = std::make_unique<OctreeNode<T>>(
                 childBounds,
-                m_depth + 1,  // Increment depth for child
-                m_maxDepth,   // Pass down max depth
-                m_maxObjects, // Pass down max objects per node
-                false         // NOT THE FUCKING ROOT NODE
+                m_depth + 1,
+                m_maxDepth,
+                m_maxObjects,
+                false
             );
         }
 
-        // Redistribute existing objects to children
-        for (size_t i = 0; i < m_objects.size(); i++) {
-            for (int j = 0; j < 8; j++) {
-                // Now safe to access m_children[j] because we initialized it
-                if (m_children[j]->m_bounds.intersects(m_objectBounds[i])) {
-                    m_children[j]->insert(m_objects[i], m_objectBounds[i]);
-                }
+        // Store objects temporarily
+        std::vector<T> tempObjects = std::move(m_objects);
+        std::vector<AABBQ> tempBounds = std::move(m_objectBounds);
+
+        // Clear current storage
+        m_objects.clear();
+        m_objectBounds.clear();
+
+        // Redistribute objects using the SAME logic as insert()
+        for (size_t i = 0; i < tempObjects.size(); i++) {
+            int bestChildIndex = getChildIndex(tempBounds[i]);
+
+            if (bestChildIndex != -1) {
+                // Object fits entirely in one child - insert there
+                m_children[bestChildIndex]->insert(tempObjects[i], tempBounds[i]);
+            }
+            else {
+                // Object spans multiple children - keep it in THIS node
+                m_objects.push_back(tempObjects[i]);
+                m_objectBounds.push_back(tempBounds[i]);
+
+                Logger::get().info("Object spans multiple children during split, keeping in parent (depth {})", m_depth);
             }
         }
 
-        // Clear objects from this node since they've been redistributed
-        m_objects.clear();
-        m_objectBounds.clear();
+        Logger::get().info("Split complete: {} objects redistributed, {} kept in parent",
+            tempObjects.size() - m_objects.size(), m_objects.size());
     }
 
     template<typename T>
@@ -2294,68 +2259,68 @@ namespace tremor::gfx {
 
     // Cluster grid dimensions (typically 16x16x24)
     struct ClusterConfig {
-        uint32_t xSlices;      // Horizontal slice count (e.g., 16)
-        uint32_t ySlices;      // Vertical slice count (e.g., 16)
-        uint32_t zSlices;      // Depth slice count (e.g., 24)
-        float nearPlane;       // Camera near clip distance
-        float farPlane;        // Camera far clip distance
-        bool logarithmicZ;     // Whether to use logarithmic Z distribution
+        alignas(4) uint32_t xSlices;      // Horizontal slice count (e.g., 16)
+        alignas(4) uint32_t ySlices;      // Vertical slice count (e.g., 16)
+        alignas(4) uint32_t zSlices;      // Depth slice count (e.g., 24)
+        alignas(4) float nearPlane;       // Camera near clip distance
+        alignas(4) float farPlane;        // Camera far clip distance
+        alignas(4) bool logarithmicZ;     // Whether to use logarithmic Z distribution
     };
 
     // Light data structure for cluster-based lighting
     struct ClusterLight {
         alignas(16) glm::vec3 position;   // World-space position
-        float radius;                     // Light radius/range
+        alignas(4) float radius;                     // Light radius/range
         alignas(16) glm::vec3 color;      // RGB color
-        float intensity;                  // Light intensity/brightness
-        int32_t type;                     // 0=point, 1=spot, 2=area, etc.
-        float spotAngle;                  // Cone angle for spotlights
-        float spotSoftness;               // Spot light edge softness
-        float padding;                    // For alignment
+        alignas(4) float intensity;                  // Light intensity/brightness
+        alignas(4) int32_t type;                     // 0=point, 1=spot, 2=area, etc.
+        alignas(4) float spotAngle;                  // Cone angle for spotlights
+        alignas(4) float spotSoftness;               // Spot light edge softness
+        alignas(4) float padding;                    // For alignment
     };
 
     // Mesh information for GPU access
     struct MeshInfo {
-        uint32_t vertexOffset;
-        uint32_t vertexCount;
-        uint32_t indexOffset;
-        uint32_t indexCount;
-        glm::vec3 boundsMin;
-        float padding1;
-        glm::vec3 boundsMax;
-        float padding2;
+        alignas(4) uint32_t vertexOffset;
+        alignas(4) uint32_t vertexCount;
+        alignas(4) uint32_t indexOffset;
+        alignas(4) uint32_t indexCount;
+        alignas(16) glm::vec3 boundsMin;
+        alignas(4) float padding1;
+        alignas(16) glm::vec3 boundsMax;
+        alignas(4) float padding2;
     };
 
     // Enhanced material structure
     struct PBRMaterial {
         alignas(16) glm::vec4 baseColor;
-        float metallic;
-        float roughness;
-        float normalScale;
-        float occlusionStrength;
+        alignas(4) float metallic;
+        alignas(4) float roughness;
+        alignas(4) float normalScale;
+        alignas(4) float occlusionStrength;
         alignas(16) glm::vec3 emissiveColor;
-        float emissiveFactor;
+        alignas(4) float emissiveFactor;
 
         // Texture indices (into a texture array or descriptor array)
-        int32_t albedoTexture;
-        int32_t normalTexture;
-        int32_t metallicRoughnessTexture;
-        int32_t occlusionTexture;
-        int32_t emissiveTexture;
-        float alphaCutoff;
-        uint32_t flags; // Alpha blend, double sided, etc.
-        float padding;
+        alignas(4) int32_t albedoTexture;
+        alignas(4) int32_t normalTexture;
+        alignas(4) int32_t metallicRoughnessTexture;
+        alignas(4) int32_t occlusionTexture;
+        alignas(4) int32_t emissiveTexture;
+        alignas(4) float alphaCutoff;
+        alignas(4) uint32_t flags; // Alpha blend, double sided, etc.
+        alignas(4) float padding;
     };
 
     // Enhanced renderable object
     struct RenderableObject {
-        glm::mat4 transform;
-        glm::mat4 prevTransform; // For motion vectors
-        uint32_t meshID;
-        uint32_t materialID;
-        uint32_t instanceID; // For instancing support
-        uint32_t flags; // Visibility, shadow casting, etc.
-        AABBQ bounds; // Quantized bounds for large worlds
+        alignas(16) glm::mat4 transform;
+        alignas(16) glm::mat4 prevTransform; // For motion vectors
+        alignas(4) uint32_t meshID;
+        alignas(4) uint32_t materialID;
+        alignas(4) uint32_t instanceID; // For instancing support
+        alignas(4) uint32_t flags; // Visibility, shadow casting, etc.
+        alignas(16) AABBQ bounds; // Quantized bounds for large worlds
     };
 
     class ClusteredRenderer {
@@ -2570,7 +2535,7 @@ namespace tremor::gfx {
         alignas(4) uint32_t frameNumber;
         alignas(4) float time;
         alignas(4) float deltaTime;
-        alignas(8) uint32_t flags; // Debug flags, etc.
+        alignas(4) uint32_t flags; // Debug flags, etc.
     };
 
     uint32_t ClusteredRenderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
@@ -2743,30 +2708,57 @@ namespace tremor::gfx {
     }
 
     void ClusteredRenderer::buildClusters(Camera* camera, const Octree<RenderableObject>& octree) {
-        if (!camera) return;
+        if (!camera) {
+            Logger::get().error("buildClusters: camera is NULL!");
+            return;
+        }
 
-        // Clear previous frame data
+        Logger::get().info("=== BUILD CLUSTERS DEBUG START ===");
+
+        // Clear previous data
         m_clusterLightIndices.clear();
         m_clusterObjectIndices.clear();
         m_visibleObjects.clear();
 
-        // Update camera
+        // Update camera and frustum
         m_camera = *camera;
         m_frustum = camera->getViewFrustum();
 
-        // Cull octree against frustum
+        Logger::get().info("Camera position: ({:.1f},{:.1f},{:.1f})",
+            camera->getLocalPosition().x, camera->getLocalPosition().y, camera->getLocalPosition().z);
+
+        // Cull octree
         cullOctree(octree, m_frustum);
+        Logger::get().info("After culling: {} visible objects", m_visibleObjects.size());
 
-        Logger::get().info("Culling found {} visible objects", m_visibleObjects.size());
+        if (m_visibleObjects.empty()) {
+            Logger::get().error("CRITICAL: No visible objects after culling!");
+            return;
+        }
 
-        // Assign objects and lights to clusters
+        // Log visible objects
+        for (size_t i = 0; i < std::min(size_t(5), m_visibleObjects.size()); i++) {
+            const auto& obj = m_visibleObjects[i];
+            AABBF bounds = obj.bounds.toFloat();
+            Logger::get().info("  Visible object {}: bounds=({:.1f},{:.1f},{:.1f})->({:.1f},{:.1f},{:.1f})",
+                i, bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z);
+        }
+
+        // Assign objects to clusters
         assignObjectsToClusters();
+        Logger::get().info("After cluster assignment: {} cluster object indices", m_clusterObjectIndices.size());
+
+        // Assign lights to clusters
         assignLightsToClusters();
+        Logger::get().info("After light assignment: {} cluster light indices", m_clusterLightIndices.size());
 
         // Update GPU buffers
         updateGPUBuffers();
         updateUniformBuffers(camera);
+
+        Logger::get().info("=== BUILD CLUSTERS DEBUG END ===");
     }
+
 
     void ClusteredRenderer::updateLights(const std::vector<ClusterLight>& lights) {
         m_lights = lights;
@@ -2788,7 +2780,37 @@ namespace tremor::gfx {
     void ClusteredRenderer::render(VkCommandBuffer cmdBuffer, Camera* camera) {
 		//renderDebug(cmdBuffer, camera);
         
-        Logger::get().info("=== CLUSTERED RENDERER START ===");
+        Logger::get().info("=== CLUSTERED RENDERER DEBUG START ===");
+        Logger::get().info("Pipeline valid: {}", m_pipeline ? "YES" : "NO");
+        Logger::get().info("Pipeline layout valid: {}", m_pipelineLayout ? "YES" : "NO");
+        Logger::get().info("Descriptor set valid: {}", m_descriptorSet ? "YES" : "NO");
+
+        Logger::get().info("Data summary:");
+        Logger::get().info("  Visible objects: {}", m_visibleObjects.size());
+        Logger::get().info("  Cluster object indices: {}", m_clusterObjectIndices.size());
+        Logger::get().info("  Cluster light indices: {}", m_clusterLightIndices.size());
+        Logger::get().info("  Total clusters: {}", m_totalClusters);
+        Logger::get().info("  Lights: {}", m_lights.size());
+
+        // Count non-empty clusters
+        uint32_t clustersWithObjects = 0;
+        uint32_t clustersWithLights = 0;
+        for (const auto& cluster : m_clusters) {
+            if (cluster.objectCount > 0) clustersWithObjects++;
+            if (cluster.lightCount > 0) clustersWithLights++;
+        }
+        Logger::get().info("  Clusters with objects: {}", clustersWithObjects);
+        Logger::get().info("  Clusters with lights: {}", clustersWithLights);
+
+        if (m_visibleObjects.empty()) {
+            Logger::get().error("CRITICAL: No visible objects to render!");
+            return;
+        }
+
+        if (m_clusterObjectIndices.empty()) {
+            Logger::get().error("CRITICAL: No cluster object indices!");
+            return;
+        }
 
         if (!m_pipeline) {
             Logger::get().error("Pipeline is NULL!");
@@ -6528,34 +6550,32 @@ namespace tremor::gfx {
         uint32_t m_cubeMeshID;
 
         void createEnhancedScene() {
-            // Create world octree with enhanced objects
+            Logger::get().info("=== CREATING ENHANCED SCENE (FIXED) ===");
+
+            // CLEAR any existing octree
             AABBQ worldBounds{
-                {-1'000'000'000, -1'000'000'000, -1'000'000'000},
-                { 1'000'000'000,  1'000'000'000,  1'000'000'000}
+                Vec3Q::fromFloat(glm::vec3(-20.0f, -20.0f, -20.0f)),
+                Vec3Q::fromFloat(glm::vec3(20.0f,  20.0f,  20.0f))
             };
             m_sceneOctree = tremor::gfx::Octree<tremor::gfx::RenderableObject>(worldBounds);
 
-            Logger::get().info("=== CREATING ENHANCED SCENE ===");
+            Logger::get().info("Creating exactly 25 objects...");
 
-            // Add enhanced renderable objects
+            // Create exactly 25 objects - no more, no less
             for (int i = 0; i < 25; i++) {
                 tremor::gfx::RenderableObject obj;
                 obj.meshID = m_cubeMeshID;
                 obj.materialID = m_materialIDs[i % m_materialIDs.size()];
                 obj.instanceID = i;
-                obj.flags = 1; // Visible flag
+                obj.flags = 1; // Visible
 
-                // Position in a 5x5 grid
-                float x = (i % 5 - 2) * 3.0f;
-                float z = (i / 5 - 2) * 3.0f;
-                float y = sin(i * 0.5f) * 2.0f; // Varying heights
+                // Simple grid positioning
+                float spacing = 3.0f;
+                float x = (i % 5 - 2) * spacing; // -6, -3, 0, 3, 6
+                float z = (i / 5 - 2) * spacing; // -6, -3, 0, 3, 6  
+                float y = 0.0f;
 
                 obj.transform = glm::translate(glm::mat4(1.0f), glm::vec3(x, y, z));
-
-                // Add some rotation variety
-                float angle = i * 0.3f;
-                obj.transform = glm::rotate(obj.transform, angle, glm::vec3(0.0f, 1.0f, 0.0f));
-
                 obj.prevTransform = obj.transform;
 
                 // Calculate bounds
@@ -6563,62 +6583,52 @@ namespace tremor::gfx {
                 AABBF worldBounds = transformAABB(obj.transform, localBounds);
                 obj.bounds = AABBQ::fromFloat(worldBounds);
 
-                // DEBUG: Log object details
-                Logger::get().info("Object {}: pos=({:.2f},{:.2f},{:.2f}), bounds=({:.2f},{:.2f},{:.2f}) to ({:.2f},{:.2f},{:.2f})",
-                    i, x, y, z,
-                    worldBounds.min.x, worldBounds.min.y, worldBounds.min.z,
-                    worldBounds.max.x, worldBounds.max.y, worldBounds.max.z);
+                Logger::get().info("Creating object {}: pos=({:.1f},{:.1f},{:.1f})", i, x, y, z);
 
-                // Add to octree
-                m_sceneOctree.insert(obj, obj.bounds);
-                Logger::get().info("Inserted object {} into octree", i);
+                // Insert ONCE into octree
+                try {
+                    m_sceneOctree.insert(obj, obj.bounds);
+                    Logger::get().info("  Inserted object {} successfully", i);
+                }
+                catch (const std::exception& e) {
+                    Logger::get().error("  Failed to insert object {}: {}", i, e.what());
+                }
             }
 
-            // DEBUG: Verify octree has objects
-            auto allObjects = m_sceneOctree.getAllObjects();
-            Logger::get().info("Octree now contains {} objects total", allObjects.size());
+            // Verify exactly 25 objects
+            auto allOctreeObjects = m_sceneOctree.getAllObjects();
+            Logger::get().info("VERIFICATION: Expected 25 objects, octree has {}", allOctreeObjects.size());
 
-            // Test a simple query to make sure octree works
-            AABBQ testQuery = AABBQ::fromFloat(glm::vec3(-10, -10, -10), glm::vec3(10, 10, 10));
-            auto queryResults = m_sceneOctree.query(testQuery);
-            Logger::get().info("Test query found {} objects in large region", queryResults.size());
+            if (allOctreeObjects.size() != 25) {
+                Logger::get().error("CRITICAL: Object count mismatch! Expected 25, got {}",
+                    allOctreeObjects.size());
 
-            // Create lights
-            std::vector<tremor::gfx::ClusterLight> lights;
-
-            // Main directional light
-            tremor::gfx::ClusterLight sunLight;
-            sunLight.position = glm::vec3(10.0f, 20.0f, 10.0f);
-            sunLight.color = glm::vec3(1.0f, 0.95f, 0.8f);
-            sunLight.intensity = 5.0f;
-            sunLight.radius = 100.0f;
-            sunLight.type = 0; // Point light acting as sun
-            lights.push_back(sunLight);
-
-            // Colored accent lights
-            for (int i = 0; i < 4; i++) {
-                tremor::gfx::ClusterLight accentLight;
-                float angle = i * PI * 0.5f;
-                accentLight.position = glm::vec3(cos(angle) * 8.0f, 3.0f, sin(angle) * 8.0f);
-
-                // Different colors for each light
-                switch (i) {
-                case 0: accentLight.color = glm::vec3(1.0f, 0.3f, 0.3f); break; // Red
-                case 1: accentLight.color = glm::vec3(0.3f, 1.0f, 0.3f); break; // Green
-                case 2: accentLight.color = glm::vec3(0.3f, 0.3f, 1.0f); break; // Blue
-                case 3: accentLight.color = glm::vec3(1.0f, 1.0f, 0.3f); break; // Yellow
+                // Log all objects to find duplicates
+                std::map<uint32_t, int> instanceCounts;
+                for (const auto& obj : allOctreeObjects) {
+                    instanceCounts[obj.instanceID]++;
                 }
 
-                accentLight.intensity = 2.0f;
-                accentLight.radius = 15.0f;
-                accentLight.type = 0; // Point light
-                lights.push_back(accentLight);
+                for (const auto& [instanceID, count] : instanceCounts) {
+                    if (count > 1) {
+                        Logger::get().error("  Instance {} appears {} times (DUPLICATE!)",
+                            instanceID, count);
+                    }
+                }
             }
 
-            m_clusteredRenderer->updateLights(lights);
-            Logger::get().info("Created enhanced scene with {} lights", lights.size());
-            Logger::get().info("=== SCENE CREATION COMPLETE ===");
+            // Create simple lighting
+            std::vector<tremor::gfx::ClusterLight> lights;
+            tremor::gfx::ClusterLight mainLight;
+            mainLight.position = glm::vec3(0.0f, 10.0f, 5.0f);
+            mainLight.color = glm::vec3(1.0f, 1.0f, 1.0f);
+            mainLight.intensity = 3.0f;
+            mainLight.radius = 50.0f;
+            mainLight.type = 0;
+            lights.push_back(mainLight);
 
+            m_clusteredRenderer->updateLights(lights);
+            Logger::get().info("Scene creation complete");
         }
 
         void createSampleMeshes() {
@@ -6662,18 +6672,23 @@ namespace tremor::gfx {
             };
 
             std::vector<uint32_t> cubeIndices = {
-                // Front
+                // Front face (counter-clockwise from outside)
                 0, 1, 2, 2, 3, 0,
-                // Back
-                4, 5, 6, 6, 7, 4,
-                // Right
+
+                // Back face (corrected to counter-clockwise from outside)
+                4, 7, 6, 6, 5, 4,
+
+                // Right face (counter-clockwise from outside)  
                 8, 9, 10, 10, 11, 8,
-                // Left
-                12, 13, 14, 14, 15, 12,
-                // Top
+
+                // Left face (corrected to counter-clockwise from outside)
+                12, 15, 14, 14, 13, 12,
+
+                // Top face (counter-clockwise from outside)
                 16, 17, 18, 18, 19, 16,
-                // Bottom
-                20, 21, 22, 22, 23, 20
+
+                // Bottom face (corrected to counter-clockwise from outside)
+                20, 23, 22, 22, 21, 20
             };
 
             // Load the cube mesh
@@ -6908,35 +6923,29 @@ namespace tremor::gfx {
             auto currentTime = std::chrono::high_resolution_clock::now();
             float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
-
-            float radius = 15.0f; // Far enough to see all objects
-            cam.setPosition(glm::vec3(sin(time * 0.5f) * radius, 8.0f, cos(time * 0.5f) * radius));
-            cam.lookAt(glm::vec3(0.0f, 0.0f, 0.0f)); // Look at center of object grid
+            // Position camera to see the 5x5 grid clearly
+            float radius = 20.0f; // Increased distance
+            float height = 10.0f;  // Higher up
+            cam.setPosition(glm::vec3(sin(time * 0.2f) * radius, height, cos(time * 0.2f) * radius));
+            cam.lookAt(glm::vec3(0.0f, 0.0f, 0.0f)); // Look at center of grid
             cam.update(0.0f);
 
             UniformBufferObject ubo{};
-
-            // Create a simple model matrix (rotate the quad over time)
-            ubo.model = glm::rotate(glm::mat4(1.0f), time * glm::radians(45.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-
-            // Create a view matrix (look at the quad from a slight distance)
+            ubo.model = glm::mat4(1.0f); // Identity - objects have their own transforms
             ubo.view = cam.getViewMatrix();
-
-            // Create a projection matrix (perspective projection)
-            // Get the window size for aspect ratio
-            int width, height;
-            SDL_GetWindowSize(w, &width, &height);
-            float aspect = width / (float)height;
-
             ubo.proj = cam.getProjectionMatrix();
-
-
-            // Set camera position (same as view matrix eye position)
             ubo.cameraPos = cam.getLocalPosition();
 
-            // Update the buffer data
             m_uniformBuffer->update(&ubo, sizeof(ubo));
 
+            // Debug camera position occasionally
+            static int frameCount = 0;
+            if (++frameCount % 60 == 0) { // Every 60 frames
+                glm::vec3 pos = cam.getLocalPosition();
+                glm::vec3 forward = cam.getForward();
+                Logger::get().info("Camera: pos=({:.1f},{:.1f},{:.1f}), forward=({:.2f},{:.2f},{:.2f})",
+                    pos.x, pos.y, pos.z, forward.x, forward.y, forward.z);
+            }
         }
 
         std::unique_ptr<Buffer> m_lightBuffer;
@@ -7737,6 +7746,8 @@ namespace tremor::gfx {
             // Render using clustered renderer
             m_clusteredRenderer->render(m_commandBuffers[currentFrame], &cam);
 
+			//m_clusteredRenderer->renderWorkingMeshTest(m_commandBuffers[currentFrame],&cam);
+
             //renderWithMeshShader(m_commandBuffers[currentFrame]);
 
         }
@@ -7898,8 +7909,8 @@ private:
 
             // Create world octree with 64-bit bounds
             AABBQ worldBounds{
-                {-1'000'000'000, -1'000'000'000, -1'000'000'000}, // 8000km^3 world bounds
-                { 1'000'000'000,  1'000'000'000,  1'000'000'000}
+                Vec3Q::fromFloat(glm::vec3(-20.0f, -20.0f, -20.0f)),
+                Vec3Q::fromFloat(glm::vec3(20.0f,  20.0f,  20.0f))
             };
             m_sceneOctree = tremor::gfx::Octree<tremor::gfx::RenderableObject>(worldBounds);
 
@@ -7928,11 +7939,11 @@ private:
                 return false;
             }
 
+            m_clusteredRenderer->createWorkingMeshShaderPipeline();
+
             // Create enhanced content
             createSampleMeshes();
             createEnhancedScene();
-
-            m_clusteredRenderer->createWorkingMeshShaderPipeline();
 
             return true;
         };
@@ -9395,97 +9406,109 @@ namespace tremor::gfx {
 
     void ClusteredRenderer::updateGPUBuffers() {
         try {
-            // Update cluster buffer - FIX: Update ALL clusters, not just one
+            Logger::get().info("=== UPDATING GPU BUFFERS ===");
+
+            // Update cluster buffer
             if (!m_clusters.empty() && m_clusterBuffer) {
                 VkDeviceSize clusterSize = m_clusters.size() * sizeof(Cluster);
+                Logger::get().info("Updating cluster buffer: {} clusters, {} bytes",
+                    m_clusters.size(), clusterSize);
+
                 if (clusterSize <= m_clusterBuffer->getSize()) {
                     m_clusterBuffer->update(m_clusters.data(), clusterSize);
-                    Logger::get().info("Updated cluster buffer: {} clusters", m_clusters.size());
+
+                    // Debug: Check first few clusters
+                    for (size_t i = 0; i < std::min(size_t(5), m_clusters.size()); i++) {
+                        const auto& cluster = m_clusters[i];
+                        if (cluster.objectCount > 0) {
+                            Logger::get().info("  Cluster {}: {} objects at offset {}",
+                                i, cluster.objectCount, cluster.objectOffset);
+                        }
+                    }
                 }
                 else {
-                    Logger::get().error("Cluster buffer too small: need {}, have {}",
-                        clusterSize, m_clusterBuffer->getSize());
+                    Logger::get().error("Cluster buffer too small!");
                 }
             }
 
-            // Update object buffer
+            // Update object buffer with detailed logging
             if (!m_visibleObjects.empty() && m_objectBuffer) {
                 VkDeviceSize objectSize = m_visibleObjects.size() * sizeof(RenderableObject);
+                Logger::get().info("Updating object buffer: {} objects, {} bytes",
+                    m_visibleObjects.size(), objectSize);
+
                 if (objectSize <= m_objectBuffer->getSize()) {
                     m_objectBuffer->update(m_visibleObjects.data(), objectSize);
-                    Logger::get().info("Updated object buffer: {} objects", m_visibleObjects.size());
+
+                    // Debug: Check first few objects
+                    for (size_t i = 0; i < std::min(size_t(3), m_visibleObjects.size()); i++) {
+                        const auto& obj = m_visibleObjects[i];
+                        Logger::get().info("  Object {}: meshID={}, materialID={}, instanceID={}",
+                            i, obj.meshID, obj.materialID, obj.instanceID);
+                    }
                 }
                 else {
-                    Logger::get().error("Object buffer too small: need {}, have {}",
-                        objectSize, m_objectBuffer->getSize());
+                    Logger::get().error("Object buffer too small!");
                 }
             }
 
-            // Update lights buffer
-            if (!m_lights.empty() && m_lightBuffer) {
-                VkDeviceSize lightSize = m_lights.size() * sizeof(ClusterLight);
-                if (lightSize <= m_lightBuffer->getSize()) {
-                    m_lightBuffer->update(m_lights.data(), lightSize);
-                    Logger::get().info("Updated light buffer: {} lights", m_lights.size());
-                }
-            }
+            // Update cluster object indices with verification
+            if (!m_clusterObjectIndices.empty() && m_indexBuffer) {
+                VkDeviceSize indexSize = m_clusterObjectIndices.size() * sizeof(uint32_t);
+                Logger::get().info("Updating cluster object indices: {} indices, {} bytes",
+                    m_clusterObjectIndices.size(), indexSize);
 
-            // Update index buffer with both object and light indices
-            if (m_indexBuffer) {
-                size_t objectIndicesSize = m_clusterObjectIndices.size() * sizeof(uint32_t);
-                size_t lightIndicesSize = m_clusterLightIndices.size() * sizeof(uint32_t);
-                size_t totalSize = objectIndicesSize + lightIndicesSize;
+                if (indexSize <= m_indexBuffer->getSize()) {
+                    m_indexBuffer->update(m_clusterObjectIndices.data(), indexSize, 0);
 
-                if (totalSize <= m_indexBuffer->getSize()) {
-                    // Copy object indices first
-                    if (objectIndicesSize > 0) {
-                        m_indexBuffer->update(m_clusterObjectIndices.data(), objectIndicesSize, 0);
+                    // Debug: Check first few indices
+                    for (size_t i = 0; i < std::min(size_t(10), m_clusterObjectIndices.size()); i++) {
+                        Logger::get().info("  Index {}: object {}", i, m_clusterObjectIndices[i]);
                     }
-                    // Copy light indices after object indices
-                    if (lightIndicesSize > 0) {
-                        m_indexBuffer->update(m_clusterLightIndices.data(), lightIndicesSize, objectIndicesSize);
-                    }
-                    Logger::get().info("Updated index buffer: {} object indices, {} light indices",
-                        m_clusterObjectIndices.size(), m_clusterLightIndices.size());
                 }
                 else {
-                    Logger::get().error("Index buffer too small: need {}, have {}",
-                        totalSize, m_indexBuffer->getSize());
+                    Logger::get().error("Index buffer too small!");
                 }
             }
 
-            // Ensure mesh data is updated
+            // Update mesh data
             if (!m_allVertices.empty() && m_vertexBuffer) {
                 VkDeviceSize vertexSize = m_allVertices.size() * sizeof(MeshVertex);
-                if (vertexSize <= m_vertexBuffer->getSize()) {
-                    m_vertexBuffer->update(m_allVertices.data(), vertexSize);
-                    Logger::get().info("Updated vertex buffer: {} vertices", m_allVertices.size());
-                }
+                Logger::get().info("Updating vertex buffer: {} vertices, {} bytes",
+                    m_allVertices.size(), vertexSize);
+                m_vertexBuffer->update(m_allVertices.data(), vertexSize);
             }
 
             if (!m_allIndices.empty() && m_meshIndexBuffer) {
                 VkDeviceSize indexSize = m_allIndices.size() * sizeof(uint32_t);
-                if (indexSize <= m_meshIndexBuffer->getSize()) {
-                    m_meshIndexBuffer->update(m_allIndices.data(), indexSize);
-                    Logger::get().info("Updated mesh index buffer: {} indices", m_allIndices.size());
-                }
+                Logger::get().info("Updating mesh index buffer: {} indices, {} bytes",
+                    m_allIndices.size(), indexSize);
+                m_meshIndexBuffer->update(m_allIndices.data(), indexSize);
             }
 
             if (!m_meshInfos.empty() && m_meshInfoBuffer) {
                 VkDeviceSize meshInfoSize = m_meshInfos.size() * sizeof(MeshInfo);
-                if (meshInfoSize <= m_meshInfoBuffer->getSize()) {
-                    m_meshInfoBuffer->update(m_meshInfos.data(), meshInfoSize);
-                    Logger::get().info("Updated mesh info buffer: {} meshes", m_meshInfos.size());
-                }
+                Logger::get().info("Updating mesh info buffer: {} meshes, {} bytes",
+                    m_meshInfos.size(), meshInfoSize);
+                m_meshInfoBuffer->update(m_meshInfos.data(), meshInfoSize);
             }
 
             if (!m_materials.empty() && m_materialBuffer) {
                 VkDeviceSize materialSize = m_materials.size() * sizeof(PBRMaterial);
-                if (materialSize <= m_materialBuffer->getSize()) {
-                    m_materialBuffer->update(m_materials.data(), materialSize);
-                    Logger::get().info("Updated material buffer: {} materials", m_materials.size());
-                }
+                Logger::get().info("Updating material buffer: {} materials, {} bytes",
+                    m_materials.size(), materialSize);
+                m_materialBuffer->update(m_materials.data(), materialSize);
             }
+
+            // Update lights
+            if (!m_lights.empty() && m_lightBuffer) {
+                VkDeviceSize lightSize = m_lights.size() * sizeof(ClusterLight);
+                Logger::get().info("Updating light buffer: {} lights, {} bytes",
+                    m_lights.size(), lightSize);
+                m_lightBuffer->update(m_lights.data(), lightSize);
+            }
+
+            Logger::get().info("GPU buffer updates complete");
 
         }
         catch (const std::exception& e) {
@@ -9588,9 +9611,17 @@ namespace tremor::gfx {
             int maxY = -1;
             int maxZ = -1;
 
+            bool anyValidCorner = false;
+
             // Convert each corner to cluster space
             for (const auto& corner : corners) {
                 glm::vec3 clusterPos = worldToCluster(corner, camera);
+
+                // Check if the cluster position is valid (not behind camera)
+                glm::vec4 viewPos = camera.getViewMatrix() * glm::vec4(corner, 1.0f);
+                if (viewPos.z > -camera.getNearClip()) {
+                    continue; // Skip corners behind the camera
+                }
 
                 int x = glm::clamp(static_cast<int>(clusterPos.x), 0, static_cast<int>(m_config.xSlices - 1));
                 int y = glm::clamp(static_cast<int>(clusterPos.y), 0, static_cast<int>(m_config.ySlices - 1));
@@ -9602,14 +9633,35 @@ namespace tremor::gfx {
                 maxX = std::max(maxX, x);
                 maxY = std::max(maxY, y);
                 maxZ = std::max(maxZ, z);
+
+                anyValidCorner = true;
+            }
+
+            // If no valid corners found, try the center point
+            if (!anyValidCorner) {
+                glm::vec3 center = (bounds.min + bounds.max) * 0.5f;
+                glm::vec4 viewPos = camera.getViewMatrix() * glm::vec4(center, 1.0f);
+
+                if (viewPos.z <= -camera.getNearClip()) {
+                    glm::vec3 clusterPos = worldToCluster(center, camera);
+                    int x = glm::clamp(static_cast<int>(clusterPos.x), 0, static_cast<int>(m_config.xSlices - 1));
+                    int y = glm::clamp(static_cast<int>(clusterPos.y), 0, static_cast<int>(m_config.ySlices - 1));
+                    int z = glm::clamp(static_cast<int>(clusterPos.z), 0, static_cast<int>(m_config.zSlices - 1));
+
+                    uint32_t clusterIdx = z * m_config.xSlices * m_config.ySlices + y * m_config.xSlices + x;
+                    if (clusterIdx < m_totalClusters) {
+                        result.push_back(clusterIdx);
+                    }
+                    return result;
+                }
             }
 
             // Ensure we found valid clusters
-            if (minX > maxX || minY > maxY || minZ > maxZ) {
+            if (minX > maxX || minY > maxY || minZ > maxZ || !anyValidCorner) {
                 return result;
             }
 
-            // Limit the number of clusters to avoid excessive assignments
+            // Add all clusters in range (with reasonable limits)
             int clusterCount = (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
             const int MAX_CLUSTERS_PER_OBJECT = 64;
 
@@ -9621,9 +9673,7 @@ namespace tremor::gfx {
                     int y = minY + static_cast<int>(t * (maxY - minY));
                     int z = minZ + static_cast<int>(t * (maxZ - minZ));
 
-                    uint32_t clusterIdx = z * m_config.xSlices * m_config.ySlices +
-                        y * m_config.xSlices + x;
-
+                    uint32_t clusterIdx = z * m_config.xSlices * m_config.ySlices + y * m_config.xSlices + x;
                     if (clusterIdx < m_totalClusters) {
                         result.push_back(clusterIdx);
                     }
@@ -9634,9 +9684,7 @@ namespace tremor::gfx {
                 for (int z = minZ; z <= maxZ; z++) {
                     for (int y = minY; y <= maxY; y++) {
                         for (int x = minX; x <= maxX; x++) {
-                            uint32_t clusterIdx = z * m_config.xSlices * m_config.ySlices +
-                                y * m_config.xSlices + x;
-
+                            uint32_t clusterIdx = z * m_config.xSlices * m_config.ySlices + y * m_config.xSlices + x;
                             if (clusterIdx < m_totalClusters) {
                                 result.push_back(clusterIdx);
                             }
@@ -9644,6 +9692,7 @@ namespace tremor::gfx {
                     }
                 }
             }
+
         }
         catch (const std::exception& e) {
             Logger::get().error("Exception in findClustersForBounds: {}", e.what());
@@ -9651,7 +9700,6 @@ namespace tremor::gfx {
 
         return result;
     }
-
     glm::vec3 ClusteredRenderer::worldToCluster(const glm::vec3& worldPos, const Camera& camera) {
         try {
             // Transform to view space
@@ -9704,51 +9752,74 @@ namespace tremor::gfx {
     }
 
     void ClusteredRenderer::assignObjectsToClusters() {
+        Logger::get().info("=== ASSIGN OBJECTS TO CLUSTERS DEBUG ===");
+
         // Clear previous assignments
         for (auto& cluster : m_clusters) {
             cluster.objectOffset = 0;
             cluster.objectCount = 0;
         }
-
         m_clusterObjectIndices.clear();
 
         if (m_visibleObjects.empty()) {
-            Logger::get().info("No visible objects to assign to clusters");
+            Logger::get().error("assignObjectsToClusters: No visible objects!");
             return;
         }
+
+        Logger::get().info("Assigning {} visible objects to {} clusters",
+            m_visibleObjects.size(), m_totalClusters);
 
         try {
             // Temporary storage for objects per cluster
             std::vector<std::vector<uint32_t>> clusterObjects(m_totalClusters);
+            uint32_t totalAssignments = 0;
 
-            // Assign each visible object to clusters
+            // Process each visible object
             for (size_t objIdx = 0; objIdx < m_visibleObjects.size(); objIdx++) {
                 const auto& obj = m_visibleObjects[objIdx];
-
-                // Calculate object bounds in world space
                 AABBF worldBounds = obj.bounds.toFloat();
 
-                // Transform bounds through view matrix for cluster space calculation
-                glm::mat4 viewMatrix = m_camera.getViewMatrix();
-                AABBF viewBounds = transformAABB(viewMatrix, worldBounds);
+                Logger::get().info("  Processing object {}: bounds=({:.1f},{:.1f},{:.1f})->({:.1f},{:.1f},{:.1f})",
+                    objIdx, worldBounds.min.x, worldBounds.min.y, worldBounds.min.z,
+                    worldBounds.max.x, worldBounds.max.y, worldBounds.max.z);
 
-                // Find clusters that contain this object
-                std::vector<uint32_t> clusters = findClustersForBounds(viewBounds, m_camera);
+                // Find clusters (without double transform)
+                std::vector<uint32_t> clusters = findClustersForBounds(worldBounds, m_camera);
 
-                // Add object index to each cluster
+                Logger::get().info("    Object {} assigned to {} clusters", objIdx, clusters.size());
+
+                if (clusters.empty()) {
+                    Logger::get().error("    PROBLEM: Object {} not assigned to any clusters!", objIdx);
+
+                    // Emergency fallback: assign to cluster 0
+                    clusters.push_back(0);
+                    Logger::get().info("    FALLBACK: Assigned object {} to cluster 0", objIdx);
+                }
+
+                // Assign object to clusters
                 for (uint32_t clusterIdx : clusters) {
                     if (clusterIdx < m_totalClusters) {
                         clusterObjects[clusterIdx].push_back(static_cast<uint32_t>(objIdx));
+                        totalAssignments++;
+                    }
+                    else {
+                        Logger::get().error("    Invalid cluster index: {}", clusterIdx);
                     }
                 }
             }
+
+            Logger::get().info("Total cluster assignments: {}", totalAssignments);
 
             // Compact object indices and update cluster data
             for (uint32_t clusterIdx = 0; clusterIdx < m_totalClusters; clusterIdx++) {
                 m_clusters[clusterIdx].objectOffset = static_cast<uint32_t>(m_clusterObjectIndices.size());
                 m_clusters[clusterIdx].objectCount = static_cast<uint32_t>(clusterObjects[clusterIdx].size());
 
-                // Add object indices to the global array
+                if (clusterObjects[clusterIdx].size() > 0) {
+                    Logger::get().info("  Cluster {} has {} objects", clusterIdx, clusterObjects[clusterIdx].size());
+                }
+
+                // Add object indices to global array
                 m_clusterObjectIndices.insert(
                     m_clusterObjectIndices.end(),
                     clusterObjects[clusterIdx].begin(),
@@ -9756,120 +9827,127 @@ namespace tremor::gfx {
                 );
             }
 
-            Logger::get().info("Assigned {} objects to clusters, total object indices: {}",
-                m_visibleObjects.size(), m_clusterObjectIndices.size());
+            // Count clusters with objects
+            uint32_t clustersWithObjects = 0;
+            for (const auto& cluster : m_clusters) {
+                if (cluster.objectCount > 0) clustersWithObjects++;
+            }
+
+            Logger::get().info("Final result: {} objects in {} clusters, {} total object indices",
+                m_visibleObjects.size(), clustersWithObjects, m_clusterObjectIndices.size());
+
+            if (m_clusterObjectIndices.empty()) {
+                Logger::get().error("CRITICAL: No cluster object indices created!");
+            }
+
         }
         catch (const std::exception& e) {
             Logger::get().error("Exception in assignObjectsToClusters: {}", e.what());
         }
     }
-
     void ClusteredRenderer::cullOctree(const Octree<RenderableObject>& octree, const Frustum& frustum) {
+        Logger::get().info("=== STARTING OCTREE CULLING DEBUG ===");
+
+        m_visibleObjects.clear();
+
         const OctreeNode<RenderableObject>* root = octree.getRoot();
         if (!root) {
-            Logger::get().warning("Octree root is null");
+            Logger::get().error("CRITICAL: Octree root is NULL!");
             return;
         }
 
-        Logger::get().info("=== STARTING OCTREE CULLING ===");
-
-        // DEBUG: Check if octree has any objects at all
+        // Verify octree has objects
         auto allObjects = octree.getAllObjects();
         Logger::get().info("Octree contains {} total objects before culling", allObjects.size());
 
         if (allObjects.empty()) {
-            Logger::get().error("OCTREE IS EMPTY! Objects were not inserted properly!");
+            Logger::get().error("CRITICAL: Octree is empty before culling!");
             return;
         }
 
-        // DEBUG: Log some objects from octree
+        // Log first few objects for verification
         for (size_t i = 0; i < std::min(size_t(5), allObjects.size()); i++) {
             const auto& obj = allObjects[i];
             AABBF bounds = obj.bounds.toFloat();
-            Logger::get().info("Octree object {}: bounds=({:.2f},{:.2f},{:.2f}) to ({:.2f},{:.2f},{:.2f}), flags={}",
-                i, bounds.min.x, bounds.min.y, bounds.min.z,
-                bounds.max.x, bounds.max.y, bounds.max.z, obj.flags);
+            Logger::get().info("  Object {}: flags={}, bounds=({:.1f},{:.1f},{:.1f})->({:.1f},{:.1f},{:.1f})",
+                i, obj.flags, bounds.min.x, bounds.min.y, bounds.min.z,
+                bounds.max.x, bounds.max.y, bounds.max.z);
         }
 
-        try {
-            m_visibleObjects.clear(); // Make sure this is clear
-            processOctreeNode(root, frustum);
-            Logger::get().info("Culling completed, found {} visible objects", m_visibleObjects.size());
-        }
-        catch (const std::exception& e) {
-            Logger::get().error("Exception in cullOctree: {}", e.what());
+        // Process the octree
+        processOctreeNode(root, frustum);
+
+        Logger::get().info("CULLING RESULT: {} visible objects found", m_visibleObjects.size());
+
+        if (m_visibleObjects.empty()) {
+            Logger::get().error("CRITICAL: No visible objects after culling!");
+
+            // Debug: try adding all objects directly (bypass culling)
+            Logger::get().info("DEBUG: Adding all octree objects directly...");
+            for (const auto& obj : allObjects) {
+                if (obj.flags & 1) { // Check visibility flag
+                    m_visibleObjects.push_back(obj);
+                    Logger::get().info("  Added object with flags={}", obj.flags);
+                }
+            }
+            Logger::get().info("DEBUG: After bypass, {} visible objects", m_visibleObjects.size());
         }
     }
 
     void ClusteredRenderer::processOctreeNode(const OctreeNode<RenderableObject>* node, const Frustum& frustum) {
-        if (!node) return;
+        if (!node) {
+            Logger::get().warning("processOctreeNode: node is NULL");
+            return;
+        }
 
         try {
-            // Get node bounds and test against frustum
-            AABBF nodeBoundsF = node->getBounds().toFloat();
+            AABBF nodeBounds = node->getBounds().toFloat();
+            Logger::get().info("Processing node: bounds=({:.1f},{:.1f},{:.1f})->({:.1f},{:.1f},{:.1f}), isLeaf={}",
+                nodeBounds.min.x, nodeBounds.min.y, nodeBounds.min.z,
+                nodeBounds.max.x, nodeBounds.max.y, nodeBounds.max.z, node->isLeaf());
 
-            //Logger::get().info("Processing octree node: bounds=({:.2f},{:.2f},{:.2f}) to ({:.2f},{:.2f},{:.2f}), isLeaf={}",
-            //    nodeBoundsF.min.x, nodeBoundsF.min.y, nodeBoundsF.min.z,
-            //    nodeBoundsF.max.x, nodeBoundsF.max.y, nodeBoundsF.max.z, node->isLeaf());
+            // DISABLE ALL CULLING FOR NOW - just accept everything
+            bool intersects = true;
 
-            // DEBUG: Try a more lenient frustum test first - just check if bounds are reasonable
-            bool boundsReasonable = (nodeBoundsF.min.x < 1000 && nodeBoundsF.max.x > -1000 &&
-                nodeBoundsF.min.y < 1000 && nodeBoundsF.max.y > -1000 &&
-                nodeBoundsF.min.z < 1000 && nodeBoundsF.max.z > -1000);
-
-            if (!boundsReasonable) {
-                Logger::get().warning("Node bounds seem unreasonable, skipping");
+            if (!intersects) {
+                Logger::get().info("  Node rejected by frustum culling");
                 return;
             }
 
-            // TEMPORARILY DISABLE FRUSTUM CULLING FOR DEBUGGING
-            bool intersects = true; // frustum.containsAABB(nodeBoundsF.min, nodeBoundsF.max);
-            //Logger::get().info("Frustum test result: {}", intersects ? "PASS" : "FAIL");
-
-            if (!intersects) {
-                Logger::get().info("Node rejected by frustum culling");
-                return; // Skip this node and all children
-            }
-
-            // If this is a leaf node, process objects
-            if (node->isLeaf()) {
-                const auto& objects = node->getObjects();
-                //Logger::get().info("Leaf node contains {} objects", objects.size());
+            // CRITICAL FIX: Check objects in ALL nodes, not just leaves!
+            const auto& objects = node->getObjects();
+            if (!objects.empty()) {
+                Logger::get().info("  Node contains {} objects", objects.size());
 
                 for (size_t i = 0; i < objects.size(); i++) {
                     const auto& obj = objects[i];
 
-                    // Check visibility flag
+                    Logger::get().info("    Object {}: flags={}, meshID={}, materialID={}, instanceID={}",
+                        i, obj.flags, obj.meshID, obj.materialID, obj.instanceID);
+
+                    // Only check visibility flag
                     if ((obj.flags & 1) == 0) {
-                        Logger::get().info("Object {} rejected: visibility flag is 0", i);
+                        Logger::get().info("    Object {} rejected: visibility flag is 0", i);
                         continue;
                     }
 
-                    // Convert bounds to world space and test again (DISABLED FOR NOW)
-                    AABBF objBounds = obj.bounds.toFloat();
-                    bool visible = true; // frustum.containsAABB(objBounds.min, objBounds.max);
-
-                    //Logger::get().info("Object {}: bounds=({:.2f},{:.2f},{:.2f}) to ({:.2f},{:.2f},{:.2f}), visible={}",
-                    //    i, objBounds.min.x, objBounds.min.y, objBounds.min.z,
-                    //    objBounds.max.x, objBounds.max.y, objBounds.max.z, visible);
-
-                    if (visible) {
-                        m_visibleObjects.push_back(obj);
-                        //Logger::get().info("Added object {} to visible list (total: {})", i, m_visibleObjects.size());
-                    }
+                    // Accept all visible objects
+                    m_visibleObjects.push_back(obj);
+                    Logger::get().info("    Object {} ACCEPTED (total visible: {})", i, m_visibleObjects.size());
                 }
             }
-            else {
-                Logger::get().info("Processing {} children of non-leaf node", 8);
-                // Recursively process child nodes
+
+            // ALWAYS recurse to children (whether leaf or not)
+            if (!node->isLeaf()) {
+                Logger::get().info("  Non-leaf node, processing children...");
                 for (int i = 0; i < 8; i++) {
                     const auto* child = node->getChild(i);
                     if (child) {
-                        //Logger::get().info("Processing child {}", i);
+                        Logger::get().info("    Processing child {}", i);
                         processOctreeNode(child, frustum);
                     }
                     else {
-                        Logger::get().info("Child {} is null", i);
+                        Logger::get().info("    Child {} is NULL", i);
                     }
                 }
             }
@@ -9920,6 +9998,22 @@ namespace tremor::gfx {
             ubo.flags = 0; // Debug flags, etc.
 
             m_uniformBuffer->update(&ubo, sizeof(ubo));
+
+            glm::vec3 camPos = camera->getPosition().fractional;
+            glm::vec3 camForward = camera->getForward();
+            glm::mat4 view = camera->getViewMatrix();
+            glm::mat4 proj = camera->getProjectionMatrix();
+
+            Logger::get().info("Camera Debug:");
+            Logger::get().info("  Position: ({:.2f}, {:.2f}, {:.2f})", camPos.x, camPos.y, camPos.z);
+            Logger::get().info("  Forward: ({:.2f}, {:.2f}, {:.2f})", camForward.x, camForward.y, camForward.z);
+            Logger::get().info("  View[3]: ({:.2f}, {:.2f}, {:.2f})", view[3][0], view[3][1], view[3][2]);
+
+            // Test a specific object position
+            glm::vec3 objPos(0.0f, 0.0f, 0.0f); // Center object
+            glm::vec4 screenPos = proj * view * glm::vec4(objPos, 1.0f);
+            Logger::get().info("  Object at origin projects to: ({:.2f}, {:.2f}, {:.2f}, {:.2f})",
+                screenPos.x, screenPos.y, screenPos.z, screenPos.w);
         }
         catch (const std::exception& e) {
             Logger::get().error("Exception in updateUniformBuffers: {}", e.what());
@@ -9933,9 +10027,9 @@ namespace tremor::gfx {
         
         try {
             // Load shaders with CORRECTED UBO layout
-            m_taskShader = ShaderModule::compileFromFile(m_device, "shaders/diag.task");
-            m_meshShader = ShaderModule::compileFromFile(m_device, "shaders/diag.mesh");
-            m_fragmentShader = ShaderModule::compileFromFile(m_device, "shaders/diag.frag");
+            m_taskShader = ShaderModule::compileFromFile(m_device, "shaders/cluster.task");
+            m_meshShader = ShaderModule::compileFromFile(m_device, "shaders/cluster.mesh");
+            m_fragmentShader = ShaderModule::compileFromFile(m_device, "shaders/cluster.frag");
 
             if (!m_taskShader || !m_meshShader || !m_fragmentShader) {
                 Logger::get().error("Failed to compile enhanced cluster shaders");

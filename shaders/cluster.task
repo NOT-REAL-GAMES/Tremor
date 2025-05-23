@@ -1,35 +1,17 @@
+// cluster.task - Fixed clustered rendering task shader
 #version 460
 #extension GL_EXT_mesh_shader : require
 
-layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
-
-// Enhanced structures
-struct Cluster {
-    uint lightOffset;
-    uint lightCount;
-    uint objectOffset;
-    uint objectCount;
-};
-
-struct EnhancedRenderableObject {
-    mat4 transform;
-    mat4 prevTransform;
-    uint meshID;
-    uint materialID;
-    uint instanceID;
-    uint flags;
-};
-
-// Enhanced UBO
-layout(set = 0, binding = 0) uniform EnhancedClusterUBO {
+// Enhanced UBO matching your ClusterUBO structure
+layout(set = 0, binding = 0) uniform ClusterUBO {
     mat4 viewMatrix;
     mat4 projMatrix;
     mat4 invViewMatrix;
     mat4 invProjMatrix;
     vec4 cameraPos;
-    uvec4 clusterDimensions;
-    vec4 zPlanes;
-    vec4 screenSize;
+    uvec4 clusterDimensions;  // x, y, z slices + padding
+    vec4 zPlanes;             // near, far, clustersPerZ, padding
+    vec4 screenSize;          // width, height, 1/width, 1/height
     uint numLights;
     uint numObjects;
     uint numClusters;
@@ -39,46 +21,65 @@ layout(set = 0, binding = 0) uniform EnhancedClusterUBO {
     uint flags;
 } ubo;
 
+// Cluster data structure (must match C++ exactly)
+struct Cluster {
+    uint lightOffset;
+    uint lightCount;
+    uint objectOffset;
+    uint objectCount;
+};
+
 layout(set = 0, binding = 1) readonly buffer ClusterBuffer {
     Cluster clusters[];
 };
 
-layout(set = 0, binding = 2) readonly buffer ObjectBuffer {
-    EnhancedRenderableObject objects[];
-};
+// Task shader workgroup size - process clusters efficiently
+layout(local_size_x = 32) in;
 
-// Task payload
-struct TaskPayload {
-    uint clusterIndex;
-    uint objectCount;
-    uint objectIndices[32];
-    uint lightCount;
-    uint lightIndices[16];
-};
-
-taskPayloadSharedEXT TaskPayload payload;
+// Shared memory for efficient cluster processing
+shared uint s_visibleClusters[32];
+shared uint s_clusterCount;
 
 void main() {
-    uint clusterIndex = gl_WorkGroupID.x;
+    uint threadID = gl_LocalInvocationID.x;
+    uint groupID = gl_WorkGroupID.x;
+    uint globalClusterID = groupID * 32 + threadID;
     
-    if (gl_LocalInvocationIndex == 0) {
-        payload.clusterIndex = clusterIndex;
-        payload.objectCount = 0;
-        payload.lightCount = 0;
+    // Initialize shared memory on first thread
+    if (threadID == 0) {
+        s_clusterCount = 0;
+    }
+    
+    barrier();
+    
+    // Check if this thread represents a valid cluster
+    bool isValidCluster = (globalClusterID < ubo.numClusters);
+    bool hasObjects = false;
+    
+    if (isValidCluster && globalClusterID < clusters.length()) {
+        Cluster cluster = clusters[globalClusterID];
+        hasObjects = (cluster.objectCount > 0);
         
-        // For testing: always emit something for the first few clusters
-        if (clusterIndex == 0) {
-            payload.objectCount = 1;
-            payload.objectIndices[0] = 0; // Use first object
+        // Simple frustum culling could be added here
+        // For now, just check if cluster has objects
+    }
+    
+    // Atomically add visible clusters to shared list
+    if (hasObjects) {
+        uint clusterIndex = atomicAdd(s_clusterCount, 1);
+        if (clusterIndex < 32) {
+            s_visibleClusters[clusterIndex] = globalClusterID;
         }
-        
-        // In full implementation, you'd do frustum culling here
-        // For now, just emit mesh tasks for clusters with objects
-        if (payload.objectCount > 0) {
-            EmitMeshTasksEXT(payload.objectCount, 0, 0);
-        } else if (clusterIndex == 0) {
-            // Always emit at least one for testing
-            EmitMeshTasksEXT(1, 0, 0);
+    }
+    
+    barrier();
+    
+    // Emit mesh tasks for all visible clusters in this workgroup
+    if (threadID == 0) {
+        uint clustersToEmit = min(s_clusterCount, 32u);
+        if (clustersToEmit > 0) {
+            // Each mesh workgroup will process one cluster
+            EmitMeshTasksEXT(clustersToEmit, 0, 0);
         }
     }
 }

@@ -1,12 +1,9 @@
-// cluster_mesh.mesh - FIXED VERSION  
+// cluster.mesh - Fixed clustered rendering mesh shader
 #version 460
 #extension GL_EXT_mesh_shader : require
 
-layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
-layout(triangles, max_vertices = 64, max_primitives = 42) out;
-
-// Enhanced UBO
-layout(set = 0, binding = 0) uniform EnhancedClusterUBO {
+// Enhanced UBO matching your ClusterUBO structure
+layout(set = 0, binding = 0) uniform ClusterUBO {
     mat4 viewMatrix;
     mat4 projMatrix;
     mat4 invViewMatrix;
@@ -24,57 +21,201 @@ layout(set = 0, binding = 0) uniform EnhancedClusterUBO {
     uint flags;
 } ubo;
 
-// Task payload
-struct TaskPayload {
-    uint clusterIndex;
-    uint objectCount;
-    uint objectIndices[32];
+// Data structures matching C++ exactly
+struct Cluster {
+    uint lightOffset;
     uint lightCount;
-    uint lightIndices[16];
+    uint objectOffset;
+    uint objectCount;
 };
 
-taskPayloadSharedEXT TaskPayload payload;
+struct RenderableObject {
+    mat4 transform;
+    mat4 prevTransform;
+    uint meshID;
+    uint materialID;
+    uint instanceID;
+    uint flags;
+};
+
+struct MeshInfo {
+    uint vertexOffset;
+    uint vertexCount;
+    uint indexOffset;
+    uint indexCount;
+    vec3 boundsMin;
+    float padding1;
+    vec3 boundsMax;
+    float padding2;
+};
+
+struct Vertex {
+    vec3 position;      // alignas(16) in C++
+    vec3 normal;        // alignas(16) in C++
+    vec2 texCoord;      // alignas(16) in C++
+    vec4 tangent;       // alignas(16) in C++, w = handedness
+};
+
+// Buffer bindings
+layout(set = 0, binding = 1) readonly buffer ClusterBuffer {
+    Cluster clusters[];
+};
+
+layout(set = 0, binding = 2) readonly buffer ObjectBuffer {
+    RenderableObject objects[];
+};
+
+layout(set = 0, binding = 4) readonly buffer IndexBuffer {
+    uint clusterObjectIndices[];  // Indices into objects array
+};
+
+layout(set = 0, binding = 5) readonly buffer MeshInfoBuffer {
+    MeshInfo meshInfos[];
+};
+
+layout(set = 0, binding = 6) readonly buffer VertexBuffer {
+    Vertex vertices[];
+};
+
+layout(set = 0, binding = 7) readonly buffer MeshIndexBuffer {
+    uint meshIndices[];  // Mesh triangle indices
+};
+
+// Reduced mesh shader limits for better compatibility
+layout(local_size_x = 1) in;
+layout(triangles, max_vertices = 64, max_primitives = 32) out;
 
 // Output attributes
-layout(location = 0) out vec3 outWorldPos[];
-layout(location = 1) out vec3 outNormal[];
-layout(location = 2) out vec3 outTangent[];
-layout(location = 3) out vec3 outBitangent[];
-layout(location = 4) out vec2 outTexCoord[];
-layout(location = 5) out vec3 outViewPos[];
-layout(location = 6) out vec4 outPrevClipPos[];
-layout(location = 7) out flat uint outMaterialID[];
-layout(location = 8) out flat uint outClusterIndex[];
-layout(location = 9) out flat uint outInstanceID[];
+layout(location = 0) out vec3 fragWorldPos[];
+layout(location = 1) out vec3 fragNormal[];
+layout(location = 2) out vec2 fragTexCoord[];
+layout(location = 3) out vec3 fragTangent[];
+layout(location = 4) out vec3 fragBitangent[];
+layout(location = 5) flat out uint fragMaterialID[];
 
 void main() {
-    // For testing: just render a simple triangle
-    if (gl_LocalInvocationIndex == 0) {
-        SetMeshOutputsEXT(3, 1);
+    uint workgroupID = gl_WorkGroupID.x;
+    
+    // Safety check
+    if (workgroupID >= ubo.numClusters || workgroupID >= clusters.length()) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+    
+    Cluster cluster = clusters[workgroupID];
+    
+    if (cluster.objectCount == 0) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+    
+    // Process first object in cluster for simplicity
+    if (cluster.objectOffset >= clusterObjectIndices.length()) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+    
+    uint objectIndex = clusterObjectIndices[cluster.objectOffset];
+    
+    if (objectIndex >= objects.length()) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+    
+    RenderableObject obj = objects[objectIndex];
+    
+    // Check visibility flag
+    if ((obj.flags & 1u) == 0) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+    
+    if (obj.meshID >= meshInfos.length()) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+    
+    MeshInfo meshInfo = meshInfos[obj.meshID];
+    
+    // Validate mesh data
+    if (meshInfo.vertexCount == 0 || meshInfo.indexCount == 0) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+    
+    // Clamp to shader limits for safety
+    uint numVertices = min(meshInfo.vertexCount, 64u);
+    uint numIndices = min(meshInfo.indexCount, 96u); // 32 triangles * 3
+    uint numTriangles = numIndices / 3u;
+    
+    if (numTriangles == 0) {
+        SetMeshOutputsEXT(0, 0);
+        return;
+    }
+    
+    SetMeshOutputsEXT(numVertices, numTriangles);
+    
+    // Transform matrix calculation
+    mat4 mvpMatrix = ubo.projMatrix * ubo.viewMatrix * obj.transform;
+    mat3 normalMatrix = transpose(inverse(mat3(obj.transform)));
+    
+    // Process vertices with bounds checking
+    for (uint i = 0; i < numVertices; ++i) {
+        uint vertexIndex = meshInfo.vertexOffset + i;
         
-        // Animated triangle based on time
-        float time = ubo.time;
-        float s = sin(time) * 0.3;
-        float c = cos(time) * 0.3;
+        // Safety check
+        if (vertexIndex >= vertices.length()) {
+            // Set safe default values
+            gl_MeshVerticesEXT[i].gl_Position = vec4(0.0, 0.0, -1.0, 1.0);
+            fragWorldPos[i] = vec3(0.0);
+            fragNormal[i] = vec3(0.0, 1.0, 0.0);
+            fragTexCoord[i] = vec2(0.0);
+            fragTangent[i] = vec3(1.0, 0.0, 0.0);
+            fragBitangent[i] = vec3(0.0, 0.0, 1.0);
+            fragMaterialID[i] = obj.materialID;
+            continue;
+        }
         
-        gl_MeshVerticesEXT[0].gl_Position = vec4(-0.5 + s, -0.5 + c, 0.0, 1.0);
-        gl_MeshVerticesEXT[1].gl_Position = vec4( 0.5 + s, -0.5 + c, 0.0, 1.0);
-        gl_MeshVerticesEXT[2].gl_Position = vec4( 0.0 + s,  0.5 + c, 0.0, 1.0);
+        Vertex vert = vertices[vertexIndex];
         
-        gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
+        // Transform vertex to clip space
+        gl_MeshVerticesEXT[i].gl_Position = mvpMatrix * vec4(vert.position, 1.0);
         
-        // Set output attributes
-        for (int i = 0; i < 3; i++) {
-            outWorldPos[i] = vec3(0.0);
-            outNormal[i] = vec3(0.0, 0.0, 1.0);
-            outTangent[i] = vec3(1.0, 0.0, 0.0);
-            outBitangent[i] = vec3(0.0, 1.0, 0.0);
-            outTexCoord[i] = vec2(0.5);
-            outViewPos[i] = vec3(0.0);
-            outPrevClipPos[i] = vec4(0.0, 0.0, 0.0, 1.0);
-            outMaterialID[i] = 0;
-            outClusterIndex[i] = payload.clusterIndex;
-            outInstanceID[i] = 0;
+        // Transform to world space for fragment shader
+        vec4 worldPos = obj.transform * vec4(vert.position, 1.0);
+        fragWorldPos[i] = worldPos.xyz;
+        
+        // Transform normal and tangent
+        fragNormal[i] = normalize(normalMatrix * vert.normal);
+        fragTangent[i] = normalize(normalMatrix * vert.tangent.xyz);
+        fragBitangent[i] = cross(fragNormal[i], fragTangent[i]) * vert.tangent.w;
+        
+        // Pass through texture coordinates and material ID
+        fragTexCoord[i] = vert.texCoord;
+        fragMaterialID[i] = obj.materialID;
+    }
+    
+    // Process triangle indices with bounds checking
+    for (uint i = 0; i < numTriangles; ++i) {
+        uint indexBase = meshInfo.indexOffset + (i * 3u);
+        
+        // Safety check
+        if (indexBase + 2u >= meshIndices.length()) {
+            gl_PrimitiveTriangleIndicesEXT[i] = uvec3(0, 0, 0);
+            continue;
+        }
+        
+        // Get the mesh indices (these are relative to the mesh, not global)
+        uint idx0 = meshIndices[indexBase + 0u];
+        uint idx1 = meshIndices[indexBase + 1u];
+        uint idx2 = meshIndices[indexBase + 2u];
+        
+        // Ensure indices are within the vertex range we're outputting
+        if (idx0 < numVertices && idx1 < numVertices && idx2 < numVertices) {
+            gl_PrimitiveTriangleIndicesEXT[i] = uvec3(idx0, idx1, idx2);
+        } else {
+            // Fallback to first triangle
+            gl_PrimitiveTriangleIndicesEXT[i] = uvec3(0, min(1u, numVertices-1), min(2u, numVertices-1));
         }
     }
 }
