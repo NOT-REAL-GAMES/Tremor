@@ -7770,7 +7770,7 @@ namespace tremor::gfx {
                 depthStencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
                 depthStencilAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
                 depthStencilAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                depthStencilAttachment.clearValue.depthStencil = { 1.0f, 0 };  
+                depthStencilAttachment.clearValue.depthStencil = { 0.0f, 0 };  
 
                 // Add to the renderingInfo
                 renderingInfo.depthStencilAttachment = depthStencilAttachment;
@@ -10147,9 +10147,9 @@ namespace tremor::gfx {
 
             VkPipelineDepthStencilStateCreateInfo depthStencil{};
             depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-            depthStencil.depthTestEnable = VK_FALSE;
-            depthStencil.depthWriteEnable = VK_FALSE;
-            depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS; // Reverse depth
+            depthStencil.depthTestEnable = VK_TRUE;
+            depthStencil.depthWriteEnable = VK_TRUE;
+            depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; // Reverse depth
             depthStencil.depthBoundsTestEnable = VK_FALSE;
             depthStencil.stencilTestEnable = VK_FALSE;
 
