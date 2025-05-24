@@ -14,16 +14,8 @@ void main() {
     vec4 color = meshColor;
     
     // For texture triangles, test if we can sample
-    if (bufferIndex == 9) {
-        // Try to sample albedo texture
-        vec4 texColor = texture(albedoTexture, vec2(0.5, 0.5));
-        // If texture is valid, it should return non-zero
-        color = vec4(texColor.rgb, 1.0); 
-    } else if (bufferIndex == 10) {
-        // Try to sample normal texture
-        vec4 texColor = texture(normalTexture, vec2(0.5, 0.5));
-        color = vec4(texColor.rgb, 1.0); 
-    }
+       color += vec4(((bufferIndex+1)%4)/4.0, ((bufferIndex+1)%16)/16.0, ((bufferIndex+1)%256)/256.0 , 1.0); 
+
     
     // Add some shading to make triangles more visible
     vec2 fragCoord = gl_FragCoord.xy;

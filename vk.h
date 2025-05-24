@@ -245,6 +245,7 @@ namespace tremor::gfx {
         // Accessors
         VkBuffer getBuffer() const { return m_buffer; }
         VkDeviceSize getSize() const { return m_size; }
+		VkDeviceMemory getMemory() const { return m_memory; }
 
     private:
         VkDevice m_device = VK_NULL_HANDLE;
@@ -1575,7 +1576,7 @@ namespace tremor::gfx {
 
     // 64-bit quantized vector for positions (1/128 millimeter precision)
     struct alignas(16) Vec3Q {
-        int64_t x, y, z;
+        alignas(16) int64_t x, y, z;
 
         Vec3Q() : x(0), y(0), z(0) {}
         Vec3Q(int64_t x, int64_t y, int64_t z) : x(x), y(y), z(z) {}
@@ -2454,6 +2455,8 @@ namespace tremor::gfx {
         bool createGraphicsPipeline();
         void updateDescriptorSet();
 
+        void updateGPUBuffers();
+
         // Rendering
         void render(VkCommandBuffer cmdBuffer, Camera* camera);
 
@@ -2546,7 +2549,6 @@ namespace tremor::gfx {
         void processOctreeNode(const OctreeNode<RenderableObject>* node, const Frustum& frustum);
         void assignObjectsToClusters();
         void assignLightsToClusters();
-        void updateGPUBuffers();
         std::vector<uint32_t> findClustersForBounds(const AABBF& bounds, const Camera& camera);
         glm::vec3 worldToCluster(const glm::vec3& worldPos, const Camera& camera);
 
@@ -2768,6 +2770,13 @@ namespace tremor::gfx {
         // Copy all objects to visible list
         m_visibleObjects = allObjects;
 
+        Logger::get().info("OCTREE DEBUG: getAllObjects() returned {} objects", allObjects.size());
+        for (size_t i = 0; i < std::min(size_t(25), allObjects.size()); i++) {
+            const auto& obj = allObjects[i];
+            glm::vec3 pos = obj.transform[3];
+            Logger::get().info("OCTREE Object {}: pos=({:.2f}, {:.2f}, {:.2f})", i, pos.x, pos.y, pos.z);
+        }
+
         // Force all objects into cluster 0
         for (size_t i = 0; i < m_visibleObjects.size(); i++) {
             m_clusterObjectIndices.push_back(static_cast<uint32_t>(i));
@@ -2947,10 +2956,12 @@ namespace tremor::gfx {
         // Memory barriers for buffer updates
         std::vector<VkBufferMemoryBarrier> barriers;
 
+		updateGPUBuffers();
+
         auto addBarrier = [&](VkBuffer buffer, VkDeviceSize size) {
             VkBufferMemoryBarrier barrier{};
             barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-            barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             barrier.buffer = buffer;
             barrier.offset = 0;
@@ -2961,15 +2972,15 @@ namespace tremor::gfx {
             };
 
         addBarrier(m_uniformBuffer->getBuffer(), m_uniformBuffer->getSize());
-        //addBarrier(m_clusterBuffer->getBuffer(), m_clusterBuffer->getSize());
-        //addBarrier(m_objectBuffer->getBuffer(), m_objectBuffer->getSize());
-        //addBarrier(m_lightBuffer->getBuffer(), m_lightBuffer->getSize());
-        //addBarrier(m_indexBuffer->getBuffer(), m_indexBuffer->getSize());
+        addBarrier(m_clusterBuffer->getBuffer(), m_clusterBuffer->getSize());
+        addBarrier(m_objectBuffer->getBuffer(), m_objectBuffer->getSize());
+        addBarrier(m_lightBuffer->getBuffer(), m_lightBuffer->getSize());
+        addBarrier(m_indexBuffer->getBuffer(), m_indexBuffer->getSize());
 
 
         vkCmdPipelineBarrier(
             cmdBuffer,
-            VK_PIPELINE_STAGE_HOST_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
             0,
             0, nullptr,
@@ -2994,7 +3005,7 @@ namespace tremor::gfx {
 		}
 
         // Bind pipeline
-
+        updateDescriptorSet();
 
 		logAllDescriptorInfo();
         
@@ -3037,10 +3048,10 @@ namespace tremor::gfx {
         uint32_t taskGroupX = (m_totalClusters + 31) / 32;
         taskGroupX = std::max(taskGroupX, 1u);
 
-        Logger::get().info("Dispatching 1 task groups", taskGroupX);
+        Logger::get().info("Dispatching {} task groups", taskGroupX);
 
         // Dispatch mesh shaders
-        vkCmdDrawMeshTasksEXT(cmdBuffer, 1, 1, 1);
+        vkCmdDrawMeshTasksEXT(cmdBuffer, taskGroupX, 1, 1);
         
     }
 
@@ -6583,7 +6594,7 @@ namespace tremor::gfx {
 
     class MeshRegistry {
     public:
-        struct MeshData {
+        struct alignas(16) MeshData {
             uint32_t vertexCount;
             uint32_t indexCount;
             VkBuffer vertexBuffer;
@@ -6686,23 +6697,23 @@ namespace tremor::gfx {
                 obj.flags = 1; // Visible
 
                 // Simple grid positioning
-                float spacing = 3.0f;
+                float spacing = 2.5f;
                 float x = (i % 5 - 2) * spacing; // -6, -3, 0, 3, 6
                 float z = (i / 5 - 2) * spacing; // -6, -3, 0, 3, 6  
-                float y = 0.0f;
+                float y = 5.0f;
 
                 obj.transform = glm::translate(glm::mat4(1.0f), glm::vec3(x, y, z));
                 obj.prevTransform = obj.transform;
 
                 glm::mat4& transform = obj.transform;
-                Logger::get().info("Object {}: pos=({:.2f}, {:.2f}, {:.2f})",
-                    i, transform[3][0], transform[3][1], transform[3][2]);
-                Logger::get().info("Object {}: scale=({:.2f}, {:.2f}, {:.2f})",
-                    i,
-                    glm::length(glm::vec3(transform[0])),  // X scale
-                    glm::length(glm::vec3(transform[1])),  // Y scale  
-                    glm::length(glm::vec3(transform[2]))); // Z scale
-
+                Logger::get().info("Object {}: matrix row 0=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
+                    i, transform[0][0], transform[0][1], transform[0][2], transform[0][3]);
+                Logger::get().info("Object {}: matrix row 1=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
+                    i, transform[1][0], transform[1][1], transform[1][2], transform[1][3]);
+                Logger::get().info("Object {}: matrix row 2=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
+                    i, transform[2][0], transform[2][1], transform[2][2], transform[2][3]);
+                Logger::get().info("Object {}: matrix row 3=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
+                    i, transform[3][0], transform[3][1], transform[3][2], transform[3][3]);
 
                 // Calculate bounds
                 AABBF localBounds{ glm::vec3(-0.5f), glm::vec3(0.5f) };
@@ -6742,6 +6753,7 @@ namespace tremor::gfx {
                     }
                 }
             }
+            m_clusteredRenderer->updateGPUBuffers();
 
             // Create simple lighting
             std::vector<tremor::gfx::ClusterLight> lights;
@@ -7075,7 +7087,7 @@ namespace tremor::gfx {
         std::unique_ptr<Buffer> m_lightBuffer;
 
         // Add this struct to your class
-        struct LightUBO {
+        struct alignas(16) LightUBO {
             alignas(16) glm::vec3 position;
             alignas(16) glm::vec3 color;
             float ambientStrength;
@@ -7134,7 +7146,7 @@ namespace tremor::gfx {
 
 
         // Add this struct to your class
-        struct MaterialUBO {
+        struct alignas(16) MaterialUBO {
             alignas(16) glm::vec4 baseColor;
             float metallic;
             float roughness;
@@ -7984,7 +7996,7 @@ private:
             cubeObject.bounds = quantizedBounds;
 
             // Add to octree
-            m_sceneOctree.insert(cubeObject, quantizedBounds);
+            //m_sceneOctree.insert(cubeObject, quantizedBounds);
 
             Logger::get().info("Cube added to octree as renderable object");
         }
@@ -8071,6 +8083,7 @@ private:
             // Create enhanced content
             createSampleMeshes();
             createEnhancedScene();
+            
 
             return true;
         };
@@ -9227,6 +9240,16 @@ namespace tremor::gfx {
                 if (objectSize <= m_objectBuffer->getSize()) {
                     m_objectBuffer->update(m_visibleObjects.data(), objectSize);
 
+                    void* mappedData;
+                    vkMapMemory(m_device, m_objectBuffer->getMemory(), 0, sizeof(RenderableObject) * 25, 0, &mappedData);
+                    RenderableObject* objects = static_cast<RenderableObject*>(mappedData);
+
+                    for (int i = 0; i < 25; i++) { // Check first 5
+                        glm::vec3 pos = objects[i].transform[3];
+                        Logger::get().info("GPU Object {}: pos=({:.2f}, {:.2f}, {:.2f})", i, pos.x, pos.y, pos.z);
+                    }
+                    vkUnmapMemory(m_device, m_objectBuffer->getMemory());
+
                     // Debug: Check first few objects
                     for (size_t i = 0; i < std::min(size_t(25), m_visibleObjects.size()); i++) {
                         const auto& obj = m_visibleObjects[i];
@@ -9756,7 +9779,7 @@ namespace tremor::gfx {
             auto currentTime = std::chrono::high_resolution_clock::now();
             auto time = std::chrono::duration<float>(currentTime - startTime).count();
 
-            float radius = 8.0f; // Increased distance
+            float radius = 25.0f; // Increased distance
             float height = 2.0f;  // Higher up
             camera->setPosition(glm::vec3(sin(time * 0.2f) * radius, height, cos(time * 0.2f) * radius));
             camera->lookAt(glm::vec3(0.0f, 0.0f, 0.0f)); // Look at center of grid

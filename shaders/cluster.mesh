@@ -1,6 +1,9 @@
-// diag.mesh - Diagnostic mesh shader with buffer validation
+// diag.mesh - Fixed diagnostic mesh shader with proper positioning
 #version 460
 #extension GL_EXT_mesh_shader : require
+
+precision highp float;
+precision highp int;
 
 layout(set = 0, binding = 0) uniform ClusterUBO {
     mat4 viewMatrix;
@@ -27,6 +30,15 @@ struct Cluster {
     uint objectCount;
 };
 
+struct AABBQ{
+    uvec3 boundsMinX; // int64_t as 2 uint32_t
+    uvec3 boundsMinY;
+    uvec3 boundsMinZ;
+    uvec3 boundsMaxX;
+    uvec3 boundsMaxY;
+    uvec3 boundsMaxZ;
+};
+
 struct RenderableObject {
     mat4 transform;
     mat4 prevTransform;
@@ -35,12 +47,7 @@ struct RenderableObject {
     uint instanceID;
     uint flags;
     // AABBQ bounds - 6 int64_t values represented as uvec2 pairs
-    uvec2 boundsMinX; // int64_t as 2 uint32_t
-    uvec2 boundsMinY;
-    uvec2 boundsMinZ;
-    uvec2 boundsMaxX;
-    uvec2 boundsMaxY;
-    uvec2 boundsMaxZ;
+    AABBQ boundsData;
 };
 
 layout(set = 0, binding = 1) readonly buffer ClusterBuffer {
@@ -76,109 +83,192 @@ layout(set = 0, binding = 8) readonly buffer MaterialBuffer {
 };
 
 layout(local_size_x = 1) in;
-layout(triangles, max_vertices = 75, max_primitives = 25) out;  // 11 triangles for 11 resources
+layout(triangles, max_vertices = 75, max_primitives = 25) out;
 
 layout(location = 0) out vec4 meshColor[];
 layout(location = 1) flat out uint bufferIndex[];
 
 void main() {
-    // We'll create 11 triangles in a grid pattern
     const uint NUM_BUFFERS = 25;
+    const uint GRID_WIDTH = 5;  // 5x5 grid
+    const float SPACING = 2.0;
+    const float BASE_Y = 10.0;  // Your desired Y position
     
     SetMeshOutputsEXT(NUM_BUFFERS * 3, NUM_BUFFERS);
     
     // Test each buffer and assign colors
     vec4 bufferColors[NUM_BUFFERS];
     
-    // 0. UBO - Test by checking if values are non-zero
-    bufferColors[0] = (ubo.numClusters > 0) ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, 0.0, 1.0);
+    // 0. UBO - Test by checking if values are reasonable
+    bufferColors[0] = (ubo.numClusters > 0 && ubo.numClusters < 100000) ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, 0.0, 1.0);
     
     // 1. ClusterBuffer - Check if we can read first cluster
-    bufferColors[1] = vec4(1.0, 0.0, 0.0, 1.0); // Red = missing
+    bufferColors[1] = vec4(1.0, 0.0, 0.0, 1.0); // Red = missing/invalid
     if (ubo.numClusters > 0) {
         uint testVal = clusters[0].objectCount + clusters[0].lightCount;
-        bufferColors[1] = vec4(0.0, 1.0, 0.0, 1.0); // Green = valid
+        if (testVal < 100000) { // Sanity check
+            bufferColors[1] = vec4(0.0, 1.0, 0.0, 1.0); // Green = valid
+        } else {
+            bufferColors[1] = vec4(1.0, 1.0, 0.0, 1.0); // Yellow = accessible but suspicious values
+        }
     }
     
-    // 2. ObjectBuffer - Try to read first element
+    // 2. ObjectBuffer - Test if we can safely read object transforms
     bufferColors[2] = vec4(1.0, 0.0, 0.0, 1.0);
     if (ubo.numObjects > 0) {
-        uint testVal = objects[0].flags;
-        bufferColors[2] = vec4(0.0, 1.0, 0.0, 1.0);
+        // Test basic accessibility
+        uint testFlags = objects[0].flags;
+        
+        // Test transform matrix accessibility and validity
+        vec3 testPos = objects[0].transform[3].xyz;
+        if (!any(isnan(testPos)) && !any(isinf(testPos)) && all(lessThan(abs(testPos), vec3(1000000.0)))) {
+            bufferColors[2] = vec4(0.0, 1.0, 0.0, 1.0); // Green = valid transforms
+        } else {
+            bufferColors[2] = vec4(1.0, 1.0, 0.0, 1.0); // Yellow = accessible but invalid data
+        }
     }
     
-    // 3. LightBuffer
+    // 3. LightBuffer - Try to read first element
     bufferColors[3] = vec4(1.0, 0.0, 0.0, 1.0);
     if (ubo.numLights > 0) {
         uint testVal = lightData[0];
         bufferColors[3] = vec4(0.0, 1.0, 0.0, 1.0);
     }
     
-    // 4. IndexBuffer - Always try to read (should have cluster indices)
+    // 4. IndexBuffer - Try to read first element
     bufferColors[4] = vec4(1.0, 0.0, 0.0, 1.0);
-    {
-        uint testVal = indices[0];
+    uint testIndex = indices[0];
+    if (testIndex < 100000) { // Sanity check for reasonable index
         bufferColors[4] = vec4(0.0, 1.0, 0.0, 1.0);
+    } else {
+        bufferColors[4] = vec4(1.0, 1.0, 0.0, 1.0); // Yellow = accessible but suspicious
     }
     
-    // 5. MeshInfoBuffer
+    // 5. MeshInfoBuffer - Try to read first element
     bufferColors[5] = vec4(1.0, 0.0, 0.0, 1.0);
-    {
-        uint testVal = meshInfoData[0];
+    uint testMeshInfo = meshInfoData[0];
+    if (testMeshInfo < 100000) { // Sanity check
         bufferColors[5] = vec4(0.0, 1.0, 0.0, 1.0);
+    } else {
+        bufferColors[5] = vec4(1.0, 1.0, 0.0, 1.0);
     }
     
-    // 6. VertexBuffer
+    // 6. VertexBuffer - Try to read first element
     bufferColors[6] = vec4(1.0, 0.0, 0.0, 1.0);
-    {
-        float testVal = vertexData[0];
+    float testVertex = vertexData[0];
+    if (abs(testVertex) < 1000000.0) { // Sanity check for reasonable vertex data
         bufferColors[6] = vec4(0.0, 1.0, 0.0, 1.0);
+    } else {
+        bufferColors[6] = vec4(1.0, 1.0, 0.0, 1.0);
     }
     
-    // 7. MeshIndexBuffer
+    // 7. MeshIndexBuffer - Try to read first element
     bufferColors[7] = vec4(1.0, 0.0, 0.0, 1.0);
-    {
-        uint testVal = meshIndices[0];
+    uint testMeshIndex = meshIndices[0];
+    if (testMeshIndex < 100000) { // Sanity check
         bufferColors[7] = vec4(0.0, 1.0, 0.0, 1.0);
+    } else {
+        bufferColors[7] = vec4(1.0, 1.0, 0.0, 1.0);
     }
     
-    // 8. MaterialBuffer
+    // 8. MaterialBuffer - Try to read first element
     bufferColors[8] = vec4(1.0, 0.0, 0.0, 1.0);
-    {
-        uint testVal = materialData[0];
+    uint testMaterial = materialData[0];
+    if (testMaterial < 100000) { // Sanity check
         bufferColors[8] = vec4(0.0, 1.0, 0.0, 1.0);
+    } else {
+        bufferColors[8] = vec4(1.0, 1.0, 0.0, 1.0);
     }
     
-    // 9-10. Textures - shown as blue (can't test from mesh shader)
+    // 9-10. Textures - Can't test from mesh shader, show blue
     bufferColors[9] = vec4(0.0, 0.0, 1.0, 1.0);   // Albedo texture
     bufferColors[10] = vec4(0.0, 0.0, 1.0, 1.0);  // Normal texture
     
-    // Create triangles in a 4x3 grid
+    // 11-24. Additional diagnostic triangles for future expansion
+    for (uint j = 11; j < NUM_BUFFERS; j++) {
+        bufferColors[j] = vec4(0.5, 0.5, 0.5, 1.0); // Gray for unused
+    }
+    
+    // Create triangles in a fixed grid pattern
     for (uint i = 0; i < NUM_BUFFERS; i++) {
-        uint row = i / 4;
-        uint col = i % 4;
+        vec3 worldPos;
+        bool usedFallbackPos = false;
         
-        float x = -0.8 + col * 0.4;
-        float y = 0.6 - row * 0.4;
-        float size = 0.15;
+        if (i < ubo.numObjects) {
+            if (i == 0) {
+                // DEBUG: Force triangle 0 to show what object[0] actually contains
+                vec3 objectPos = objects[0].transform[3].xyz;
+                worldPos = objectPos + vec3(0.0, 2.0, 0.0);
+                // Override color to make it obvious
+                bufferColors[0] = vec4(1.0, 0.0, 1.0, 1.0); // Magenta = debug triangle
+            } else {
+                // Safely read object position with validation
+                vec3 objectPos = objects[i].transform[3].xyz;
+                
+                // Validate the position is reasonable (not NaN, not extreme values)
+                bool validPos = true;
+                if (any(isnan(objectPos)) || any(isinf(objectPos))) {
+                    validPos = false;
+                }
+                if (any(greaterThan(abs(objectPos), vec3(1000000.0)))) {
+                    validPos = false; // Reject extreme values
+                }
+                
+                if (validPos) {
+                    // Use actual object position, offset up for visibility
+                    worldPos = objectPos + vec3(0.0, 2.0, 0.0);
+                } else {
+                    // Fallback to grid position if object data is invalid
+                    uint gridX = i % GRID_WIDTH;
+                    uint gridZ = i / GRID_WIDTH;
+                    worldPos = vec3(
+                        float(gridX) * SPACING - float(GRID_WIDTH - 1) * SPACING * 0.5,
+                        BASE_Y,
+                        float(gridZ) * SPACING - float(GRID_WIDTH - 1) * SPACING * 0.5
+                    );
+                    usedFallbackPos = true;
+                }
+            }
+        } else {
+            // For indices beyond numObjects, use grid layout to test other buffers
+            uint gridX = i % GRID_WIDTH;
+            uint gridZ = i / GRID_WIDTH;
+            worldPos = vec3(
+                float(gridX) * SPACING - float(GRID_WIDTH - 1) * SPACING * 0.5 + 20.0, // Offset to side
+                BASE_Y + sin(ubo.time + float(i) * 0.1) * 0.5,
+                float(gridZ) * SPACING - float(GRID_WIDTH - 1) * SPACING * 0.5
+            );
+        }
         
+        float size = 0.4;
         uint baseVertex = i * 3;
-
-        float offset = sin(ubo.time)*0.3;
-
+        
+        // Get camera vectors for billboard triangles
+        vec3 cameraRight = ubo.invViewMatrix[0].xyz;
+        vec3 cameraUp = ubo.invViewMatrix[1].xyz;
+        
         // Triangle vertices
-
-        vec4 worldPos = vec4(objects[i].transform[3].xyz,1.0);  // Extract just the position
-
-
-        gl_MeshVerticesEXT[baseVertex + 0].gl_Position = ubo.projMatrix * ubo.viewMatrix * (worldPos + vec4(x - size, y - size, 0.0, 1.0));
-        gl_MeshVerticesEXT[baseVertex + 1].gl_Position = ubo.projMatrix * ubo.viewMatrix * (worldPos + vec4(x + size, y - size, 0.0, 1.0));
-        gl_MeshVerticesEXT[baseVertex + 2].gl_Position = ubo.projMatrix * ubo.viewMatrix * (worldPos + vec4(x, y + size, 0.0, 1.0));
-
-        // Assign colors
-        meshColor[baseVertex + 0] = vec4(1.0,0.0,0.4125,1.0);
-        meshColor[baseVertex + 1] = vec4(1.0,0.0,0.4125,1.0);
-        meshColor[baseVertex + 2] = vec4(1.0,0.0,0.4125,1.0);
+        vec3 v0 = worldPos + (-cameraRight - cameraUp) * size;  // Bottom left
+        vec3 v1 = worldPos + (cameraRight - cameraUp) * size;   // Bottom right  
+        vec3 v2 = worldPos + (cameraUp) * size;                 // Top center
+        
+        // Transform to clip space
+        gl_MeshVerticesEXT[baseVertex + 0].gl_Position = ubo.projMatrix * ubo.viewMatrix * vec4(v0, 1.0);
+        gl_MeshVerticesEXT[baseVertex + 1].gl_Position = ubo.projMatrix * ubo.viewMatrix * vec4(v1, 1.0);
+        gl_MeshVerticesEXT[baseVertex + 2].gl_Position = ubo.projMatrix * ubo.viewMatrix * vec4(v2, 1.0);
+        
+        // Assign colors based on buffer test results
+        vec4 color = bufferColors[i];
+        
+        // If this triangle had to use fallback position due to bad object data, modify color slightly
+        if (usedFallbackPos) {
+            color.rgb = mix(color.rgb, vec3(1.0, 0.5, 0.0), 0.3); // Tint towards orange
+        }
+        
+        // Use the buffer test results for all triangles
+        meshColor[baseVertex + 0] = color;
+        meshColor[baseVertex + 1] = color;
+        meshColor[baseVertex + 2] = color;
         
         // Buffer index for fragment shader
         bufferIndex[baseVertex + 0] = i;
