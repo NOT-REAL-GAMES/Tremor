@@ -7062,6 +7062,8 @@ namespace tremor::gfx {
                 Logger::get().info("Camera: pos=({:.1f},{:.1f},{:.1f}), forward=({:.2f},{:.2f},{:.2f})",
                     pos.x, pos.y, pos.z, forward.x, forward.y, forward.z);
             }
+
+
         }
 
         std::unique_ptr<Buffer> m_lightBuffer;
@@ -7672,6 +7674,8 @@ namespace tremor::gfx {
 
 
         void beginFrame() override {
+
+
 
             cam.extent = vkSwapchain.get()->extent();
 
@@ -9791,6 +9795,10 @@ namespace tremor::gfx {
             glm::vec4 screenPos = proj * view * glm::vec4(objPos, 1.0f);
             Logger::get().info("  Object at origin projects to: ({:.2f}, {:.2f}, {:.2f}, {:.2f})",
                 screenPos.x, screenPos.y, screenPos.z, screenPos.w);
+
+            size_t requiredSize = sizeof(RenderableObject) * ubo.numObjects;
+            size_t actualSize = m_objectBuffer->getSize();
+            Logger::get().info("Required: {} bytes, Actual: {} bytes", requiredSize, actualSize);
         }
         catch (const std::exception& e) {
             Logger::get().error("Exception in updateUniformBuffers: {}", e.what());
@@ -9804,9 +9812,9 @@ namespace tremor::gfx {
         
         try {
             // Load shaders with CORRECTED UBO layout
-            m_taskShader = ShaderModule::compileFromFile(m_device, "shaders/diag.task");
-            m_meshShader = ShaderModule::compileFromFile(m_device, "shaders/diag.mesh");
-            m_fragmentShader = ShaderModule::compileFromFile(m_device, "shaders/diag.frag");
+            m_taskShader = ShaderModule::compileFromFile(m_device, "shaders/cluster.task");
+            m_meshShader = ShaderModule::compileFromFile(m_device, "shaders/cluster.mesh");
+            m_fragmentShader = ShaderModule::compileFromFile(m_device, "shaders/cluster.frag");
 
             if (!m_taskShader || !m_meshShader || !m_fragmentShader) {
                 Logger::get().error("Failed to compile enhanced cluster shaders");

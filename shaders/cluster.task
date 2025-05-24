@@ -1,8 +1,7 @@
-// cluster.task - Fixed with task-mesh payload communication
+// diag.task - Diagnostic task shader
 #version 460
 #extension GL_EXT_mesh_shader : require
 
-// UBO (same as before)
 layout(set = 0, binding = 0) uniform ClusterUBO {
     mat4 viewMatrix;
     mat4 projMatrix;
@@ -21,77 +20,9 @@ layout(set = 0, binding = 0) uniform ClusterUBO {
     uint flags;
 } ubo;
 
-struct Cluster {
-    uint lightOffset;
-    uint lightCount;
-    uint objectOffset;
-    uint objectCount;
-};
-
-layout(set = 0, binding = 1) readonly buffer ClusterBuffer {
-    Cluster clusters[];
-};
-
-// Task-mesh payload to pass visible cluster indices
-struct TaskPayload {
-    uint visibleClusterIndices[32]; // Max 32 clusters per workgroup
-};
-
-taskPayloadSharedEXT TaskPayload payload;
-
-layout(local_size_x = 32) in;
-
-shared uint s_visibleClusters[32];
-shared uint s_clusterCount;
+layout(local_size_x = 1) in;
 
 void main() {
-    uint threadID = gl_LocalInvocationID.x;
-    uint groupID = gl_WorkGroupID.x;
-    uint globalClusterID = groupID * 32 + threadID;
-    
-    // Initialize shared memory
-    if (threadID == 0) {
-        s_clusterCount = 0;
-    }
-    
-    barrier();
-    
-    // Check if this cluster has objects to render
-    bool hasObjects = false;
-    if (globalClusterID < ubo.numClusters && globalClusterID < clusters.length()) {
-        Cluster cluster = clusters[globalClusterID];
-        hasObjects = (cluster.objectCount > 0);
-    }
-    
-    // Add visible clusters to shared list
-    if (hasObjects) {
-        uint clusterIndex = atomicAdd(s_clusterCount, 1);
-        if (clusterIndex < 32) {
-            s_visibleClusters[clusterIndex] = globalClusterID;
-        }
-    }
-    
-    barrier();
-    
-    // Copy visible clusters to payload and emit mesh tasks
-    if (threadID == 0) {
-        uint clustersToEmit = min(s_clusterCount, 32u);
-        
-        // Copy visible cluster indices to payload
-        for (uint i = 0; i < clustersToEmit; ++i) {
-            payload.visibleClusterIndices[i] = s_visibleClusters[i];
-        }
-        
-        // Fill remaining slots with invalid indices
-        for (uint i = clustersToEmit; i < 32; ++i) {
-            payload.visibleClusterIndices[i] = 0xFFFFFFFF;
-        }
-        
-        if (clustersToEmit > 0) {
-            EmitMeshTasksEXT(clustersToEmit, 1, 1);
-        } else {
-            EmitMeshTasksEXT(1, 1, 1);
-
-        }
-    }
+    // Always emit one mesh task that will draw all diagnostic triangles
+    EmitMeshTasksEXT(1, 1, 1);
 }

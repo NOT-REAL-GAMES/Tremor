@@ -1,32 +1,38 @@
-// debug.frag - Simplified fragment shader for debugging
+// diag.frag - Diagnostic fragment shader with labels
 #version 460
 
-// Input from mesh shader
-layout(location = 0) in vec3 fragWorldPos;
-layout(location = 1) in vec3 fragNormal;
-layout(location = 2) in vec2 fragTexCoord;
-layout(location = 3) in vec3 fragTangent;
-layout(location = 4) in vec3 fragBitangent;
-layout(location = 5) flat in uint fragMaterialID;
+layout(location = 0) in vec4 meshColor;
+layout(location = 1) flat in uint bufferIndex;
 
-// Output
-layout(location = 0) out vec4 outColor;
+layout(location = 0) out vec4 fragColor;
+
+// Test texture bindings
+layout(set = 0, binding = 9) uniform sampler2D albedoTexture;
+layout(set = 0, binding = 10) uniform sampler2D normalTexture;
 
 void main() {
-    // Debug: Different colors based on material ID
-    vec3 colors[4] = vec3[](
-        vec3(1.0, 0.0, 0.0), // Red
-        vec3(0.0, 1.0, 0.0), // Green  
-        vec3(0.0, 0.0, 1.0), // Blue
-        vec3(1.0, 1.0, 0.0)  // Yellow
-    );
+    vec4 color = meshColor;
     
-    vec3 color = colors[fragMaterialID % 4];
+    // For texture triangles, test if we can sample
+    if (bufferIndex == 9) {
+        // Try to sample albedo texture
+        vec4 texColor = texture(albedoTexture, vec2(0.5, 0.5));
+        // If texture is valid, it should return non-zero
+        color = vec4(texColor.rgb, 1.0); 
+    } else if (bufferIndex == 10) {
+        // Try to sample normal texture
+        vec4 texColor = texture(normalTexture, vec2(0.5, 0.5));
+        color = vec4(texColor.rgb, 1.0); 
+    }
     
-    // Simple lighting using normal
-    vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
-    vec3 normal = normalize(fragNormal);
-    float ndotl = max(dot(normal, lightDir), 0.2); // Minimum ambient
+    // Add some shading to make triangles more visible
+    vec2 fragCoord = gl_FragCoord.xy;
+    float gridFactor = 0.0;
+    if (mod(gl_FragCoord.x, 20.0) < 1.0 || mod(gl_FragCoord.y, 20.0) < 1.0) {
+        gridFactor = 1.0;
+    }
     
-    outColor = vec4(color * ndotl, 1.0);
+    color.rgb *= 1.0 - 0.2 * gridFactor;
+    
+    fragColor = color;
 }
