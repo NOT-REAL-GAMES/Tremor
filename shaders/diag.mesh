@@ -148,11 +148,13 @@ void main() {
         float size = 0.15;
         
         uint baseVertex = i * 3;
-        
+
+        float offset = sin(ubo.time)*0.3;
+
         // Triangle vertices
-        gl_MeshVerticesEXT[baseVertex + 0].gl_Position = vec4(x - size, y - size, 0.0, 1.0);
-        gl_MeshVerticesEXT[baseVertex + 1].gl_Position = vec4(x + size, y - size, 0.0, 1.0);
-        gl_MeshVerticesEXT[baseVertex + 2].gl_Position = vec4(x, y + size, 0.0, 1.0);
+        gl_MeshVerticesEXT[baseVertex + 0].gl_Position = ubo.projMatrix * ubo.viewMatrix * vec4(x - size + offset, y - size, 0.0, 1.0);
+        gl_MeshVerticesEXT[baseVertex + 1].gl_Position = ubo.projMatrix * ubo.viewMatrix * vec4(x + size + offset, y - size, 0.0, 1.0);
+        gl_MeshVerticesEXT[baseVertex + 2].gl_Position = ubo.projMatrix * ubo.viewMatrix * vec4(x+ offset, y + size, 0.0, 1.0);
         
         // Assign colors
         meshColor[baseVertex + 0] = bufferColors[i];

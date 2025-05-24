@@ -3040,7 +3040,7 @@ namespace tremor::gfx {
         Logger::get().info("Dispatching {} task groups", taskGroupX);
 
         // Dispatch mesh shaders
-        vkCmdDrawMeshTasksEXT(cmdBuffer, taskGroupX, 1, 1);
+        vkCmdDrawMeshTasksEXT(cmdBuffer, 1, 1, 1);
         
     }
 
@@ -6365,6 +6365,8 @@ namespace tremor::gfx {
             std::vector<uint32_t> setIndices;  // Keep track of which set each layout corresponds to
 
             for (const auto& [set, layout] : m_setLayouts) {
+                Logger::get().info("Set {}: layout = {}", set,
+                    layout != VK_NULL_HANDLE ? "VALID" : "NULL");
                 if (layout != VK_NULL_HANDLE) {  // Ensure layout is valid
                     rawLayouts.push_back(layout);
                     setIndices.push_back(set);
@@ -9802,9 +9804,9 @@ namespace tremor::gfx {
         
         try {
             // Load shaders with CORRECTED UBO layout
-            m_taskShader = ShaderModule::compileFromFile(m_device, "shaders/cluster.task");
-            m_meshShader = ShaderModule::compileFromFile(m_device, "shaders/cluster.mesh");
-            m_fragmentShader = ShaderModule::compileFromFile(m_device, "shaders/cluster.frag");
+            m_taskShader = ShaderModule::compileFromFile(m_device, "shaders/diag.task");
+            m_meshShader = ShaderModule::compileFromFile(m_device, "shaders/diag.mesh");
+            m_fragmentShader = ShaderModule::compileFromFile(m_device, "shaders/diag.frag");
 
             if (!m_taskShader || !m_meshShader || !m_fragmentShader) {
                 Logger::get().error("Failed to compile enhanced cluster shaders");
