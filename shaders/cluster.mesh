@@ -2,7 +2,6 @@
 #version 460
 #extension GL_EXT_mesh_shader : require
 
-// All buffer bindings
 layout(set = 0, binding = 0) uniform ClusterUBO {
     mat4 viewMatrix;
     mat4 projMatrix;
@@ -28,12 +27,28 @@ struct Cluster {
     uint objectCount;
 };
 
+struct RenderableObject {
+    mat4 transform;
+    mat4 prevTransform;
+    uint meshID;
+    uint materialID;
+    uint instanceID;
+    uint flags;
+    // AABBQ bounds - 6 int64_t values represented as uvec2 pairs
+    uvec2 boundsMinX; // int64_t as 2 uint32_t
+    uvec2 boundsMinY;
+    uvec2 boundsMinZ;
+    uvec2 boundsMaxX;
+    uvec2 boundsMaxY;
+    uvec2 boundsMaxZ;
+};
+
 layout(set = 0, binding = 1) readonly buffer ClusterBuffer {
     Cluster clusters[];
 };
 
 layout(set = 0, binding = 2) readonly buffer ObjectBuffer {
-    uint objectData[];
+    RenderableObject objects[];
 };
 
 layout(set = 0, binding = 3) readonly buffer LightBuffer {
@@ -61,14 +76,14 @@ layout(set = 0, binding = 8) readonly buffer MaterialBuffer {
 };
 
 layout(local_size_x = 1) in;
-layout(triangles, max_vertices = 33, max_primitives = 11) out;  // 11 triangles for 11 resources
+layout(triangles, max_vertices = 75, max_primitives = 25) out;  // 11 triangles for 11 resources
 
 layout(location = 0) out vec4 meshColor[];
 layout(location = 1) flat out uint bufferIndex[];
 
 void main() {
     // We'll create 11 triangles in a grid pattern
-    const uint NUM_BUFFERS = 11;
+    const uint NUM_BUFFERS = 25;
     
     SetMeshOutputsEXT(NUM_BUFFERS * 3, NUM_BUFFERS);
     
@@ -88,7 +103,7 @@ void main() {
     // 2. ObjectBuffer - Try to read first element
     bufferColors[2] = vec4(1.0, 0.0, 0.0, 1.0);
     if (ubo.numObjects > 0) {
-        uint testVal = objectData[0];
+        uint testVal = objects[0].flags;
         bufferColors[2] = vec4(0.0, 1.0, 0.0, 1.0);
     }
     
@@ -152,14 +167,18 @@ void main() {
         float offset = sin(ubo.time)*0.3;
 
         // Triangle vertices
-        gl_MeshVerticesEXT[baseVertex + 0].gl_Position = ubo.projMatrix * ubo.viewMatrix * vec4(x - size + offset, y - size, 0.0, 1.0);
-        gl_MeshVerticesEXT[baseVertex + 1].gl_Position = ubo.projMatrix * ubo.viewMatrix * vec4(x + size + offset, y - size, 0.0, 1.0);
-        gl_MeshVerticesEXT[baseVertex + 2].gl_Position = ubo.projMatrix * ubo.viewMatrix * vec4(x+ offset, y + size, 0.0, 1.0);
-        
+
+        vec4 worldPos = vec4(objects[i].transform[3].xyz,1.0);  // Extract just the position
+
+
+        gl_MeshVerticesEXT[baseVertex + 0].gl_Position = ubo.projMatrix * ubo.viewMatrix * (worldPos + vec4(x - size, y - size, 0.0, 1.0));
+        gl_MeshVerticesEXT[baseVertex + 1].gl_Position = ubo.projMatrix * ubo.viewMatrix * (worldPos + vec4(x + size, y - size, 0.0, 1.0));
+        gl_MeshVerticesEXT[baseVertex + 2].gl_Position = ubo.projMatrix * ubo.viewMatrix * (worldPos + vec4(x, y + size, 0.0, 1.0));
+
         // Assign colors
-        meshColor[baseVertex + 0] = bufferColors[i];
-        meshColor[baseVertex + 1] = bufferColors[i];
-        meshColor[baseVertex + 2] = bufferColors[i];
+        meshColor[baseVertex + 0] = vec4(1.0,0.0,0.4125,1.0);
+        meshColor[baseVertex + 1] = vec4(1.0,0.0,0.4125,1.0);
+        meshColor[baseVertex + 2] = vec4(1.0,0.0,0.4125,1.0);
         
         // Buffer index for fragment shader
         bufferIndex[baseVertex + 0] = i;

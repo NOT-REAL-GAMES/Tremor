@@ -2,7 +2,6 @@
 #version 460
 #extension GL_EXT_mesh_shader : require
 
-// All buffer bindings
 layout(set = 0, binding = 0) uniform ClusterUBO {
     mat4 viewMatrix;
     mat4 projMatrix;
@@ -28,12 +27,28 @@ struct Cluster {
     uint objectCount;
 };
 
+struct RenderableObject {
+    mat4 transform;
+    mat4 prevTransform;
+    uint meshID;
+    uint materialID;
+    uint instanceID;
+    uint flags;
+    // AABBQ bounds - 6 int64_t values represented as uvec2 pairs
+    uvec2 boundsMinX; // int64_t as 2 uint32_t
+    uvec2 boundsMinY;
+    uvec2 boundsMinZ;
+    uvec2 boundsMaxX;
+    uvec2 boundsMaxY;
+    uvec2 boundsMaxZ;
+};
+
 layout(set = 0, binding = 1) readonly buffer ClusterBuffer {
     Cluster clusters[];
 };
 
 layout(set = 0, binding = 2) readonly buffer ObjectBuffer {
-    uint objectData[];
+    RenderableObject objects[];
 };
 
 layout(set = 0, binding = 3) readonly buffer LightBuffer {
@@ -88,7 +103,7 @@ void main() {
     // 2. ObjectBuffer - Try to read first element
     bufferColors[2] = vec4(1.0, 0.0, 0.0, 1.0);
     if (ubo.numObjects > 0) {
-        uint testVal = objectData[0];
+        uint testVal = objects[0].flags;
         bufferColors[2] = vec4(0.0, 1.0, 0.0, 1.0);
     }
     

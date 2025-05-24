@@ -1574,7 +1574,7 @@ namespace tremor::gfx {
     };
 
     // 64-bit quantized vector for positions (1/128 millimeter precision)
-    struct Vec3Q {
+    struct alignas(16) Vec3Q {
         int64_t x, y, z;
 
         Vec3Q() : x(0), y(0), z(0) {}
@@ -1630,7 +1630,7 @@ namespace tremor::gfx {
     };
 
     // Quantized Axis-Aligned Bounding Box for 64-bit coordinates
-    struct AABBQ {
+    struct alignas(16) AABBQ {
         Vec3Q min;
         Vec3Q max;
 
@@ -3037,7 +3037,7 @@ namespace tremor::gfx {
         uint32_t taskGroupX = (m_totalClusters + 31) / 32;
         taskGroupX = std::max(taskGroupX, 1u);
 
-        Logger::get().info("Dispatching {} task groups", taskGroupX);
+        Logger::get().info("Dispatching 1 task groups", taskGroupX);
 
         // Dispatch mesh shaders
         vkCmdDrawMeshTasksEXT(cmdBuffer, 1, 1, 1);
@@ -3067,8 +3067,8 @@ namespace tremor::gfx {
             const VkDeviceSize MESH_INFO_SIZE = sizeof(MeshInfo) * 10000;         // 10K meshes
             const VkDeviceSize MATERIAL_SIZE = sizeof(PBRMaterial) * 1000;        // 1K materials
             const VkDeviceSize CLUSTER_SIZE = sizeof(Cluster) * m_totalClusters;
-            const VkDeviceSize OBJECT_SIZE = sizeof(RenderableObject) * 100000; // 100K objects
-            const VkDeviceSize LIGHT_SIZE = sizeof(ClusterLight) * 10000;         // 10K lights
+            const VkDeviceSize OBJECT_SIZE = sizeof(RenderableObject) * 25; // 100K objects
+            const VkDeviceSize LIGHT_SIZE = sizeof(ClusterLight) * 1;         // 10K lights
             const VkDeviceSize INDEX_BUFFER_SIZE_CLUSTER = sizeof(uint32_t) * 1000000; // 1M indices
             const VkDeviceSize UBO_SIZE = sizeof(EnhancedClusterUBO);
 
@@ -6694,6 +6694,16 @@ namespace tremor::gfx {
                 obj.transform = glm::translate(glm::mat4(1.0f), glm::vec3(x, y, z));
                 obj.prevTransform = obj.transform;
 
+                glm::mat4& transform = obj.transform;
+                Logger::get().info("Object {}: pos=({:.2f}, {:.2f}, {:.2f})",
+                    i, transform[3][0], transform[3][1], transform[3][2]);
+                Logger::get().info("Object {}: scale=({:.2f}, {:.2f}, {:.2f})",
+                    i,
+                    glm::length(glm::vec3(transform[0])),  // X scale
+                    glm::length(glm::vec3(transform[1])),  // Y scale  
+                    glm::length(glm::vec3(transform[2]))); // Z scale
+
+
                 // Calculate bounds
                 AABBF localBounds{ glm::vec3(-0.5f), glm::vec3(0.5f) };
                 AABBF worldBounds = transformAABB(obj.transform, localBounds);
@@ -7040,11 +7050,7 @@ namespace tremor::gfx {
             float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
 
             // Position camera to see the 5x5 grid clearly
-            float radius = 20.0f; // Increased distance
-            float height = 10.0f;  // Higher up
-            cam.setPosition(glm::vec3(sin(time * 0.2f) * radius, height, cos(time * 0.2f) * radius));
-            cam.lookAt(glm::vec3(0.0f, 0.0f, 0.0f)); // Look at center of grid
-            cam.update(0.0f);
+
 
             UniformBufferObject ubo{};
             ubo.model = glm::mat4(1.0f); // Identity - objects have their own transforms
@@ -7679,7 +7685,7 @@ namespace tremor::gfx {
 
             cam.extent = vkSwapchain.get()->extent();
 
-            updateUniformBuffer();
+            //updateUniformBuffer();
             updateLight();
 
             // Add camera debug info
@@ -9222,7 +9228,7 @@ namespace tremor::gfx {
                     m_objectBuffer->update(m_visibleObjects.data(), objectSize);
 
                     // Debug: Check first few objects
-                    for (size_t i = 0; i < std::min(size_t(3), m_visibleObjects.size()); i++) {
+                    for (size_t i = 0; i < std::min(size_t(25), m_visibleObjects.size()); i++) {
                         const auto& obj = m_visibleObjects[i];
                         Logger::get().info("  Object {}: meshID={}, materialID={}, instanceID={}",
                             i, obj.meshID, obj.materialID, obj.instanceID);
@@ -9746,6 +9752,16 @@ namespace tremor::gfx {
 
         try {
             EnhancedClusterUBO ubo{};
+            static auto startTime = std::chrono::high_resolution_clock::now();
+            auto currentTime = std::chrono::high_resolution_clock::now();
+            auto time = std::chrono::duration<float>(currentTime - startTime).count();
+
+            float radius = 8.0f; // Increased distance
+            float height = 2.0f;  // Higher up
+            camera->setPosition(glm::vec3(sin(time * 0.2f) * radius, height, cos(time * 0.2f) * radius));
+            camera->lookAt(glm::vec3(0.0f, 0.0f, 0.0f)); // Look at center of grid
+            camera->update(0.0f);
+
 
             ubo.viewMatrix = camera->getViewMatrix();
             ubo.projMatrix = camera->getProjectionMatrix();
@@ -9770,8 +9786,6 @@ namespace tremor::gfx {
 
             // Frame data
             static uint32_t frameCounter = 0;
-            static auto startTime = std::chrono::high_resolution_clock::now();
-            auto currentTime = std::chrono::high_resolution_clock::now();
 
             ubo.frameNumber = frameCounter++;
             ubo.time = std::chrono::duration<float>(currentTime - startTime).count();
@@ -10286,7 +10300,7 @@ namespace tremor::gfx {
         Logger::get().info("Light buffer size: {}", m_lightBuffer->getSize());
 
         // Binding 3: Light Buffer
-        /*VkDescriptorBufferInfo lightInfo{
+        VkDescriptorBufferInfo lightInfo{
             m_lightBuffer->getBuffer(),
             0,
 			m_lightBuffer->getSize()
@@ -10301,7 +10315,7 @@ namespace tremor::gfx {
             nullptr,
             &lightInfo,
             nullptr
-            });*/
+            });
 
         Logger::get().info("Index buffer size: {}", m_indexBuffer->getSize());
 
@@ -10388,7 +10402,7 @@ namespace tremor::gfx {
 
 
         // Binding 8: Material Buffer
-        /*VkDescriptorBufferInfo materialInfo{
+        VkDescriptorBufferInfo materialInfo{
             m_materialBuffer->getBuffer(),
             0,
 			m_materialBuffer->getSize()
@@ -10403,7 +10417,7 @@ namespace tremor::gfx {
             nullptr,
             &materialInfo,
             nullptr
-            });*/
+            });
 
         // Only add texture bindings if textures exist
         VkDescriptorImageInfo albedoImageInfo{};
