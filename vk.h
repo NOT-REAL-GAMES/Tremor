@@ -123,11 +123,13 @@ namespace tremor::gfx {
 
     const float PI = 3.14159265359f;
 
-    struct MeshVertex {
-        alignas(16) glm::vec3 position;
-        alignas(16) glm::vec3 normal;
-        alignas(16) glm::vec2 texCoord;
-        alignas(16) glm::vec4 tangent; // w component stores handedness
+    struct alignas(16) MeshVertex {
+        glm::vec3 position;
+        glm::vec3 normal;
+        glm::vec2 texCoord;
+        glm::vec4 tangent; // w component stores handedness
+
+    };
 
         static std::vector<VkVertexInputAttributeDescription> getAttributeDescriptions() {
             std::vector<VkVertexInputAttributeDescription> attributes(4);
@@ -139,8 +141,6 @@ namespace tremor::gfx {
 
             return attributes;
         }
-    };
-
 
     struct Material {
         alignas(16) glm::vec4 baseColor;
@@ -227,6 +227,17 @@ namespace tremor::gfx {
             }
 
             memcpy(mappedData, data, static_cast<size_t>(size));
+
+            VkMappedMemoryRange range = {
+                VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+                nullptr,
+                m_memory,
+                offset,
+                size
+            };
+            vkFlushMappedMemoryRanges(m_device, 1, &range);
+
+
             vkUnmapMemory(m_device, m_memory);
         }
 
@@ -1454,11 +1465,12 @@ namespace tremor::gfx {
 
 
     // Represents a cluster in our 3D grid
-    struct Cluster {
+    struct alignas(16) Cluster {
         uint32_t lightOffset;
         uint32_t lightCount;
         uint32_t objectOffset;
         uint32_t objectCount;
+        uint32_t _padding[3]; // Pad to 16 bytes for std430 alignment
     };
 
     // A light with all properties needed for shading
@@ -2258,73 +2270,99 @@ namespace tremor::gfx {
     // ===============================
 
     // Cluster grid dimensions (typically 16x16x24)
-    struct ClusterConfig {
-        alignas(4) uint32_t xSlices;      // Horizontal slice count (e.g., 16)
-        alignas(4) uint32_t ySlices;      // Vertical slice count (e.g., 16)
-        alignas(4) uint32_t zSlices;      // Depth slice count (e.g., 24)
-        alignas(4) float nearPlane;       // Camera near clip distance
-        alignas(4) float farPlane;        // Camera far clip distance
-        alignas(4) bool logarithmicZ;     // Whether to use logarithmic Z distribution
+    struct alignas(16) ClusterConfig {
+         uint32_t xSlices;      // Horizontal slice count (e.g., 16)
+         uint32_t ySlices;      // Vertical slice count (e.g., 16)
+         uint32_t zSlices;      // Depth slice count (e.g., 24)
+         float nearPlane;       // Camera near clip distance
+         float farPlane;        // Camera far clip distance
+         bool logarithmicZ;     // Whether to use logarithmic Z distribution
     };
 
     // Light data structure for cluster-based lighting
-    struct ClusterLight {
-        alignas(16) glm::vec3 position;   // World-space position
-        alignas(4) float radius;                     // Light radius/range
-        alignas(16) glm::vec3 color;      // RGB color
-        alignas(4) float intensity;                  // Light intensity/brightness
-        alignas(4) int32_t type;                     // 0=point, 1=spot, 2=area, etc.
-        alignas(4) float spotAngle;                  // Cone angle for spotlights
-        alignas(4) float spotSoftness;               // Spot light edge softness
-        alignas(4) float padding;                    // For alignment
+    struct alignas(16) ClusterLight {
+         glm::vec3 position;   // World-space position
+         float radius;                     // Light radius/range
+         glm::vec3 color;      // RGB color
+         float intensity;                  // Light intensity/brightness
+         int32_t type;                     // 0=point, 1=spot, 2=area, etc.
+         float spotAngle;                  // Cone angle for spotlights
+         float spotSoftness;               // Spot light edge softness
+         float padding;                    // For alignment
     };
 
     // Mesh information for GPU access
-    struct MeshInfo {
-        alignas(4) uint32_t vertexOffset;
-        alignas(4) uint32_t vertexCount;
-        alignas(4) uint32_t indexOffset;
-        alignas(4) uint32_t indexCount;
-        alignas(16) glm::vec3 boundsMin;
-        alignas(4) float padding1;
-        alignas(16) glm::vec3 boundsMax;
-        alignas(4) float padding2;
+    struct alignas(16) MeshInfo {
+        uint32_t vertexOffset;
+        uint32_t vertexCount;
+        uint32_t indexOffset;
+        uint32_t indexCount;
+        glm::vec3 boundsMin;
+        float padding1;
+        glm::vec3 boundsMax;
+        float padding2;
     };
+
 
     // Enhanced material structure
     struct PBRMaterial {
-        alignas(16) glm::vec4 baseColor;
-        alignas(4) float metallic;
-        alignas(4) float roughness;
-        alignas(4) float normalScale;
-        alignas(4) float occlusionStrength;
-        alignas(16) glm::vec3 emissiveColor;
-        alignas(4) float emissiveFactor;
+         glm::vec4 baseColor;
+        float metallic;
+        float roughness;
+        float normalScale;
+        float occlusionStrength;
+         glm::vec3 emissiveColor;
+        float emissiveFactor;
 
         // Texture indices (into a texture array or descriptor array)
-        alignas(4) int32_t albedoTexture;
-        alignas(4) int32_t normalTexture;
-        alignas(4) int32_t metallicRoughnessTexture;
-        alignas(4) int32_t occlusionTexture;
-        alignas(4) int32_t emissiveTexture;
-        alignas(4) float alphaCutoff;
-        alignas(4) uint32_t flags; // Alpha blend, double sided, etc.
-        alignas(4) float padding;
+        int32_t albedoTexture;
+        int32_t normalTexture;
+        int32_t metallicRoughnessTexture;
+        int32_t occlusionTexture;
+        int32_t emissiveTexture;
+        float alphaCutoff;
+        uint32_t flags; // Alpha blend, double sided, etc.
+        float padding;
     };
 
     // Enhanced renderable object
-    struct RenderableObject {
-        alignas(16) glm::mat4 transform;
-        alignas(16) glm::mat4 prevTransform; // For motion vectors
-        alignas(4) uint32_t meshID;
-        alignas(4) uint32_t materialID;
-        alignas(4) uint32_t instanceID; // For instancing support
-        alignas(4) uint32_t flags; // Visibility, shadow casting, etc.
-        alignas(16) AABBQ bounds; // Quantized bounds for large worlds
+    struct alignas(16) RenderableObject {
+        glm::mat4 transform;
+        glm::mat4 prevTransform;
+        uint32_t meshID;
+        uint32_t materialID;
+        uint32_t instanceID;
+        uint32_t flags;
+        AABBQ bounds; // Quantized bounds for large worlds
     };
 
     class ClusteredRenderer {
     public:
+
+        void debugBufferContents();
+
+        void debugStructLayout() {
+            Logger::get().info("=== STRUCT LAYOUT DEBUG ===");
+            Logger::get().info("sizeof(glm::mat4): {}", sizeof(glm::mat4));
+            Logger::get().info("sizeof(AABBQ): {}", sizeof(AABBQ));
+            Logger::get().info("sizeof(Vec3Q): {}", sizeof(Vec3Q));
+            Logger::get().info("sizeof(RenderableObject): {}", sizeof(RenderableObject));
+            Logger::get().info("sizeof(Cluster): {}", sizeof(Cluster));
+            Logger::get().info("sizeof(MeshInfo): {}", sizeof(MeshInfo));
+            Logger::get().info("sizeof(ClusterLight): {}", sizeof(ClusterLight));
+
+            // Check if there's unexpected padding
+            RenderableObject obj{};
+            Logger::get().info("transform offset: {}", offsetof(RenderableObject, transform));
+            Logger::get().info("prevTransform offset: {}", offsetof(RenderableObject, prevTransform));
+            Logger::get().info("meshID offset: {}", offsetof(RenderableObject, meshID));
+            Logger::get().info("bounds offset: {}", offsetof(RenderableObject, bounds));
+        }
+
+        void debugRenderableObjectLayout();
+
+
+        void renderTestBufferAccess(VkCommandBuffer cmdBuffer, Camera* camera);
 
         void renderWorkingMeshTest(VkCommandBuffer cmdBuffer, Camera* camera);
 
@@ -2334,7 +2372,8 @@ namespace tremor::gfx {
 
         bool createDebugPipeline();
 
-		std::unique_ptr<PipelineResource> m_workingMeshPipeline;
+        std::unique_ptr<PipelineResource> m_testBufferPipeline;
+        std::unique_ptr<PipelineResource> m_workingMeshPipeline;
 		std::unique_ptr<PipelineLayoutResource> m_workingMeshPipelineLayout;
         
         void debugShaderReflection() {
@@ -2520,22 +2559,23 @@ namespace tremor::gfx {
     };
 
     // UBO for enhanced cluster rendering
-    struct EnhancedClusterUBO {
-        alignas(16) glm::mat4 viewMatrix;
-        alignas(16) glm::mat4 projMatrix;
-        alignas(16) glm::mat4 invViewMatrix;
-        alignas(16) glm::mat4 invProjMatrix;
-        alignas(16) glm::vec4 cameraPos;
-        alignas(16) glm::uvec4 clusterDimensions;
-        alignas(16) glm::vec4 zPlanes;
-        alignas(16) glm::vec4 screenSize; // width, height, 1/width, 1/height
-        alignas(4) uint32_t numLights;
-        alignas(4) uint32_t numObjects;
-        alignas(4) uint32_t numClusters;
-        alignas(4) uint32_t frameNumber;
-        alignas(4) float time;
-        alignas(4) float deltaTime;
-        alignas(4) uint32_t flags; // Debug flags, etc.
+    struct alignas(16) EnhancedClusterUBO {
+        glm::mat4 viewMatrix;
+        glm::mat4 projMatrix;
+        glm::mat4 invViewMatrix;
+        glm::mat4 invProjMatrix;
+        glm::vec4 cameraPos;
+        glm::uvec4 clusterDimensions;
+        glm::vec4 zPlanes;
+        glm::vec4 screenSize;
+        uint32_t numLights;
+        uint32_t numObjects;
+        uint32_t numClusters;
+        uint32_t frameNumber;
+        float time;
+        float deltaTime;
+        uint32_t flags;
+        uint32_t _padding; // Ensure 16-byte alignment
     };
 
     uint32_t ClusteredRenderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
@@ -2708,7 +2748,52 @@ namespace tremor::gfx {
     }
 
     void ClusteredRenderer::buildClusters(Camera* camera, const Octree<RenderableObject>& octree) {
-        if (!camera) {
+
+        Logger::get().info("=== BYPASS MODE: FORCE RENDER ALL OBJECTS ===");
+
+        // Clear and reset
+        m_clusterLightIndices.clear();
+        m_clusterObjectIndices.clear();
+        m_visibleObjects.clear();
+
+        // Get ALL objects from octree and mark them visible
+        auto allObjects = octree.getAllObjects();
+        Logger::get().info("Found {} objects in octree", allObjects.size());
+
+        if (allObjects.empty()) {
+            Logger::get().error("CRITICAL: Octree is empty!");
+            return;
+        }
+
+        // Copy all objects to visible list
+        m_visibleObjects = allObjects;
+
+        // Force all objects into cluster 0
+        for (size_t i = 0; i < m_visibleObjects.size(); i++) {
+            m_clusterObjectIndices.push_back(static_cast<uint32_t>(i));
+        }
+
+        // Set cluster 0 to contain all objects
+        for (auto& cluster : m_clusters) {
+            cluster.objectOffset = 0;
+            cluster.objectCount = 0;
+            cluster.lightOffset = 0;
+            cluster.lightCount = 0;
+        }
+
+        m_clusters[0].objectOffset = 0;
+        m_clusters[0].objectCount = static_cast<uint32_t>(m_visibleObjects.size());
+
+        Logger::get().info("BYPASS: Forced {} objects into cluster 0", m_visibleObjects.size());
+
+        // Update GPU buffers and continue
+        updateGPUBuffers();
+        updateUniformBuffers(camera);
+
+        Logger::get().info("BYPASS MODE COMPLETE");
+        return;  // Skip all normal clustering logic
+
+        /*if (!camera) {
             Logger::get().error("buildClusters: camera is NULL!");
             return;
         }
@@ -2746,6 +2831,26 @@ namespace tremor::gfx {
 
         // Assign objects to clusters
         assignObjectsToClusters();
+
+        Logger::get().info("Camera at ({:.1f}, {:.1f}, {:.1f}) looking at origin",
+            camera->getLocalPosition().x, camera->getLocalPosition().y, camera->getLocalPosition().z);
+
+        // For each object, log which clusters it gets assigned to
+        for (size_t objIdx = 0; objIdx < m_visibleObjects.size(); objIdx++) {
+            const auto& obj = m_visibleObjects[objIdx];
+            AABBF worldBounds = obj.bounds.toFloat();
+            std::vector<uint32_t> clusters = findClustersForBounds(worldBounds, m_camera);
+
+            Logger::get().info("Object {} at bounds ({:.1f},{:.1f},{:.1f})->({:.1f},{:.1f},{:.1f}) assigned to {} clusters",
+                objIdx, worldBounds.min.x, worldBounds.min.y, worldBounds.min.z,
+                worldBounds.max.x, worldBounds.max.y, worldBounds.max.z, clusters.size());
+
+            if (!clusters.empty()) {
+                Logger::get().info("  First cluster: {}", clusters[0]);
+            }
+        }
+
+
         Logger::get().info("After cluster assignment: {} cluster object indices", m_clusterObjectIndices.size());
 
         // Assign lights to clusters
@@ -2756,7 +2861,7 @@ namespace tremor::gfx {
         updateGPUBuffers();
         updateUniformBuffers(camera);
 
-        Logger::get().info("=== BUILD CLUSTERS DEBUG END ===");
+        Logger::get().info("=== BUILD CLUSTERS DEBUG END ===");*/
     }
 
 
@@ -2779,6 +2884,14 @@ namespace tremor::gfx {
 
     void ClusteredRenderer::render(VkCommandBuffer cmdBuffer, Camera* camera) {
 		//renderDebug(cmdBuffer, camera);
+
+        debugStructLayout();
+
+        updateUniformBuffers(camera);
+
+        Logger::get().info("C++ EnhancedClusterUBO size: {}", sizeof(EnhancedClusterUBO));
+        Logger::get().info("C++ time offset: {}", offsetof(EnhancedClusterUBO, time));
+
         
         Logger::get().info("=== CLUSTERED RENDERER DEBUG START ===");
         Logger::get().info("Pipeline valid: {}", m_pipeline ? "YES" : "NO");
@@ -2829,6 +2942,8 @@ namespace tremor::gfx {
 
         Logger::get().info("All pipeline resources valid");
 
+        debugBufferContents();
+
         // Memory barriers for buffer updates
         std::vector<VkBufferMemoryBarrier> barriers;
 
@@ -2846,10 +2961,10 @@ namespace tremor::gfx {
             };
 
         addBarrier(m_uniformBuffer->getBuffer(), m_uniformBuffer->getSize());
-        addBarrier(m_clusterBuffer->getBuffer(), m_clusterBuffer->getSize());
-        addBarrier(m_objectBuffer->getBuffer(), m_objectBuffer->getSize());
-        addBarrier(m_lightBuffer->getBuffer(), m_lightBuffer->getSize());
-        addBarrier(m_indexBuffer->getBuffer(), m_indexBuffer->getSize());
+        //addBarrier(m_clusterBuffer->getBuffer(), m_clusterBuffer->getSize());
+        //addBarrier(m_objectBuffer->getBuffer(), m_objectBuffer->getSize());
+        //addBarrier(m_lightBuffer->getBuffer(), m_lightBuffer->getSize());
+        //addBarrier(m_indexBuffer->getBuffer(), m_indexBuffer->getSize());
 
 
         vkCmdPipelineBarrier(
@@ -2880,7 +2995,6 @@ namespace tremor::gfx {
 
         // Bind pipeline
 
-        updateDescriptorSet();
 
 		logAllDescriptorInfo();
         
@@ -2961,55 +3075,55 @@ namespace tremor::gfx {
             // Create all buffers
             m_vertexBuffer = std::make_unique<Buffer>(
                 m_device, m_physicalDevice, VERTEX_BUFFER_SIZE,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
             m_meshIndexBuffer = std::make_unique<Buffer>(
                 m_device, m_physicalDevice, INDEX_BUFFER_SIZE,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
             m_meshInfoBuffer = std::make_unique<Buffer>(
                 m_device, m_physicalDevice, MESH_INFO_SIZE,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
             m_materialBuffer = std::make_unique<Buffer>(
                 m_device, m_physicalDevice, MATERIAL_SIZE,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
             m_clusterBuffer = std::make_unique<Buffer>(
                 m_device, m_physicalDevice, CLUSTER_SIZE,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
             m_objectBuffer = std::make_unique<Buffer>(
                 m_device, m_physicalDevice, OBJECT_SIZE,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
             m_lightBuffer = std::make_unique<Buffer>(
                 m_device, m_physicalDevice, LIGHT_SIZE,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
             m_indexBuffer = std::make_unique<Buffer>(
                 m_device, m_physicalDevice, INDEX_BUFFER_SIZE_CLUSTER,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
             m_uniformBuffer = std::make_unique<Buffer>(
                 m_device, m_physicalDevice, UBO_SIZE,
-                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
@@ -3300,15 +3414,15 @@ namespace tremor::gfx {
 
     // UBO for cluster rendering
     struct ClusterUBO {
-        alignas(16) glm::mat4 viewMatrix;
-        alignas(16) glm::mat4 projMatrix;
-        alignas(16) glm::vec4 cameraPos;
-        alignas(16) glm::uvec4 clusterDimensions;  // x, y, z, pad
-        alignas(16) glm::vec4 zPlanes;             // near, far, clustersPerZ, pad
-        alignas(4) uint32_t numLights;
-        alignas(4) uint32_t numObjects;
-        alignas(4) uint32_t numClusters;
-        alignas(4) uint32_t padding;
+         glm::mat4 viewMatrix;
+         glm::mat4 projMatrix;
+         glm::vec4 cameraPos;
+         glm::uvec4 clusterDimensions;  // x, y, z, pad
+         glm::vec4 zPlanes;             // near, far, clustersPerZ, pad
+         uint32_t numLights;
+         uint32_t numObjects;
+         uint32_t numClusters;
+         uint32_t padding;
     };
 
     // ===============================
@@ -3773,17 +3887,17 @@ namespace tremor::gfx {
     struct PBRMaterialUBO {
         // Basic properties
         alignas(16) float baseColor[4];   // vec4 in shader
-        alignas(4) float metallic;        // float in shader
-        alignas(4) float roughness;       // float in shader
-        alignas(4) float ao;              // float in shader
+         float metallic;        // float in shader
+         float roughness;       // float in shader
+         float ao;              // float in shader
         alignas(16) float emissive[3];    // vec3 in shader (padded to 16 bytes)
 
         // Texture availability flags
-        alignas(4) int hasAlbedoMap;
-        alignas(4) int hasNormalMap;
-        alignas(4) int hasMetallicRoughnessMap;
-        alignas(4) int hasAoMap;
-        alignas(4) int hasEmissiveMap;
+         int hasAlbedoMap;
+         int hasNormalMap;
+         int hasMetallicRoughnessMap;
+         int hasAoMap;
+         int hasEmissiveMap;
     };
 
     
@@ -7745,6 +7859,7 @@ namespace tremor::gfx {
 
             // Render using clustered renderer
             m_clusteredRenderer->render(m_commandBuffers[currentFrame], &cam);
+            //m_clusteredRenderer->renderTestBufferAccess(m_commandBuffers[currentFrame], &cam);
 
 			//m_clusteredRenderer->renderWorkingMeshTest(m_commandBuffers[currentFrame],&cam);
 
@@ -8643,346 +8758,6 @@ private:
         bool createAndUpdateDescriptorSets() {
             return true;
         }
-
-        //bool createGraphicsPipeline() {
-        //    try {
-        //        m_resourceBindings = m_combinedReflection.getResourceBindings();
-        //        m_uniformBuffers = m_combinedReflection.getUniformBuffers();
-
-
-        //        // ===== 1. LOAD SHADERS =====
-        //        Logger::get().info("Loading and compiling shaders...");
-        //        m_pipelineShaders.clear();
-
-        //        auto vertShader = sm->loadShader("shaders/pbr.vert");
-        //        if (!vertShader) {
-        //            Logger::get().error("Failed to load vertex shader: shaders/pbr.vert");
-        //            return false;
-        //        }
-
-        //        auto fragShader = sm->loadShader("shaders/pbr.frag");
-        //        if (!fragShader) {
-        //            Logger::get().error("Failed to load fragment shader: shaders/pbr.frag");
-        //            return false;
-        //        }
-
-        //        m_pipelineShaders.push_back(vertShader);
-        //        m_pipelineShaders.push_back(fragShader);
-
-        //        // ===== 2. PREPARE SHADER STAGES =====
-        //        std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
-        //        shaderStages.reserve(m_pipelineShaders.size());
-
-        //        for (const auto& shader : m_pipelineShaders) {
-        //            shaderStages.push_back(shader->createShaderStageInfo());
-        //        }
-
-        //        // ===== 3. EXTRACT REFLECTION DATA =====
-        //        Logger::get().info("Extracting shader reflection data...");
-        //        ShaderReflection combinedReflection;
-
-        //        for (const auto& shader : m_pipelineShaders) {
-        //            const ShaderReflection* reflection = shader->getReflection();
-        //            if (reflection) {
-        //                combinedReflection.merge(*reflection);
-        //            }
-        //        }
-
-        //        // ===== 4. CREATE DESCRIPTOR SET LAYOUTS =====
-        //        Logger::get().info("Creating descriptor set layouts...");
-        //        uint32_t maxSetNumber = 0;
-
-        //        for (const auto& binding : combinedReflection.getResourceBindings()) {
-        //            maxSetNumber = std::max(maxSetNumber, binding.set);
-        //        }
-
-        //        Logger::get().info("Shader requires {} descriptor sets", maxSetNumber + 1);
-        //        m_descriptorSetLayouts.clear();
-        //        m_descriptorSetLayouts.resize(maxSetNumber + 1);
-
-        //        std::vector<VkDescriptorSetLayout> rawSetLayouts;
-        //        rawSetLayouts.reserve(maxSetNumber + 1);
-
-        //        for (uint32_t i = 0; i <= maxSetNumber; i++) {
-        //            auto layout = combinedReflection.createDescriptorSetLayout(device, i);
-        //            if (layout) {
-        //                Logger::get().info("Created layout for set {} with bindings", i);
-        //                m_descriptorSetLayouts[i] = std::move(layout);
-        //                rawSetLayouts.push_back(m_descriptorSetLayouts[i]->handle());
-        //            }
-        //            else {
-        //                // Create empty layout
-        //                Logger::get().info("Creating empty layout for set {}", i);
-        //                VkDescriptorSetLayoutCreateInfo emptyInfo{};
-        //                emptyInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        //                emptyInfo.bindingCount = 0;
-
-        //                auto emptyLayout = std::make_unique<DescriptorSetLayoutResource>(device);
-        //                VkResult result = vkCreateDescriptorSetLayout(device, &emptyInfo, nullptr, &emptyLayout->handle());
-        //                if (result != VK_SUCCESS) {
-        //                    Logger::get().error("Failed to create empty descriptor set layout: {}", static_cast<int>(result));
-        //                    return false;
-        //                }
-
-        //                m_descriptorSetLayouts[i] = std::move(emptyLayout);
-        //                rawSetLayouts.push_back(m_descriptorSetLayouts[i]->handle());
-        //            }
-        //        }
-
-        //        // ===== 5. CREATE PIPELINE LAYOUT =====
-        //        Logger::get().info("Creating pipeline layout...");
-        //        // Set up push constant ranges
-        //        std::vector<VkPushConstantRange> pushConstantRanges;
-        //        for (const auto& range : combinedReflection.getPushConstantRanges()) {
-        //            VkPushConstantRange vkRange{};
-        //            vkRange.stageFlags = range.stageFlags;
-        //            vkRange.offset = range.offset;
-        //            vkRange.size = range.size;
-        //            pushConstantRanges.push_back(vkRange);
-        //        }
-
-        //        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-        //        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        //        pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(rawSetLayouts.size());
-        //        pipelineLayoutInfo.pSetLayouts = rawSetLayouts.data();
-        //        pipelineLayoutInfo.pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size());
-        //        pipelineLayoutInfo.pPushConstantRanges = pushConstantRanges.empty() ? nullptr : pushConstantRanges.data();
-
-        //        VkPipelineLayout pipelineLayoutHandle;
-        //        VkResult layoutResult = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayoutHandle);
-        //        if (layoutResult != VK_SUCCESS) {
-        //            Logger::get().error("Failed to create pipeline layout: {}", static_cast<int>(layoutResult));
-        //            return false;
-        //        }
-
-        //        m_pipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayoutHandle);
-
-        //        auto descriptorAllocator = std::make_unique<DescriptorAllocator>(device);
-        //        auto descriptorLayoutCache = std::make_unique<DescriptorLayoutCache>(device);
-
-        //        DescriptorWriter writer(*descriptorLayoutCache, *descriptorAllocator);
-
-
-
-        //        // ===== 6. CREATE DESCRIPTOR POOL =====
-        //        Logger::get().info("Creating descriptor pool...");
-        //        m_descriptorPool = combinedReflection.createDescriptorPool(device);
-        //        if (!m_descriptorPool) {
-        //            Logger::get().error("Failed to create descriptor pool");
-        //            return false;
-        //        }
-
-
-        //        DescriptorBuilder builder(device, combinedReflection, m_descriptorPool);
-
-        //        builder.registerUniformBuffer("UniformBufferObject", m_uniformBuffer.get(), sizeof(UniformBufferObject))
-        //            .registerUniformBuffer("LightUBO", m_lightBuffer.get(), sizeof(LightUBO))
-        //            .registerUniformBuffer("MaterialUBO", m_materialBuffer.get(), sizeof(MaterialUBO))
-        //            //.registerTexture("albedoMap", m_albedoTexture, m_textureSampler)
-        //            //.registerTexture("normalMap", m_normalTexture, m_textureSampler)
-        //            .setDefaultTexture(m_missingTextureImageView.get(), m_textureSampler.get());
-
-        //        if (!builder.buildFromReflection()) {
-        //            Logger::get().error("Failed to build descriptor sets");
-        //            return false;
-        //        }
-
-        //        builder.takeDescriptorSets(m_descriptorSets);
-
-        //        
-
-        //        Logger::get().info("Descriptor sets created successfully");
-
-
-        //        // ===== 9. CONFIGURE PIPELINE STATE =====
-        //        Logger::get().info("Configuring pipeline state...");
-        //        PipelineState pipelineState;
-
-        //        // Configure vertex input state
-        //        auto bindingDescription = BlinnPhongVertex::getBindingDescription();
-        //        auto attributeDescriptions = BlinnPhongVertex::getAttributeDescriptions();
-
-        //        pipelineState.vertexInputState = {};
-        //        pipelineState.vertexInputState.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        //        pipelineState.vertexInputState.vertexBindingDescriptionCount = 1;
-        //        pipelineState.vertexInputState.pVertexBindingDescriptions = &bindingDescription;
-        //        pipelineState.vertexInputState.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
-        //        pipelineState.vertexInputState.pVertexAttributeDescriptions = attributeDescriptions.data();
-
-        //        // Configure input assembly
-        //        pipelineState.inputAssemblyState = {};
-        //        pipelineState.inputAssemblyState.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        //        pipelineState.inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        //        pipelineState.inputAssemblyState.primitiveRestartEnable = VK_FALSE;
-
-        //        // Configure viewport and scissor state
-        //        VkViewport viewport{};
-        //        viewport.x = 0.0f;
-        //        viewport.y = 0.0f;
-        //        viewport.width = static_cast<float>(vkSwapchain->extent().width);
-        //        viewport.height = static_cast<float>(vkSwapchain->extent().height);
-        //        viewport.minDepth = 0.0f;
-        //        viewport.maxDepth = 1.0f;
-
-        //        VkRect2D scissor{};
-        //        scissor.offset = { 0, 0 };
-        //        scissor.extent = vkSwapchain->extent();
-
-        //        pipelineState.viewportState = {};
-        //        pipelineState.viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-        //        pipelineState.viewportState.viewportCount = 1;
-        //        pipelineState.viewportState.pViewports = &viewport;
-        //        pipelineState.viewportState.scissorCount = 1;
-        //        pipelineState.viewportState.pScissors = &scissor;
-
-        //        // Configure rasterization state
-        //        pipelineState.rasterizationState = {};
-        //        pipelineState.rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        //        pipelineState.rasterizationState.depthClampEnable = VK_FALSE;
-        //        pipelineState.rasterizationState.rasterizerDiscardEnable = VK_FALSE;
-        //        pipelineState.rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
-        //        pipelineState.rasterizationState.lineWidth = 1.0f;
-        //        pipelineState.rasterizationState.cullMode = VK_CULL_MODE_BACK_BIT;
-        //        pipelineState.rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        //        pipelineState.rasterizationState.depthBiasEnable = VK_FALSE;
-
-        //        // Configure multisample state
-        //        pipelineState.multisampleState = {};
-        //        pipelineState.multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        //        pipelineState.multisampleState.sampleShadingEnable = VK_FALSE;
-        //        pipelineState.multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-        //        // Configure depth/stencil state
-        //        pipelineState.depthStencilState = {};
-        //        pipelineState.depthStencilState.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        //        pipelineState.depthStencilState.depthTestEnable = VK_TRUE;
-        //        pipelineState.depthStencilState.depthWriteEnable = VK_TRUE;
-        //        pipelineState.depthStencilState.depthCompareOp = VK_COMPARE_OP_GREATER;
-        //        pipelineState.depthStencilState.depthBoundsTestEnable = VK_FALSE;
-        //        pipelineState.depthStencilState.stencilTestEnable = VK_FALSE;
-
-        //        // Configure color blend state
-        //        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-        //        colorBlendAttachment.colorWriteMask =
-        //            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-        //            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        //        colorBlendAttachment.blendEnable = VK_TRUE;
-        //        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-        //        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        //        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-        //        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        //        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-        //        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
-
-        //        pipelineState.colorBlendState = {};
-        //        pipelineState.colorBlendState.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        //        pipelineState.colorBlendState.logicOpEnable = VK_FALSE;
-        //        pipelineState.colorBlendState.attachmentCount = 1;
-        //        pipelineState.colorBlendState.pAttachments = &colorBlendAttachment;
-
-        //        // Configure dynamic state
-        //        std::vector<VkDynamicState> dynamicStates = {
-        //            VK_DYNAMIC_STATE_VIEWPORT,
-        //            VK_DYNAMIC_STATE_SCISSOR
-        //        };
-
-        //        pipelineState.dynamicState = {};
-        //        pipelineState.dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-        //        pipelineState.dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-        //        pipelineState.dynamicState.pDynamicStates = dynamicStates.data();
-
-        //        // ===== 10. CREATE GRAPHICS PIPELINE =====
-        //        Logger::get().info("Creating graphics pipeline...");
-        //        if (vkDevice->capabilities().dynamicRendering) {
-        //            // Dynamic rendering pipeline
-        //            VkPipelineRenderingCreateInfoKHR renderingInfo{};
-        //            renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
-        //            renderingInfo.colorAttachmentCount = 1;
-        //            VkFormat colorFormat = vkSwapchain->imageFormat();
-        //            renderingInfo.pColorAttachmentFormats = &colorFormat;
-        //            renderingInfo.depthAttachmentFormat = vkDevice->depthFormat();
-
-        //            VkGraphicsPipelineCreateInfo pipelineInfo{};
-        //            pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        //            pipelineInfo.pNext = &renderingInfo;
-        //            pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-        //            pipelineInfo.pStages = shaderStages.data();
-        //            pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
-        //            pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
-        //            pipelineInfo.pViewportState = &pipelineState.viewportState;
-        //            pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
-        //            pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
-        //            pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
-        //            pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
-        //            pipelineInfo.pDynamicState = &pipelineState.dynamicState;
-        //            pipelineInfo.layout = m_pipelineLayout->handle();
-        //            pipelineInfo.renderPass = VK_NULL_HANDLE; // Not used with dynamic rendering
-        //            pipelineInfo.subpass = 0;
-        //            pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
-
-        //            VkPipeline graphicsPipeline;
-        //            VkResult result = vkCreateGraphicsPipelines(
-        //                device,
-        //                VK_NULL_HANDLE,
-        //                1,
-        //                &pipelineInfo,
-        //                nullptr,
-        //                &graphicsPipeline
-        //            );
-
-        //            if (result != VK_SUCCESS) {
-        //                Logger::get().error("Failed to create graphics pipeline with dynamic rendering: {}", static_cast<int>(result));
-        //                return false;
-        //            }
-
-        //            m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
-        //            Logger::get().info("Created dynamic rendering pipeline successfully");
-        //        }
-        //        else {
-        //            // Traditional render pass pipeline
-        //            VkGraphicsPipelineCreateInfo pipelineInfo{};
-        //            pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        //            pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-        //            pipelineInfo.pStages = shaderStages.data();
-        //            pipelineInfo.pVertexInputState = &pipelineState.vertexInputState;
-        //            pipelineInfo.pInputAssemblyState = &pipelineState.inputAssemblyState;
-        //            pipelineInfo.pViewportState = &pipelineState.viewportState;
-        //            pipelineInfo.pRasterizationState = &pipelineState.rasterizationState;
-        //            pipelineInfo.pMultisampleState = &pipelineState.multisampleState;
-        //            pipelineInfo.pDepthStencilState = &pipelineState.depthStencilState;
-        //            pipelineInfo.pColorBlendState = &pipelineState.colorBlendState;
-        //            pipelineInfo.pDynamicState = &pipelineState.dynamicState;
-        //            pipelineInfo.layout = m_pipelineLayout->handle();
-        //            pipelineInfo.renderPass = rp->handle();
-        //            pipelineInfo.subpass = 0;
-        //            pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
-
-        //            VkPipeline graphicsPipeline;
-        //            VkResult result = vkCreateGraphicsPipelines(
-        //                device,
-        //                VK_NULL_HANDLE,
-        //                1,
-        //                &pipelineInfo,
-        //                nullptr,
-        //                &graphicsPipeline
-        //            );
-
-        //            if (result != VK_SUCCESS) {
-        //                Logger::get().error("Failed to create graphics pipeline with render pass: {}", static_cast<int>(result));
-        //                return false;
-        //            }
-
-        //            m_graphicsPipeline = std::make_unique<PipelineResource>(device, graphicsPipeline);
-        //            Logger::get().info("Created render pass pipeline successfully");
-        //        }
-
-        //        return true;
-        //    }
-        //    catch (const std::exception& e) {
-        //        Logger::get().error("Exception in createGraphicsPipeline: {}", e.what());
-        //        return false;
-        //    }
-        //}
 
 
         // STEP 5: Check command buffer submission
@@ -10285,7 +10060,7 @@ namespace tremor::gfx {
         Logger::get().info("Drawing debug fullscreen triangle");
 
         // Draw - no descriptor sets needed for debug
-        vkCmdDrawMeshTasksEXT(cmdBuffer, 1, 0, 0);
+        vkCmdDrawMeshTasksEXT(cmdBuffer, 1, 1, 1);
 
         Logger::get().info("=== DEBUG RENDER COMPLETE ===");
     }
@@ -10501,7 +10276,7 @@ namespace tremor::gfx {
         Logger::get().info("Light buffer size: {}", m_lightBuffer->getSize());
 
         // Binding 3: Light Buffer
-        VkDescriptorBufferInfo lightInfo{
+        /*VkDescriptorBufferInfo lightInfo{
             m_lightBuffer->getBuffer(),
             0,
 			m_lightBuffer->getSize()
@@ -10516,7 +10291,7 @@ namespace tremor::gfx {
             nullptr,
             &lightInfo,
             nullptr
-            });
+            });*/
 
         Logger::get().info("Index buffer size: {}", m_indexBuffer->getSize());
 
@@ -10603,7 +10378,7 @@ namespace tremor::gfx {
 
 
         // Binding 8: Material Buffer
-        VkDescriptorBufferInfo materialInfo{
+        /*VkDescriptorBufferInfo materialInfo{
             m_materialBuffer->getBuffer(),
             0,
 			m_materialBuffer->getSize()
@@ -10618,7 +10393,7 @@ namespace tremor::gfx {
             nullptr,
             &materialInfo,
             nullptr
-            });
+            });*/
 
         // Only add texture bindings if textures exist
         VkDescriptorImageInfo albedoImageInfo{};
@@ -10861,8 +10636,8 @@ void main() {
         pipelineInfo.pNext = &renderingInfo;
         pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
         pipelineInfo.pStages = shaderStages.data();
-        pipelineInfo.pVertexInputState = pVertexInputState;     // MUST be nullptr!
-        pipelineInfo.pInputAssemblyState = pInputAssemblyState; // MUST be nullptr!
+        pipelineInfo.pVertexInputState = nullptr;     // MUST be nullptr!
+        pipelineInfo.pInputAssemblyState = nullptr; // MUST be nullptr!
         pipelineInfo.pTessellationState = nullptr;
         pipelineInfo.pViewportState = &viewportState;
         pipelineInfo.pRasterizationState = &rasterizer;
@@ -10951,6 +10726,36 @@ void main() {
         vkCmdDrawMeshTasksEXT(cmdBuffer, 1, 1, 1);
 
         Logger::get().info("Working mesh shader draw complete");
+    }
+
+    void ClusteredRenderer::debugBufferContents() {
+        Logger::get().info("=== BUFFER DEBUG ===");
+
+        // Check cluster 0 specifically
+        if (!m_clusters.empty()) {
+            const auto& cluster0 = m_clusters[0];
+            Logger::get().info("Cluster 0: objectCount={}, objectOffset={}",
+                cluster0.objectCount, cluster0.objectOffset);
+        }
+
+        // Check first few objects
+        for (size_t i = 0; i < std::min(size_t(3), m_visibleObjects.size()); i++) {
+            const auto& obj = m_visibleObjects[i];
+            Logger::get().info("Object {}: meshID={}, materialID={}, flags={}",
+                i, obj.meshID, obj.materialID, obj.flags);
+        }
+
+        // Check cluster object indices
+        for (size_t i = 0; i < std::min(size_t(5), m_clusterObjectIndices.size()); i++) {
+            Logger::get().info("ClusterObjectIndex[{}] = {}", i, m_clusterObjectIndices[i]);
+        }
+
+        // Check mesh info
+        if (!m_meshInfos.empty()) {
+            const auto& mesh0 = m_meshInfos[0];
+            Logger::get().info("Mesh 0: vertexOffset={}, vertexCount={}, indexOffset={}, indexCount={}",
+                mesh0.vertexOffset, mesh0.vertexCount, mesh0.indexOffset, mesh0.indexCount);
+        }
     }
 
 } // namespace tremor::gfx

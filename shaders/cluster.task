@@ -1,17 +1,17 @@
-// cluster.task - Fixed clustered rendering task shader
+// cluster.task - Fixed with task-mesh payload communication
 #version 460
 #extension GL_EXT_mesh_shader : require
 
-// Enhanced UBO matching your ClusterUBO structure
+// UBO (same as before)
 layout(set = 0, binding = 0) uniform ClusterUBO {
     mat4 viewMatrix;
     mat4 projMatrix;
     mat4 invViewMatrix;
     mat4 invProjMatrix;
     vec4 cameraPos;
-    uvec4 clusterDimensions;  // x, y, z slices + padding
-    vec4 zPlanes;             // near, far, clustersPerZ, padding
-    vec4 screenSize;          // width, height, 1/width, 1/height
+    uvec4 clusterDimensions;
+    vec4 zPlanes;
+    vec4 screenSize;
     uint numLights;
     uint numObjects;
     uint numClusters;
@@ -21,7 +21,6 @@ layout(set = 0, binding = 0) uniform ClusterUBO {
     uint flags;
 } ubo;
 
-// Cluster data structure (must match C++ exactly)
 struct Cluster {
     uint lightOffset;
     uint lightCount;
@@ -33,10 +32,15 @@ layout(set = 0, binding = 1) readonly buffer ClusterBuffer {
     Cluster clusters[];
 };
 
-// Task shader workgroup size - process clusters efficiently
+// Task-mesh payload to pass visible cluster indices
+struct TaskPayload {
+    uint visibleClusterIndices[32]; // Max 32 clusters per workgroup
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
 layout(local_size_x = 32) in;
 
-// Shared memory for efficient cluster processing
 shared uint s_visibleClusters[32];
 shared uint s_clusterCount;
 
@@ -45,26 +49,21 @@ void main() {
     uint groupID = gl_WorkGroupID.x;
     uint globalClusterID = groupID * 32 + threadID;
     
-    // Initialize shared memory on first thread
+    // Initialize shared memory
     if (threadID == 0) {
         s_clusterCount = 0;
     }
     
     barrier();
     
-    // Check if this thread represents a valid cluster
-    bool isValidCluster = (globalClusterID < ubo.numClusters);
+    // Check if this cluster has objects to render
     bool hasObjects = false;
-    
-    if (isValidCluster && globalClusterID < clusters.length()) {
+    if (globalClusterID < ubo.numClusters && globalClusterID < clusters.length()) {
         Cluster cluster = clusters[globalClusterID];
         hasObjects = (cluster.objectCount > 0);
-        
-        // Simple frustum culling could be added here
-        // For now, just check if cluster has objects
     }
     
-    // Atomically add visible clusters to shared list
+    // Add visible clusters to shared list
     if (hasObjects) {
         uint clusterIndex = atomicAdd(s_clusterCount, 1);
         if (clusterIndex < 32) {
@@ -74,12 +73,25 @@ void main() {
     
     barrier();
     
-    // Emit mesh tasks for all visible clusters in this workgroup
+    // Copy visible clusters to payload and emit mesh tasks
     if (threadID == 0) {
         uint clustersToEmit = min(s_clusterCount, 32u);
+        
+        // Copy visible cluster indices to payload
+        for (uint i = 0; i < clustersToEmit; ++i) {
+            payload.visibleClusterIndices[i] = s_visibleClusters[i];
+        }
+        
+        // Fill remaining slots with invalid indices
+        for (uint i = clustersToEmit; i < 32; ++i) {
+            payload.visibleClusterIndices[i] = 0xFFFFFFFF;
+        }
+        
         if (clustersToEmit > 0) {
-            // Each mesh workgroup will process one cluster
-            EmitMeshTasksEXT(clustersToEmit, 0, 0);
+            EmitMeshTasksEXT(clustersToEmit, 1, 1);
+        } else {
+            EmitMeshTasksEXT(1, 1, 1);
+
         }
     }
 }
