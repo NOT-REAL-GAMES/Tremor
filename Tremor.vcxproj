@@ -114,16 +114,16 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
-      <AdditionalIncludeDirectories>
-      </AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\tools\vcpkg\installed\x64-windows\include</AdditionalIncludeDirectories>
       <Optimization>Disabled</Optimization>
       <FavorSizeOrSpeed>Neither</FavorSizeOrSpeed>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ws2_32.lib;winmm.lib;SDL2.lib;SDL2main.lib;vulkan-1.lib;shadercd.lib;shaderc_combinedd.lib;spirv-cross-cored.lib;spirv-cross-glsld.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;winmm.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;user32.lib;gdi32.lib;comdlg32.lib;kernel32.lib;SDL2.lib;SDL2main.lib;vulkan-1.lib;shadercd.lib;shaderc_combinedd.lib;spirv-cross-cored.lib;spirv-cross-glsld.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>$(OutDir)$(TargetName)$(TargetExt)</OutputFile>
+      <AdditionalLibraryDirectories>C:\tools\vcpkg\installed\x64-windows\debug\lib;C:\tools\vcpkg\installed\x64-windows\debug\bin</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -161,8 +161,10 @@
   <ItemGroup>
     <ClInclude Include="handle.h" />
     <ClInclude Include="main.h" />
+    <ClInclude Include="quan.h" />
     <ClInclude Include="RenderBackend.h" />
     <ClInclude Include="RenderBackendBase.h" />
+    <ClInclude Include="taffy\taffy.h" />
     <ClInclude Include="vk.h" />
     <ClInclude Include="vm.hpp" />
     <ClInclude Include="vm_bytecode.hpp" />

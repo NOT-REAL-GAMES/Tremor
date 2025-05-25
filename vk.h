@@ -14,6 +14,7 @@
 #include <spirv_cross/spirv_cross.hpp>
 #include <spirv_cross/spirv_glsl.hpp>
 
+#include "quan.h"
 
 // Define concepts for Vulkan types
 template<typename T>
@@ -121,10 +122,12 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
 
 namespace tremor::gfx {
 
+
+
     const float PI = 3.14159265359f;
 
     struct alignas(16) MeshVertex {
-        glm::vec3 position;
+        Vec3Q position;
         glm::vec3 normal;
         glm::vec2 texCoord;
         glm::vec4 tangent; // w component stores handedness
@@ -1488,8 +1491,6 @@ namespace tremor::gfx {
 
 
 
-    // Forward declaration for 64-bit quantized vector
-    struct Vec3Q;
 
     // Standard floating-point AABB
     struct AABBF {
@@ -1571,62 +1572,6 @@ namespace tremor::gfx {
             }
 
             return AABBF(newMin, newMax);
-        }
-    };
-
-    // 64-bit quantized vector for positions (1/128 millimeter precision)
-    struct alignas(16) Vec3Q {
-        alignas(16) int64_t x, y, z;
-
-        Vec3Q() : x(0), y(0), z(0) {}
-        Vec3Q(int64_t x, int64_t y, int64_t z) : x(x), y(y), z(z) {}
-
-        // Conversion from floating point to quantized
-        static Vec3Q fromFloat(const glm::vec3& v) {
-            // Convert from meters to 1/128 mm
-            // 1 unit = 1/128 millimeter = 0.0078125 mm
-            constexpr double scale = 128000.0; // 128 units per mm * 1000 mm per meter
-            return {
-                static_cast<int64_t>(v.x * scale),
-                static_cast<int64_t>(v.y * scale),
-                static_cast<int64_t>(v.z * scale)
-            };
-        }
-
-        // Conversion from quantized to floating point
-        glm::vec3 toFloat() const {
-            constexpr double invScale = 1.0 / 128000.0;
-            return glm::vec3(
-                static_cast<float>(x * invScale),
-                static_cast<float>(y * invScale),
-                static_cast<float>(z * invScale)
-            );
-        }
-
-        // Basic vector operations
-        Vec3Q operator+(const Vec3Q& other) const {
-            return Vec3Q(x + other.x, y + other.y, z + other.z);
-        }
-
-        Vec3Q operator-(const Vec3Q& other) const {
-            return Vec3Q(x - other.x, y - other.y, z - other.z);
-        }
-
-        Vec3Q operator*(int64_t scalar) const {
-            return Vec3Q(x * scalar, y * scalar, z * scalar);
-        }
-
-        Vec3Q operator/(int64_t scalar) const {
-            return Vec3Q(x / scalar, y / scalar, z / scalar);
-        }
-
-        // Comparisons (useful for sorting in spatial data structures)
-        bool operator==(const Vec3Q& other) const {
-            return x == other.x && y == other.y && z == other.z;
-        }
-
-        bool operator!=(const Vec3Q& other) const {
-            return !(*this == other);
         }
     };
 
@@ -2683,12 +2628,12 @@ namespace tremor::gfx {
         meshInfo.indexCount = static_cast<uint32_t>(indices.size());
 
         // Calculate bounds
-        meshInfo.boundsMin = vertices[0].position;
-        meshInfo.boundsMax = vertices[0].position;
+        meshInfo.boundsMin = vertices[0].position.toFloat();
+        meshInfo.boundsMax = vertices[0].position.toFloat();
 
         for (const auto& vertex : vertices) {
-            meshInfo.boundsMin = glm::min((glm::vec3)meshInfo.boundsMin, (glm::vec3)vertex.position);
-            meshInfo.boundsMax = glm::max((glm::vec3)meshInfo.boundsMax, (glm::vec3)vertex.position);
+            meshInfo.boundsMin = glm::min((glm::vec3)meshInfo.boundsMin, (glm::vec3)vertex.position.toFloat());
+            meshInfo.boundsMax = glm::max((glm::vec3)meshInfo.boundsMax, (glm::vec3)vertex.position.toFloat());
         }
 
         // Store mesh info
@@ -6773,40 +6718,40 @@ namespace tremor::gfx {
             // Create a more detailed cube with proper normals and UVs
             std::vector<tremor::gfx::MeshVertex> cubeVertices = {
                 // Front face
-                {{-0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 0.5f, -0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{-0.5f,  0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-64000, -64000,  64000}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 64000, -64000,  64000}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 64000,  64000,  64000}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-64000,  64000,  64000}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
 
                 // Back face
-                {{ 0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{-0.5f, -0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{-0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 0.5f,  0.5f, -0.5f}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 64000, -64000, -64000}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-64000, -64000, -64000}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-64000,  64000, -64000}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 64000,  64000, -64000}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
 
                 // Right face
-                {{ 0.5f, -0.5f,  0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
-                {{ 0.5f, -0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
-                {{ 0.5f,  0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
-                {{ 0.5f,  0.5f,  0.5f}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+                {{ 64000, -64000,  64000}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+                {{ 64000, -64000, -64000}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+                {{ 64000,  64000, -64000}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+                {{ 64000,  64000,  64000}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
 
                 // Left face
-                {{-0.5f, -0.5f, -0.5f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
-                {{-0.5f, -0.5f,  0.5f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
-                {{-0.5f,  0.5f,  0.5f}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
-                {{-0.5f,  0.5f, -0.5f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
+                {{-64000, -64000, -64000}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
+                {{-64000, -64000,  64000}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
+                {{-64000,  64000,  64000}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
+                {{-64000,  64000, -64000}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
 
                 // Top face
-                {{-0.5f,  0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 0.5f,  0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 0.5f,  0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{-0.5f,  0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-64000,  64000,  64000}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 64000,  64000,  64000}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 64000,  64000, -64000}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-64000,  64000, -64000}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
 
                 // Bottom face
-                {{-0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 0.5f, -0.5f, -0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 0.5f, -0.5f,  0.5f}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{-0.5f, -0.5f,  0.5f}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}}
+                {{-64000, -64000, -64000}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 64000, -64000, -64000}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{ 64000, -64000,  64000}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+                {{-64000, -64000,  64000}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}}
             };
 
             std::vector<uint32_t> cubeIndices = {
@@ -10804,5 +10749,183 @@ void main() {
                 mesh0.vertexOffset, mesh0.vertexCount, mesh0.indexOffset, mesh0.indexCount);
         }
     }
+
+    class CubeGenerator {
+    public:
+        // Create a cube and register it with MeshRegistry
+        static uint32_t createAndRegisterCube(
+            MeshRegistry& registry,
+            VkDevice device,
+            VkPhysicalDevice physicalDevice,
+            const std::string& name = "cube"
+        ) {
+            // Generate vertex and index data
+            auto vertices = generateCubeVertices();
+            auto indices = generateCubeIndices();
+
+            // Create GPU buffers using your Buffer class
+            auto vertexBuffer = createVertexBuffer(device, physicalDevice, vertices);
+            auto indexBuffer = createIndexBuffer(device, physicalDevice, indices);
+
+            // Create MeshRegistry::MeshData
+            MeshRegistry::MeshData meshData{};
+            meshData.vertexCount = static_cast<uint32_t>(vertices.size());
+            meshData.indexCount = static_cast<uint32_t>(indices.size());
+            meshData.vertexBuffer = vertexBuffer->getBuffer();  // Assuming Buffer has getBuffer()
+            meshData.indexBuffer = indexBuffer->getBuffer();
+            meshData.indexType = VK_INDEX_TYPE_UINT32;
+            meshData.bounds = AABBF{
+                glm::vec3(-0.5f, -0.5f, -0.5f),
+                glm::vec3(0.5f,  0.5f,  0.5f)
+            };
+
+            // Store buffers for lifetime management (you'll need this somewhere)
+            // Maybe add to your renderer or scene manager
+            storeMeshBuffers(std::move(vertexBuffer), std::move(indexBuffer));
+
+            // Register with MeshRegistry
+            return registry.registerMesh(meshData, name);
+        }
+
+    private:
+        static std::vector<MeshVertex> generateCubeVertices() {
+            std::vector<MeshVertex> vertices;
+
+            // Helper to calculate tangent from normal
+            auto calculateTangent = [](const glm::vec3& normal) -> glm::vec4 {
+                glm::vec3 tangent;
+                if (abs(normal.x) < 0.9f) {
+                    tangent = glm::normalize(glm::cross(normal, glm::vec3(1, 0, 0)));
+                }
+                else {
+                    tangent = glm::normalize(glm::cross(normal, glm::vec3(0, 1, 0)));
+                }
+                return glm::vec4(tangent, 1.0f);
+                };
+
+            // Back face (z = -0.5)
+            glm::vec3 backNormal = { 0, 0, -1 };
+            glm::vec4 backTangent = calculateTangent(backNormal);
+            vertices.push_back({ {-64000, -64000, -64000}, backNormal, {0, 0}, backTangent });
+            vertices.push_back({ { 64000, -64000, -64000}, backNormal, {1, 0}, backTangent });
+            vertices.push_back({ { 64000,  64000, -64000}, backNormal, {1, 1}, backTangent });
+            vertices.push_back({ {-64000,  64000, -64000}, backNormal, {0, 1}, backTangent });
+
+            // Front face (z = +0.5)
+            glm::vec3 frontNormal = { 0, 0, 1 };
+            glm::vec4 frontTangent = calculateTangent(frontNormal);
+            vertices.push_back({ {-64000, -64000,  64000}, frontNormal, {0, 0}, frontTangent });
+            vertices.push_back({ { 64000, -64000,  64000}, frontNormal, {1, 0}, frontTangent });
+            vertices.push_back({ { 64000,  64000,  64000}, frontNormal, {1, 1}, frontTangent });
+            vertices.push_back({ {-64000,  64000,  64000}, frontNormal, {0, 1}, frontTangent });
+
+            // Left face (x = -0.5)
+            glm::vec3 leftNormal = { -1, 0, 0 };
+            glm::vec4 leftTangent = calculateTangent(leftNormal);
+            vertices.push_back({ {-64000, -64000, -64000}, leftNormal, {0, 0}, leftTangent });
+            vertices.push_back({ {-64000, -64000,  64000}, leftNormal, {1, 0}, leftTangent });
+            vertices.push_back({ {-64000,  64000,  64000}, leftNormal, {1, 1}, leftTangent });
+            vertices.push_back({ {-64000,  64000, -64000}, leftNormal, {0, 1}, leftTangent });
+
+            // Right face (x = +0.5)
+            glm::vec3 rightNormal = { 1, 0, 0 };
+            glm::vec4 rightTangent = calculateTangent(rightNormal);
+            vertices.push_back({ { 64000, -64000, -64000}, rightNormal, {0, 0}, rightTangent });
+            vertices.push_back({ { 64000, -64000,  64000}, rightNormal, {1, 0}, rightTangent });
+            vertices.push_back({ { 64000,  64000,  64000}, rightNormal, {1, 1}, rightTangent });
+            vertices.push_back({ { 64000,  64000, -64000}, rightNormal, {0, 1}, rightTangent });
+
+            // Bottom face (y = -0.5)
+            glm::vec3 bottomNormal = { 0, -1, 0 };
+            glm::vec4 bottomTangent = calculateTangent(bottomNormal);
+            vertices.push_back({ {-64000, -64000, -64000}, bottomNormal, {0, 0}, bottomTangent });
+            vertices.push_back({ { 64000, -64000, -64000}, bottomNormal, {1, 0}, bottomTangent });
+            vertices.push_back({ { 64000, -64000,  64000}, bottomNormal, {1, 1}, bottomTangent });
+            vertices.push_back({ {-64000, -64000,  64000}, bottomNormal, {0, 1}, bottomTangent });
+
+            // Top face (y = +0.5)
+            glm::vec3 topNormal = { 0, 1, 0 };
+            glm::vec4 topTangent = calculateTangent(topNormal);
+            vertices.push_back({ {-64000,  64000, -64000}, topNormal, {0, 0}, topTangent });
+            vertices.push_back({ { 64000,  64000, -64000}, topNormal, {1, 0}, topTangent });
+            vertices.push_back({ { 64000,  64000,  64000}, topNormal, {1, 1}, topTangent });
+            vertices.push_back({ {-64000,  64000,  64000}, topNormal, {0, 1}, topTangent });
+
+            return vertices;
+        }
+
+        static std::vector<uint32_t> generateCubeIndices() {
+            return {
+                // Back face (0-3)
+                0, 1, 2,   2, 3, 0,
+                // Front face (4-7)  
+                4, 6, 5,   4, 7, 6,
+                // Left face (8-11)
+                8, 9, 10,  10, 11, 8,
+                // Right face (12-15)
+                12, 14, 13, 12, 15, 14,
+                // Bottom face (16-19)
+                16, 17, 18, 18, 19, 16,
+                // Top face (20-23)
+                20, 22, 21, 20, 23, 22
+            };
+        }
+
+        static std::unique_ptr<Buffer> createVertexBuffer(
+            VkDevice device,
+            VkPhysicalDevice physicalDevice,
+            const std::vector<MeshVertex>& vertices
+        ) {
+            VkDeviceSize bufferSize = sizeof(MeshVertex) * vertices.size();
+
+            auto buffer = std::make_unique<Buffer>(
+                device, physicalDevice,
+                bufferSize,
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
+
+            // Upload vertex data using staging buffer
+            uploadDataToBuffer(*buffer, vertices.data(), bufferSize, device);
+
+            return buffer;
+        }
+
+        static std::unique_ptr<Buffer> createIndexBuffer(
+            VkDevice device,
+            VkPhysicalDevice physicalDevice,
+            const std::vector<uint32_t>& indices
+        ) {
+            VkDeviceSize bufferSize = sizeof(uint32_t) * indices.size();
+
+            auto buffer = std::make_unique<Buffer>(
+                device, physicalDevice,
+                bufferSize,
+                VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+            );
+
+            // Upload index data using staging buffer
+            uploadDataToBuffer(*buffer, indices.data(), bufferSize, device);
+
+            return buffer;
+        }
+
+        // Helper for data upload (you'll need to implement based on your system)
+        static void uploadDataToBuffer(Buffer& buffer, const void* data, VkDeviceSize size, VkDevice device) {
+            // Create staging buffer
+            // Copy data to staging buffer
+            // Copy from staging to device buffer
+            // You probably have this functionality already
+        }
+
+        // Store buffers for lifetime management (you'll need this somewhere)
+        static void storeMeshBuffers(std::unique_ptr<Buffer> vertexBuffer, std::unique_ptr<Buffer> indexBuffer) {
+            // Store these somewhere so they don't get destroyed
+            // Maybe in your scene manager or renderer
+            // You need to manage buffer lifetimes!
+        }
+    };
+
 
 } // namespace tremor::gfx

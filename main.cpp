@@ -29,6 +29,8 @@
 // The Tremor project is not affiliated with or endorsed by id Software.
 // idTech 2's dependencies on Quake will be gradually phased out of the Tremor project. 
 
+
+
 #include "main.h"
 
 
@@ -62,6 +64,8 @@ public:
 
 		window = SDL_CreateWindow("Tremor", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_VULKAN);
 		rb = tremor::gfx::RenderBackend::create(window);
+	
+		
 	}
 
 	bool Loop() {
