@@ -19,9 +19,23 @@
 
  // Assume Tremor's quantized coordinate system exists
 #include "../quan.h"  // Vec3Q, etc.
-#include "../quan.h"
+#include "../gfx.h"
 
 namespace Taffy {
+
+    namespace VulkanIntegration {
+        struct MeshData {
+            std::vector<tremor::gfx::MeshVertex> vertices;
+            std::vector<uint32_t> indices;
+            std::string name;
+            tremor::gfx::AABBF bounds;
+        };
+
+        struct MaterialData {
+            tremor::gfx::PBRMaterial material;
+            std::string name;
+        };
+
 
     // =============================================================================
     // VERSION & MAGIC CONSTANTS
@@ -293,6 +307,12 @@ namespace Taffy {
         std::string get_description() const;
         uint64_t get_file_size() const { return header_.total_size; }
 
+        // Vulkan integration methods
+        std::vector<VulkanIntegration::MeshData> extractMeshes() const;
+        std::vector<VulkanIntegration::MaterialData> extractMaterials() const;
+        bool loadToVulkanRenderer(tremor::gfx::ClusteredRenderer& renderer) const;
+
+
     private:
         Header header_{};
         std::vector<ChunkHeader> chunk_directory_;
@@ -303,6 +323,11 @@ namespace Taffy {
         bool validate_chunks() const;
         uint32_t calculate_checksum() const;
         void update_header_from_chunks();
+
+        tremor::gfx::MeshVertex convertVertex(const uint8_t* vertexData, uint32_t stride, uint32_t format) const;
+        tremor::gfx::PBRMaterial convertMaterial(const MaterialChunk::Material& taffyMaterial) const;
+    };
+
     };
 
     // =============================================================================
@@ -312,12 +337,12 @@ namespace Taffy {
     /**
      * Get human-readable chunk type name
      */
-    const char* chunk_type_to_string(ChunkType type);
+    //const char* chunk_type_to_string(ChunkType type);
 
     /**
      * Check if running engine supports required features
      */
-    bool engine_supports_features(FeatureFlags required_features);
+    //bool engine_supports_features(FeatureFlags required_features);
 
     /**
      * Version compatibility checking

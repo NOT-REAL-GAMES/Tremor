@@ -159,6 +159,7 @@
     <ClCompile Include="volk.c" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="gfx.h" />
     <ClInclude Include="handle.h" />
     <ClInclude Include="main.h" />
     <ClInclude Include="quan.h" />
@@ -176,6 +177,7 @@
     <ClInclude Include="wsaerror.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="gfx_impl.inl" />
     <None Include="shaders\clussy.mesh" />
     <None Include="shaders\clussy.task" />
     <None Include="shaders\cluster.frag" />
