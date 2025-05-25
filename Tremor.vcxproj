@@ -150,9 +150,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="assets\taffy_loader.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="mem.h" />
     <ClCompile Include="oldmain.cpp" />
+    <ClCompile Include="renderer\taffy_mesh.cpp" />
     <ClCompile Include="res.h" />
     <ClCompile Include="vm.cpp" />
     <ClCompile Include="vm_bytecode.cpp" />
@@ -165,6 +167,7 @@
     <ClInclude Include="quan.h" />
     <ClInclude Include="RenderBackend.h" />
     <ClInclude Include="RenderBackendBase.h" />
+    <ClInclude Include="renderer\taffy_mesh.h" />
     <ClInclude Include="taffy\taffy.h" />
     <ClInclude Include="vk.h" />
     <ClInclude Include="vm.hpp" />

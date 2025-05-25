@@ -17,6 +17,7 @@
 #include "gfx.h"
 #include "quan.h"
 #include "taffy/taffy.h"
+#include "renderer/taffy_mesh.h"
 
 // Define concepts for Vulkan types
 template<typename T>
@@ -1369,6 +1370,9 @@ namespace tremor::gfx {
         // Getters for Vulkan resources
         VkDevice getDevice() const { return m_device; }
 
+        Taffy::Asset test_asset_;
+        Tremor::TaffyMesh test_mesh_;
+
     protected:
         // Override virtual methods from base class
         void onClustersUpdated() override{}
@@ -1604,6 +1608,34 @@ namespace tremor::gfx {
                 Logger::get().error("Failed to create shader resources");
                 return false;
             }
+
+            std::cout << "=== Taffy Integration Test ===" << std::endl;
+
+            // Load the test Taffy asset
+            if (!test_asset_.load_from_file("assets/test_triangle.taf")) {
+                std::cerr << "Failed to load test Taffy asset!" << std::endl;
+                return false;
+            }
+
+            std::cout << "✓ Taffy asset loaded successfully!" << std::endl;
+            std::cout << "  Creator: " << test_asset_.get_creator() << std::endl;
+            std::cout << "  Description: " << test_asset_.get_header().description << std::endl;
+            std::cout << "  Features: " << std::hex << static_cast<uint64_t>(test_asset_.get_header().feature_flags) << std::dec << std::endl;
+
+            // Check what chunks are available
+            if (test_asset_.has_chunk(Taffy::ChunkType::GEOM)) {
+                std::cout << "  ✓ Contains geometry chunk" << std::endl;
+            }
+
+            // Load into renderable mesh
+            if (!test_mesh_.load_from_asset(test_asset_)) {
+                std::cerr << "Failed to load Taffy asset into mesh!" << std::endl;
+                return false;
+            }
+
+            std::cout << "✓ Taffy mesh created successfully!" << std::endl;
+            std::cout << "  Bounds: [" << test_mesh_.get_bounds_min().x << "," << test_mesh_.get_bounds_min().y << "," << test_mesh_.get_bounds_min().z
+                << "] to [" << test_mesh_.get_bounds_max().x << "," << test_mesh_.get_bounds_max().y << "," << test_mesh_.get_bounds_max().z << "]" << std::endl;
 
             // Create default material
             //createDefaultMaterial();
@@ -5148,111 +5180,132 @@ namespace tremor::gfx {
             Logger::get().info("Scene creation complete");
         }
 
-        void createSampleMeshes() {
-            // Create a more detailed cube with proper normals and UVs
-            std::vector<tremor::gfx::MeshVertex> cubeVertices = {
-                // Front face
-                {{-64000, -64000,  64000}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 64000, -64000,  64000}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 64000,  64000,  64000}, {0.0f, 0.0f, 1.0f}, {1.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{-64000,  64000,  64000}, {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+        void createTaffyScene() {
+            Logger::get().info("=== CREATING TAFFY-BASED SCENE ===");
 
-                // Back face
-                {{ 64000, -64000, -64000}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{-64000, -64000, -64000}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{-64000,  64000, -64000}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 64000,  64000, -64000}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
+            // Clear existing octree
+            AABBQ worldBounds{
+                Vec3Q::fromFloat(glm::vec3(-50.0f, -50.0f, -50.0f)),
+                Vec3Q::fromFloat(glm::vec3(50.0f, 50.0f, 50.0f))
+            };
+            m_sceneOctree = tremor::gfx::Octree<tremor::gfx::RenderableObject>(worldBounds);
 
-                // Right face
-                {{ 64000, -64000,  64000}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
-                {{ 64000, -64000, -64000}, {1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
-                {{ 64000,  64000, -64000}, {1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
-                {{ 64000,  64000,  64000}, {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f}},
+            if (loaded_assets_.empty()) {
+                Logger::get().error("No loaded assets to create scene from");
+                return;
+            }
 
-                // Left face
-                {{-64000, -64000, -64000}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
-                {{-64000, -64000,  64000}, {-1.0f, 0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
-                {{-64000,  64000,  64000}, {-1.0f, 0.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
-                {{-64000,  64000, -64000}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f}, {0.0f, 0.0f, -1.0f, 1.0f}},
+            // Create objects using loaded Taffy assets
+            int object_count = 0;
+            const int grid_size = 5;
+            const float spacing = 8.0f;
 
-                // Top face
-                {{-64000,  64000,  64000}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 64000,  64000,  64000}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 64000,  64000, -64000}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
-                {{-64000,  64000, -64000}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 0.0f, 0.0f, 1.0f}},
+            for (int x = 0; x < grid_size; ++x) {
+                for (int z = 0; z < grid_size; ++z) {
+                    // Pick a random asset (or cycle through them)
+                    const auto& asset = loaded_assets_[object_count % loaded_assets_.size()];
 
-                // Bottom face
-                {{-64000, -64000, -64000}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 64000, -64000, -64000}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{ 64000, -64000,  64000}, {0.0f, -1.0f, 0.0f}, {1.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}},
-                {{-64000, -64000,  64000}, {0.0f, -1.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f, 0.0f, 1.0f}}
+                    tremor::gfx::RenderableObject obj;
+                    obj.meshID = asset->get_primary_mesh_id();
+                    obj.materialID = asset->get_primary_material_id();
+                    obj.instanceID = object_count;
+                    obj.flags = 1; // Visible
+
+                    // Position in grid
+                    float pos_x = (x - grid_size / 2) * spacing;
+                    float pos_z = (z - grid_size / 2) * spacing;
+                    float pos_y = 0.0f; // Ground level
+
+                    obj.transform = glm::translate(glm::mat4(1.0f), glm::vec3(pos_x, pos_y, pos_z));
+                    obj.prevTransform = obj.transform;
+
+                    // Use bounds from the Taffy mesh
+                    glm::vec3 bounds_min = asset->meshes[0]->getBoundsMin();
+                    glm::vec3 bounds_max = asset->meshes[0]->getBoundsMax();
+
+                    // Transform bounds to world space
+                    AABBF localBounds{ bounds_min, bounds_max };
+                    AABBF worldBounds = transformAABB(obj.transform, localBounds);
+                    obj.bounds = AABBQ::fromFloat(worldBounds);
+
+                    Logger::get().info("Creating Taffy object {}: pos=({:.1f},{:.1f},{:.1f})",
+                        object_count, pos_x, pos_y, pos_z);
+
+                    // Insert into octree
+                    try {
+                        m_sceneOctree.insert(obj, obj.bounds);
+                        Logger::get().info("  Inserted object {} successfully", object_count);
+                    }
+                    catch (const std::exception& e) {
+                        Logger::get().error("  Failed to insert object {}: {}", object_count, e.what());
+                    }
+
+                    object_count++;
+                }
+            }
+
+            // Update GPU buffers
+            m_clusteredRenderer->updateGPUBuffers();
+
+            // Create lighting
+            createSceneLighting();
+
+            Logger::get().info("Taffy scene creation complete with {} objects", object_count);
+        }
+
+        void createSceneLighting() {
+            std::vector<tremor::gfx::ClusterLight> lights;
+
+            tremor::gfx::ClusterLight mainLight;
+            mainLight.position = glm::vec3(0.0f, 20.0f, 10.0f);
+            mainLight.color = glm::vec3(1.0f, 1.0f, 1.0f);
+            mainLight.intensity = 5.0f;
+            mainLight.radius = 100.0f;
+            mainLight.type = 0;
+            lights.push_back(mainLight);
+
+            m_clusteredRenderer->updateLights(lights);
+        }
+
+        std::vector<std::unique_ptr<Taffy::Asset>> loaded_assets_;
+
+        void createTaffyMeshes() {
+            Logger::get().info("=== LOADING TAFFY ASSETS ===");
+
+            // Initialize the Taffy loader
+            taffy_loader_ = std::make_unique<Tremor::TaffyAssetLoader>(*m_clusteredRenderer);
+
+            // Try to load some Taffy assets
+            std::vector<std::string> asset_paths = {
+                "assets/cube.taf",
+                "assets/sphere.taf",
+                "assets/complex_building.taf"
             };
 
-            std::vector<uint32_t> cubeIndices = {
-                // Front face (counter-clockwise from outside)
-                0, 1, 2, 2, 3, 0,
+            for (const auto& path : asset_paths) {
+                auto loaded_asset = taffy_loader_->load_asset(path);
+                if (loaded_asset) {
+                    loaded_assets_.push_back(std::move(loaded_asset));
+                    Logger::get().info("Successfully loaded Taffy asset: {}", path);
+                }
+                else {
+                    Logger::get().warning("Failed to load Taffy asset: {}", path);
 
-                // Back face (corrected to counter-clockwise from outside)
-                4, 7, 6, 6, 5, 4,
+                    // Fallback to creating a simple mesh manually
+                    if (path.find("cube") != std::string::npos) {
+                        createFallbackCube();
+                    }
+                }
+            }
 
-                // Right face (counter-clockwise from outside)  
-                8, 9, 10, 10, 11, 8,
-
-                // Left face (corrected to counter-clockwise from outside)
-                12, 15, 14, 14, 13, 12,
-
-                // Top face (counter-clockwise from outside)
-                16, 17, 18, 18, 19, 16,
-
-                // Bottom face (corrected to counter-clockwise from outside)
-                20, 23, 22, 22, 21, 20
-            };
-
-            // Load the cube mesh
-            uint32_t cubeMeshID = m_clusteredRenderer->loadMesh(cubeVertices, cubeIndices, "cube");
-
-            // Create materials with different properties
-            tremor::gfx::PBRMaterial redMaterial{};
-            redMaterial.baseColor = glm::vec4(0.8f, 0.2f, 0.2f, 1.0f);
-            redMaterial.metallic = 0.0f;
-            redMaterial.roughness = 0.3f;
-            redMaterial.normalScale = 1.0f;
-            redMaterial.occlusionStrength = 1.0f;
-            redMaterial.emissiveColor = glm::vec3(0.0f);
-            redMaterial.emissiveFactor = 0.0f;
-            redMaterial.albedoTexture = -1;
-            redMaterial.flags = 0;
-            uint32_t redMatID = m_clusteredRenderer->createMaterial(redMaterial);
-
-            tremor::gfx::PBRMaterial metalMaterial{};
-            metalMaterial.baseColor = glm::vec4(0.7f, 0.7f, 0.8f, 1.0f);
-            metalMaterial.metallic = 1.0f;
-            metalMaterial.roughness = 0.1f;
-            metalMaterial.normalScale = 1.0f;
-            metalMaterial.occlusionStrength = 1.0f;
-            metalMaterial.emissiveColor = glm::vec3(0.0f);
-            metalMaterial.emissiveFactor = 0.0f;
-            metalMaterial.albedoTexture = -1;
-            metalMaterial.flags = 0;
-            uint32_t metalMatID = m_clusteredRenderer->createMaterial(metalMaterial);
-
-            tremor::gfx::PBRMaterial roughMaterial{};
-            roughMaterial.baseColor = glm::vec4(0.6f, 0.4f, 0.2f, 1.0f);
-            roughMaterial.metallic = 0.0f;
-            roughMaterial.roughness = 0.9f;
-            roughMaterial.normalScale = 1.0f;
-            roughMaterial.occlusionStrength = 1.0f;
-            roughMaterial.emissiveColor = glm::vec3(0.0f);
-            roughMaterial.emissiveFactor = 0.0f;
-            roughMaterial.albedoTexture = -1;
-            roughMaterial.flags = 0;
-            uint32_t roughMatID = m_clusteredRenderer->createMaterial(roughMaterial);
-
-            // Store material IDs for use in scene creation
-            m_materialIDs = { redMatID, metalMatID, roughMatID };
-            m_cubeMeshID = cubeMeshID;
-
-            Logger::get().info("Created enhanced sample meshes and materials");
+            // If no assets loaded, create fallback content
+            if (loaded_assets_.empty()) {
+                Logger::get().info("No Taffy assets loaded, creating fallback content");
+                createFallbackContent();
+            }
+            else {
+                Logger::get().info("Loaded {} Taffy assets", loaded_assets_.size());
+            }
         }
 
         MeshRegistry m_meshRegistry;

@@ -39,8 +39,9 @@ concept StringLike = requires(T t) {
     { std::string_view(t) } -> std::convertible_to<std::string_view>;
 };
 
-#include "mem.h"
 #include "RenderBackend.h"
+
+#include "mem.h"
 
 #include "vm_bytecode.hpp"
 #include "vm_decoder.hpp"
@@ -48,48 +49,49 @@ concept StringLike = requires(T t) {
 class Engine {
 public:
 
-	int argc;
-	char** argv;
+    int argc;
+    char** argv;
 
-	SDL_Window* window;
+    SDL_Window* window;
 
-	std::unique_ptr<tremor::gfx::RenderBackend> rb;
+    std::unique_ptr<tremor::gfx::RenderBackend> rb;
 
-	Engine() {
-
-		
-		if (SDL_Init(SDL_INIT_EVERYTHING) < 0) {
-			Logger::get().critical("SDL INITIALIZATION FAILED.");
-		}
-
-		window = SDL_CreateWindow("Tremor", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_VULKAN);
-		rb = tremor::gfx::RenderBackend::create(window);
-	
-		
-	}
-
-	bool Loop() {
-		#if defined(USING_VULKAN)
-			SDL_Event event{};
-			while (SDL_PollEvent(&event)) {
-
-				if (event.type == SDL_QUIT) {
-					SDL_DestroyWindow(window);
-					SDL_Quit();
-					return false;
-				}
-			}
-
-			rb.get()->beginFrame();
+    Engine() {
 
 
-			rb.get()->endFrame();
+        if (SDL_Init(SDL_INIT_EVERYTHING) < 0) {
+            Logger::get().critical("SDL INITIALIZATION FAILED.");
+        }
 
-			SDL_Delay(4); // Simulate a frame delay
-			return true;
-		#endif
-	}
+        window = SDL_CreateWindow("Tremor", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_VULKAN);
+        rb = tremor::gfx::RenderBackend::create(window);
+
+
+    }
+
+    bool Loop() {
+#if defined(USING_VULKAN)
+        SDL_Event event{};
+        while (SDL_PollEvent(&event)) {
+
+            if (event.type == SDL_QUIT) {
+                SDL_DestroyWindow(window);
+                SDL_Quit();
+                return false;
+            }
+        }
+
+        rb.get()->beginFrame();
+
+
+        rb.get()->endFrame();
+
+        SDL_Delay(4); // Simulate a frame delay
+        return true;
+#endif
+    }
 };
+
 
 int main(int argc, char** argv) {
 
@@ -107,8 +109,7 @@ int main(int argc, char** argv) {
 
 	Logger::get().info("Welcome. Starting Tremor...");
 
-	Engine engine;
-
+    Engine engine;
 
 	do {
 
