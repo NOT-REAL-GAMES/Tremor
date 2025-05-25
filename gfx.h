@@ -3,6 +3,10 @@
 #include "main.h"
 #include "quan.h"
 
+#include <glm/glm.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
 
 namespace tremor::gfx {
 
@@ -333,6 +337,9 @@ namespace tremor::gfx {
     template<typename T>
     class Octree {
     public:
+        Octree() = default;
+
+
         Octree(const AABBQ& bounds, uint32_t maxDepth = 8, uint32_t maxObjects = 16)
             : m_root(std::make_unique<OctreeNode<T>>(bounds, 0, maxDepth, maxObjects)) {
         }
@@ -455,7 +462,7 @@ namespace tremor::gfx {
         return result;
     }
 
-    Camera::Camera()
+    inline Camera::Camera()
         : m_fovRadians(glm::radians(60.0f))
         , m_aspectRatio(16.0f / 9.0f)
         , m_nearZ(0.1f)
@@ -472,7 +479,7 @@ namespace tremor::gfx {
         m_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    Camera::Camera(float fovDegrees, float aspectRatio, float nearZ, float farZ)
+    inline Camera::Camera(float fovDegrees, float aspectRatio, float nearZ, float farZ)
         : m_fovRadians(glm::radians(fovDegrees))
         , m_aspectRatio(aspectRatio)
         , m_nearZ(nearZ)
@@ -489,7 +496,7 @@ namespace tremor::gfx {
         m_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    void Camera::setPosition(const glm::vec3& position) {
+    inline void Camera::setPosition(const glm::vec3& position) {
         //Logger::get().info("Camera::setPosition: position={},{},{}",
         //    position.x, position.y, position.z);
         m_position.integer = glm::i64vec3(0);
@@ -498,7 +505,7 @@ namespace tremor::gfx {
         m_viewDirty = true;
     }
 
-    void Camera::setRotation(float pitch, float yaw, float roll) {
+    inline void Camera::setRotation(float pitch, float yaw, float roll) {
         // Create quaternion from Euler angles (in radians)
         glm::quat quatPitch = glm::angleAxis(glm::radians(pitch), glm::vec3(1.0f, 0.0f, 0.0f));
         glm::quat quatYaw = glm::angleAxis(glm::radians(yaw), glm::vec3(0.0f, 1.0f, 0.0f));
@@ -508,7 +515,7 @@ namespace tremor::gfx {
         m_viewDirty = true;
     }
 
-    void Camera::move(const glm::vec3& delta) {
+    inline void Camera::move(const glm::vec3& delta) {
         // Convert delta to world space
         glm::vec3 worldDelta = m_rotation * delta;
 
@@ -520,7 +527,7 @@ namespace tremor::gfx {
         m_viewDirty = true;
     }
 
-    void Camera::moveWorld(const glm::vec3& delta) {
+    inline void Camera::moveWorld(const glm::vec3& delta) {
         // Add directly to fractional part
         m_position.fractional += delta;
 
@@ -529,7 +536,7 @@ namespace tremor::gfx {
         m_viewDirty = true;
     }
 
-    void Camera::rotate(float pitchDelta, float yawDelta, float rollDelta) {
+    inline void Camera::rotate(float pitchDelta, float yawDelta, float rollDelta) {
         // Create delta rotation quaternion
         glm::quat quatPitch = glm::angleAxis(glm::radians(pitchDelta), glm::vec3(1.0f, 0.0f, 0.0f));
         glm::quat quatYaw = glm::angleAxis(glm::radians(yawDelta), glm::vec3(0.0f, 1.0f, 0.0f));
@@ -544,7 +551,7 @@ namespace tremor::gfx {
         m_viewDirty = true;
     }
 
-    void Camera::lookAt(const glm::vec3& target, const glm::vec3& up) {
+    inline void Camera::lookAt(const glm::vec3& target, const glm::vec3& up) {
         // Get current position in local space
         glm::vec3 pos = getLocalPosition();
 
@@ -566,7 +573,7 @@ namespace tremor::gfx {
             pos.x, pos.y, pos.z, target.x, target.y, target.z);
     }
 
-    void Camera::lookAt(const WorldPosition& target, const glm::vec3& up) {
+    inline void Camera::lookAt(const WorldPosition& target, const glm::vec3& up) {
         // Calculate world-space vector from camera to target
         glm::dvec3 targetPos = target.getCombined();
         glm::dvec3 cameraPos = m_position.getCombined();
@@ -579,7 +586,7 @@ namespace tremor::gfx {
         m_viewDirty = true;
     }
 
-    glm::vec3 Camera::getLocalPosition() const {
+    inline glm::vec3 Camera::getLocalPosition() const {
         // Convert 64-bit position to local-space float position
         // This is a simplified version - a real implementation would
         // have to consider the reference point for local space
@@ -601,19 +608,19 @@ namespace tremor::gfx {
         return combinedPos;
     }
 
-    glm::vec3 Camera::getForward() const {
+    inline glm::vec3 Camera::getForward() const {
         return m_rotation * glm::vec3(0.0f, 0.0f, -1.0f);
     }
 
-    glm::vec3 Camera::getRight() const {
+    inline glm::vec3 Camera::getRight() const {
         return m_rotation * glm::vec3(1.0f, 0.0f, 0.0f);
     }
 
-    glm::vec3 Camera::getUp() const {
+    inline glm::vec3 Camera::getUp() const {
         return m_rotation * glm::vec3(0.0f, 1.0f, 0.0f);
     }
 
-    const glm::mat4& Camera::getViewMatrix() const {
+    const inline glm::mat4& Camera::getViewMatrix() const {
         if (m_viewDirty) {
             static_cast<Camera>(*this).updateViewMatrix();
             //Logger::get().info("View matrix updated");
@@ -621,21 +628,21 @@ namespace tremor::gfx {
         return m_viewMatrix;
     }
 
-    const glm::mat4& Camera::getProjectionMatrix() const {
+    const inline glm::mat4& Camera::getProjectionMatrix() const {
         if (m_projDirty) {
             static_cast<Camera>(*this).updateProjectionMatrix();
         }
         return m_projectionMatrix;
     }
 
-    const glm::mat4& Camera::getViewProjectionMatrix() const {
+    const inline glm::mat4& Camera::getViewProjectionMatrix() const {
         if (m_viewDirty || m_projDirty || m_vpDirty) {
             static_cast<Camera>(*this).updateViewProjectionMatrix();
         }
         return m_viewProjectionMatrix;
     }
 
-    void Camera::updateViewMatrix() const {
+    inline void Camera::updateViewMatrix() const {
         m_viewMatrix = calculateViewMatrix();
 
         //Logger::get().info("View Matrix[3]: {}, {}, {}",
@@ -647,7 +654,7 @@ namespace tremor::gfx {
         m_vpDirty = true;
     }
 
-    void Camera::updateProjectionMatrix() const {
+    inline void Camera::updateProjectionMatrix() const {
         // Use reverse depth for better precision
         m_projectionMatrix = glm::perspectiveZO(m_fovRadians, m_aspectRatio, m_farZ, m_nearZ);
 
@@ -658,7 +665,7 @@ namespace tremor::gfx {
         m_vpDirty = true;
     }
 
-    void Camera::updateViewProjectionMatrix() const {
+    inline void Camera::updateViewProjectionMatrix() const {
         if (m_viewDirty) {
             updateViewMatrix();
         }
@@ -670,7 +677,7 @@ namespace tremor::gfx {
         m_vpDirty = false;
     }
 
-    glm::mat4 Camera::calculateViewMatrix() const{
+    inline glm::mat4 Camera::calculateViewMatrix() const{
         glm::vec3 pos = getLocalPosition();
 
         // Create view matrix based on position and rotation
@@ -681,7 +688,7 @@ namespace tremor::gfx {
     }
 
 
-    void Camera::normalizePosition() {
+    inline void Camera::normalizePosition() {
         // Handle overflow/underflow in fractional part
         // If any component is >= 1.0 or < 0.0, adjust integer part
 
@@ -722,7 +729,7 @@ namespace tremor::gfx {
         }
     }
 
-    Frustum Camera::getViewFrustum() {
+    inline Frustum Camera::getViewFrustum() {
         Frustum frustum;
         extractFrustumPlanes(frustum.planes);
 
@@ -732,7 +739,7 @@ namespace tremor::gfx {
         return frustum;
     }
 
-    void Camera::extractFrustumPlanes(glm::vec4 planes[6]) {
+    inline void Camera::extractFrustumPlanes(glm::vec4 planes[6]) {
         // Get the view-projection matrix
         const glm::mat4& vp = getViewProjectionMatrix();
 
@@ -782,7 +789,7 @@ namespace tremor::gfx {
         }
     }
 
-    glm::mat4 Camera::getJitteredProjectionMatrix(const glm::vec2& jitter) {
+    inline glm::mat4 Camera::getJitteredProjectionMatrix(const glm::vec2& jitter) {
         // Create jittered projection matrix for temporal anti-aliasing
         glm::mat4 proj = glm::perspective(m_fovRadians, m_aspectRatio, m_nearZ, m_farZ);
 
@@ -796,7 +803,7 @@ namespace tremor::gfx {
         return proj;
     }
 
-    void Camera::update(float deltaTime) {
+    inline void Camera::update(float deltaTime) {
         if (m_viewDirty || m_projDirty || m_vpDirty) {
             if (m_viewDirty) updateViewMatrix();
             if (m_projDirty) updateProjectionMatrix();
@@ -808,7 +815,7 @@ namespace tremor::gfx {
     }
 
     // Frustum implementation
-    bool Frustum::containsPoint(const glm::vec3& point) const {
+    inline bool Frustum::containsPoint(const glm::vec3& point) const {
         for (int i = 0; i < PLANE_COUNT; i++) {
             if (planes[i].x * point.x +
                 planes[i].y * point.y +
@@ -820,7 +827,7 @@ namespace tremor::gfx {
         return true;
     }
 
-    bool Frustum::containsSphere(const glm::vec3& center, float radius) const {
+    inline bool Frustum::containsSphere(const glm::vec3& center, float radius) const {
         for (int i = 0; i < PLANE_COUNT; i++) {
             float distance = planes[i].x * center.x +
                 planes[i].y * center.y +
@@ -834,7 +841,7 @@ namespace tremor::gfx {
         return true;  // Sphere is at least partially inside all planes
     }
 
-    bool Frustum::containsAABB(const glm::vec3& min, const glm::vec3& max) const {
+    inline bool Frustum::containsAABB(const glm::vec3& min, const glm::vec3& max) const {
         // For each plane, find the positive vertex (P-vertex) and test it
         for (int i = 0; i < PLANE_COUNT; i++) {
             // Get plane normal
@@ -856,7 +863,7 @@ namespace tremor::gfx {
     }
 
 
-    bool Frustum::intersectsFrustum(const Frustum& other) const {
+    inline bool Frustum::intersectsFrustum(const Frustum& other) const {
         // This is a simplified test for cluster vs view frustum
         // Fully implemented, you'd want to use separating axis theorem
 

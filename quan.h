@@ -1,5 +1,6 @@
 #pragma once
-#include "main.h"
+
+#include <glm/glm.hpp>
 
 struct alignas(16) Vec3Q {
     alignas(16) int64_t x, y, z;
