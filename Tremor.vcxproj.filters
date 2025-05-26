@@ -36,6 +36,15 @@
     <ClCompile Include="vm_bytecode.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="renderer\taffy_integration.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="renderer\taffy_mesh.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="vk.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="main.h">
@@ -77,5 +86,39 @@
     <ClInclude Include="vm_decoder.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="gfx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="quan.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="renderer\taffy_integration.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="renderer\taffy_mesh.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="taffy\taffy.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="gfx_impl.inl">
+      <Filter>Header Files</Filter>
+    </None>
+    <None Include="shaders\clussy.mesh" />
+    <None Include="shaders\clussy.task" />
+    <None Include="shaders\cluster.frag" />
+    <None Include="shaders\cluster.mesh" />
+    <None Include="shaders\cluster.task" />
+    <None Include="shaders\debug.mesh" />
+    <None Include="shaders\debug.task" />
+    <None Include="shaders\diag.frag" />
+    <None Include="shaders\diag.mesh" />
+    <None Include="shaders\diag.task" />
+    <None Include="shaders\minimal.frag" />
+    <None Include="shaders\minimal.mesh" />
+    <None Include="shaders\minimal.task" />
+    <None Include="shaders\pbr.vert" />
   </ItemGroup>
 </Project>
