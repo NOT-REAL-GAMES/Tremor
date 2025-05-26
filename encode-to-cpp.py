@@ -65,7 +65,7 @@ def fix_project_files(project_dir):
 # Usage examples:
 
 # Fix single file
-fix_unicode_file(r"C:\Projects\Tremor\taffy\taffy.h")
+fix_unicode_file(r"C:\Projects\Taffy\include\taffy.h")
 
 # Or fix entire project
 # fix_project_files(r"C:\Projects\Tremor")

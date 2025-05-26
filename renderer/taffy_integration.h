@@ -2,7 +2,7 @@
 #pragma once
 
 #include "../gfx.h"
-#include "../taffy/taffy.h"
+#include "taffy.h"
 #include "taffy_mesh.h"
 #include <memory>
 

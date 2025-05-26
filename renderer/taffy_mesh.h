@@ -1,8 +1,8 @@
 #pragma once
 
 #include "../main.h"
-#include "../taffy/taffy.h" 
-#include "../quan.h"  // Vec3Q, etc.
+#include "taffy.h" 
+#include "quan.h"  // Vec3Q, etc.
 #include "../gfx.h"   // MeshVertex
 
 // Forward declaration

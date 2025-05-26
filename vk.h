@@ -13,13 +13,15 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <spirv_cross/spirv_cross.hpp>
 #include <spirv_cross/spirv_glsl.hpp>
+#include <spirv_cross/spirv_hlsl.hpp>
+#include <spirv_cross/spirv_msl.hpp>
 
 #include <memory>
 
 #include "gfx.h"
 #include "quan.h"
 #include "handle.h"
-#include "taffy/taffy.h"
+#include "taffy.h"
 #include "renderer/taffy_mesh.h"
 #include "renderer/taffy_integration.h"
 
@@ -58,6 +60,116 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
     VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 
 namespace tremor::gfx {
+
+    class TaffyShaderTranspiler {
+    public:
+        enum class TargetAPI {
+            Vulkan_SPIRV,    // Native SPIR-V for Vulkan
+            Vulkan_GLSL,     // GLSL for Vulkan
+            OpenGL_GLSL,     // GLSL for OpenGL
+            DirectX_HLSL,    // HLSL for DirectX 12
+            Metal_MSL,       // MSL for Metal
+            WebGL_GLSL       // WebGL-compatible GLSL
+        };
+
+        /**
+         * Transpile SPIR-V to target shader language
+         */
+        static std::string transpile_shader(const std::vector<uint32_t>& spirv,
+            TargetAPI target,
+            Taffy::ShaderChunk::ShaderStage stage) {
+            try {
+                switch (target) {
+                case TargetAPI::Vulkan_SPIRV:
+                    return ""; // Return empty - use raw SPIR-V
+
+                case TargetAPI::Vulkan_GLSL:
+                case TargetAPI::OpenGL_GLSL: {
+                    spirv_cross::CompilerGLSL glsl_compiler(spirv);
+
+                    // Configure GLSL options using set_common_options
+                    spirv_cross::CompilerGLSL::Options glsl_options;
+                    if (target == TargetAPI::Vulkan_GLSL) {
+                        glsl_options.version = 460;
+                        glsl_options.vulkan_semantics = true;
+                    }
+                    else {
+                        glsl_options.version = 460;
+                        glsl_options.vulkan_semantics = false;
+                    }
+
+                    // Enable mesh shader extensions if needed
+                    if (stage == Taffy::ShaderChunk::ShaderStage::MeshShader ||
+                        stage == Taffy::ShaderChunk::ShaderStage::TaskShader) {
+                        glsl_options.version = 460; // Mesh shaders need GLSL 4.6+
+                    }
+
+                    glsl_compiler.set_common_options(glsl_options);
+                    return glsl_compiler.compile();
+                }
+
+                case TargetAPI::DirectX_HLSL: {
+                    spirv_cross::CompilerHLSL hlsl_compiler(spirv);
+
+                    // For HLSL, use default options or set_common_options with basic GLSL options
+                    spirv_cross::CompilerGLSL::Options basic_options;
+                    basic_options.version = 450;
+                    hlsl_compiler.set_common_options(basic_options);
+
+                    return hlsl_compiler.compile();
+                }
+
+                case TargetAPI::Metal_MSL: {
+                    spirv_cross::CompilerMSL msl_compiler(spirv);
+
+                    // For MSL, use default options or set_common_options with basic GLSL options  
+                    spirv_cross::CompilerGLSL::Options basic_options;
+                    basic_options.version = 450;
+                    msl_compiler.set_common_options(basic_options);
+
+                    return msl_compiler.compile();
+                }
+
+                case TargetAPI::WebGL_GLSL: {
+                    spirv_cross::CompilerGLSL webgl_compiler(spirv);
+
+                    // Configure WebGL options
+                    spirv_cross::CompilerGLSL::Options webgl_options;
+                    webgl_options.version = 300;
+                    webgl_options.es = true;
+                    webgl_options.vulkan_semantics = false;
+                    webgl_compiler.set_common_options(webgl_options);
+
+                    return webgl_compiler.compile();
+                }
+                }
+            }
+            catch (const spirv_cross::CompilerError& e) {
+                std::cerr << "SPIR-V Cross compilation failed: " << e.what() << std::endl;
+            }
+
+            return "";
+        }
+
+        /**
+ * Get the best target API for current platform/engine
+ */
+        static TargetAPI get_preferred_target() {
+#ifdef TREMOR_VULKAN
+            return TargetAPI::Vulkan_SPIRV; // Use native SPIR-V for best performance
+#elif defined(TREMOR_DIRECTX12)
+            return TargetAPI::DirectX_HLSL;
+#elif defined(TREMOR_METAL)
+            return TargetAPI::Metal_MSL;
+#elif defined(TREMOR_OPENGL)
+            return TargetAPI::OpenGL_GLSL;
+#elif defined(TREMOR_WEBGL)
+            return TargetAPI::WebGL_GLSL;
+#else
+            return TargetAPI::Vulkan_GLSL; // Default fallback
+#endif
+        }
+    };
 
     class Buffer {
     public:
@@ -102,6 +214,7 @@ namespace tremor::gfx {
         int hasEmissiveMap;
     };
 
+    class TaffyMeshShaderPipeline;
     class ShaderManager;
     class RenderPass;
     class VertexBufferSimple;
@@ -115,6 +228,409 @@ namespace tremor::gfx {
     class DescriptorLayoutCache;
     class DescriptorAllocator;
     class DescriptorWriter;
+
+    class TaffyMeshShaderPipeline {
+    private:
+        VkDevice device_;
+        VkPhysicalDevice physical_device_;
+        VkRenderPass render_pass_;
+
+        // Shader modules
+        VkShaderModule task_shader_module_ = VK_NULL_HANDLE;
+        VkShaderModule mesh_shader_module_ = VK_NULL_HANDLE;
+        VkShaderModule fragment_shader_module_ = VK_NULL_HANDLE;
+
+        // Pipeline objects
+        VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
+        VkPipeline graphics_pipeline_ = VK_NULL_HANDLE;
+
+        // Mesh shader parameters
+        uint32_t max_vertices_ = 0;
+        uint32_t max_primitives_ = 0;
+
+    public:
+        TaffyMeshShaderPipeline(VkDevice device, VkPhysicalDevice physical_device, VkRenderPass render_pass = VK_NULL_HANDLE)
+            : device_(device), physical_device_(physical_device), render_pass_(render_pass) {
+        }
+
+        /**
+         * Create pipeline from Taffy asset
+         */
+        bool create_from_taffy_asset(const Taffy::Asset& asset) {
+            std::cout << "Creating mesh shader pipeline from Taffy asset..." << std::endl;
+
+            // Extract shader data
+            auto shader_data = asset.get_chunk_data(Taffy::ChunkType::SHDR);
+            if (!shader_data) {
+                std::cerr << "No shader data found" << std::endl;
+                return false;
+            }
+
+            // Parse shader chunk header
+            Taffy::ShaderChunk shader_header;
+            if (shader_data->size() < sizeof(shader_header)) {
+                std::cerr << "Invalid shader chunk size" << std::endl;
+                return false;
+            }
+            std::memcpy(&shader_header, shader_data->data(), sizeof(shader_header));
+
+            std::cout << "Found " << shader_header.shader_count << " shaders in asset" << std::endl;
+
+            // Extract individual shaders
+            size_t offset = sizeof(shader_header);
+            for (uint32_t i = 0; i < shader_header.shader_count; ++i) {
+                if (!extract_and_compile_shader(*shader_data, offset)) {
+                    std::cerr << "Failed to extract shader " << i << std::endl;
+                    return false;
+                }
+            }
+
+            // Create pipeline layout
+            if (!create_pipeline_layout()) {
+                std::cerr << "Failed to create pipeline layout" << std::endl;
+                return false;
+            }
+
+            // Create graphics pipeline
+            if (!create_graphics_pipeline()) {
+                std::cerr << "Failed to create graphics pipeline" << std::endl;
+                return false;
+            }
+
+            std::cout << "✓ Mesh shader pipeline created successfully!" << std::endl;
+            return true;
+        }
+
+        /**
+         * Render using mesh shader pipeline
+         */
+        void render(VkCommandBuffer command_buffer, PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT = VK_NULL_HANDLE) {
+
+            if (!graphics_pipeline_) {
+                std::cerr << "Pipeline not created!" << std::endl;
+                return;
+            }
+
+            if (!vkCmdDrawMeshTasksEXT) {
+                vkCmdDrawMeshTasksEXT = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(
+                    vkGetDeviceProcAddr(device_, "vkCmdDrawMeshTasksEXT"));
+
+                if (!vkCmdDrawMeshTasksEXT) {
+                    std::cerr << "Mesh shader draw function not available!" << std::endl;
+                    return;
+                }
+            }
+
+            std::cout << "🎮 Rendering with mesh shaders!" << std::endl;
+
+            // Bind mesh shader pipeline
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline_);
+
+            // Draw using mesh tasks instead of traditional vertex buffers!
+            // This is the magic - no vertex data needed, mesh shader generates geometry!
+            vkCmdDrawMeshTasksEXT(command_buffer, 1, 1 , 1);
+
+            std::cout << "✓ Mesh shader draw call submitted!" << std::endl;
+        }
+
+    private:
+        bool extract_and_compile_shader(const std::vector<uint8_t>& shader_data, size_t& offset) {
+            if (offset + sizeof(Taffy::ShaderChunk::Shader) > shader_data.size()) {
+                return false;
+            }
+
+            // Read shader metadata
+            Taffy::ShaderChunk::Shader shader_info;
+            std::memcpy(&shader_info, shader_data.data() + offset, sizeof(shader_info));
+            offset += sizeof(shader_info);
+
+            // Read SPIR-V data
+            if (offset + shader_info.spirv_size > shader_data.size()) {
+                return false;
+            }
+
+            std::vector<uint32_t> spirv_code((shader_info.spirv_size / sizeof(uint32_t)));
+            std::memcpy(spirv_code.data(), shader_data.data() + offset, shader_info.spirv_size);
+            offset += shader_info.spirv_size;
+
+            // Create Vulkan shader module
+            VkShaderModuleCreateInfo create_info{};
+            create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            create_info.codeSize = shader_info.spirv_size;
+            create_info.pCode = spirv_code.data();
+
+            VkShaderModule* target_module = nullptr;
+
+            switch (shader_info.stage) {
+            case Taffy::ShaderChunk::ShaderStage::TaskShader:
+                target_module = &task_shader_module_;
+                std::cout << "  ✓ Task shader compiled" << std::endl;
+                break;
+
+            case Taffy::ShaderChunk::ShaderStage::MeshShader:
+                target_module = &mesh_shader_module_;
+                max_vertices_ = shader_info.max_vertices;
+                max_primitives_ = shader_info.max_primitives;
+                std::cout << "  ✓ Mesh shader compiled (max vertices: " << max_vertices_
+                    << ", max primitives: " << max_primitives_ << ")" << std::endl;
+                break;
+
+            case Taffy::ShaderChunk::ShaderStage::Fragment:
+                target_module = &fragment_shader_module_;
+                std::cout << "  ✓ Fragment shader compiled" << std::endl;
+                break;
+
+            default:
+                std::cerr << "Unsupported shader stage: " << static_cast<int>(shader_info.stage) << std::endl;
+                return false;
+            }
+
+            if (target_module) {
+                VkResult result = vkCreateShaderModule(device_, &create_info, nullptr, target_module);
+                if (result != VK_SUCCESS) {
+                    std::cerr << "Failed to create shader module: " << result << std::endl;
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        bool create_pipeline_layout() {
+            VkPipelineLayoutCreateInfo layout_info{};
+            layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            layout_info.setLayoutCount = 0;
+            layout_info.pSetLayouts = nullptr;
+            layout_info.pushConstantRangeCount = 0;
+            layout_info.pPushConstantRanges = nullptr;
+
+            VkResult result = vkCreatePipelineLayout(device_, &layout_info, nullptr, &pipeline_layout_);
+            return result == VK_SUCCESS;
+        }
+
+        bool create_graphics_pipeline() {
+            std::vector<VkPipelineShaderStageCreateInfo> shader_stages;
+
+            // Task shader stage (optional)
+            if (task_shader_module_ != VK_NULL_HANDLE) {
+                VkPipelineShaderStageCreateInfo task_stage{};
+                task_stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                task_stage.stage = VK_SHADER_STAGE_TASK_BIT_NV;
+                task_stage.module = task_shader_module_;
+                task_stage.pName = "main";
+                shader_stages.push_back(task_stage);
+            }
+
+            // Mesh shader stage (required)
+            if (mesh_shader_module_ != VK_NULL_HANDLE) {
+                VkPipelineShaderStageCreateInfo mesh_stage{};
+                mesh_stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                mesh_stage.stage = VK_SHADER_STAGE_MESH_BIT_NV;
+                mesh_stage.module = mesh_shader_module_;
+                mesh_stage.pName = "main";
+                shader_stages.push_back(mesh_stage);
+            }
+
+            // Fragment shader stage
+            if (fragment_shader_module_ != VK_NULL_HANDLE) {
+                VkPipelineShaderStageCreateInfo frag_stage{};
+                frag_stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                frag_stage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+                frag_stage.module = fragment_shader_module_;
+                frag_stage.pName = "main";
+                shader_stages.push_back(frag_stage);
+            }
+
+            // For mesh shaders, we don't need vertex input state!
+            VkPipelineVertexInputStateCreateInfo vertex_input{};
+            vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            vertex_input.vertexBindingDescriptionCount = 0;
+            vertex_input.pVertexBindingDescriptions = nullptr;
+            vertex_input.vertexAttributeDescriptionCount = 0;
+            vertex_input.pVertexAttributeDescriptions = nullptr;
+
+            // Input assembly (not used for mesh shaders but required)
+            VkPipelineInputAssemblyStateCreateInfo input_assembly{};
+            input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            input_assembly.primitiveRestartEnable = VK_FALSE;
+
+            // Use your existing viewport, rasterization, multisampling, color blend states
+            // For demo, using basic states:
+
+            VkViewport viewport{};
+            viewport.x = 0.0f;
+            viewport.y = 0.0f;
+            viewport.width = 800.0f;  // Use your actual swapchain extent
+            viewport.height = 600.0f;
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+
+            VkRect2D scissor{};
+            scissor.offset = { 0, 0 };
+            scissor.extent = { 800, 600 };  // Use your actual swapchain extent
+
+            VkPipelineViewportStateCreateInfo viewport_state{};
+            viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            viewport_state.viewportCount = 1;
+            viewport_state.pViewports = &viewport;
+            viewport_state.scissorCount = 1;
+            viewport_state.pScissors = &scissor;
+
+            // Basic rasterization state
+            VkPipelineRasterizationStateCreateInfo rasterizer{};
+            rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            rasterizer.depthClampEnable = VK_FALSE;
+            rasterizer.rasterizerDiscardEnable = VK_FALSE;
+            rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+            rasterizer.lineWidth = 1.0f;
+            rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+            rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+            rasterizer.depthBiasEnable = VK_FALSE;
+
+            // Basic multisampling
+            VkPipelineMultisampleStateCreateInfo multisampling{};
+            multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            multisampling.sampleShadingEnable = VK_FALSE;
+            multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+            // Basic color blending
+            VkPipelineColorBlendAttachmentState color_blend_attachment{};
+            color_blend_attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            color_blend_attachment.blendEnable = VK_FALSE;
+
+            VkPipelineColorBlendStateCreateInfo color_blending{};
+            color_blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            color_blending.logicOpEnable = VK_FALSE;
+            color_blending.attachmentCount = 1;
+            color_blending.pAttachments = &color_blend_attachment;
+
+            // Create graphics pipeline
+            VkGraphicsPipelineCreateInfo pipeline_info{};
+            pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            pipeline_info.stageCount = static_cast<uint32_t>(shader_stages.size());
+            pipeline_info.pStages = shader_stages.data();
+            pipeline_info.pVertexInputState = &vertex_input;
+            pipeline_info.pInputAssemblyState = &input_assembly;
+            pipeline_info.pViewportState = &viewport_state;
+            pipeline_info.pRasterizationState = &rasterizer;
+            pipeline_info.pMultisampleState = &multisampling;
+            pipeline_info.pColorBlendState = &color_blending;
+            pipeline_info.layout = pipeline_layout_;
+            pipeline_info.renderPass = render_pass_;
+            pipeline_info.subpass = 0;
+
+            VkResult result = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &graphics_pipeline_);
+
+            if (result == VK_SUCCESS) {
+                std::cout << "✓ Graphics pipeline created successfully!" << std::endl;
+            }
+            else {
+                std::cerr << "Failed to create graphics pipeline: " << result << std::endl;
+            }
+
+            return result == VK_SUCCESS;
+        }
+
+    public:
+        ~TaffyMeshShaderPipeline() {
+            if (graphics_pipeline_) vkDestroyPipeline(device_, graphics_pipeline_, nullptr);
+            if (pipeline_layout_) vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
+            if (task_shader_module_) vkDestroyShaderModule(device_, task_shader_module_, nullptr);
+            if (mesh_shader_module_) vkDestroyShaderModule(device_, mesh_shader_module_, nullptr);
+            if (fragment_shader_module_) vkDestroyShaderModule(device_, fragment_shader_module_, nullptr);
+        }
+    };
+
+
+    class TaffyMeshShaderManager {
+    private:
+        VkDevice device_;
+        VkPhysicalDevice physical_device_;
+        VkRenderPass render_pass_;
+        PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT_ = nullptr;
+
+        // Pipeline cache for loaded mesh shader assets
+        std::unordered_map<std::string, std::unique_ptr<TaffyMeshShaderPipeline>> pipelines_;
+
+    public:
+        TaffyMeshShaderManager(VkDevice device, VkPhysicalDevice physical_device)
+            : device_(device), physical_device_(physical_device) {
+
+            // Get mesh shader function pointer
+            vkCmdDrawMeshTasksEXT_ = (PFN_vkCmdDrawMeshTasksEXT)
+                vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT");
+
+            if (vkCmdDrawMeshTasksEXT_) {
+                std::cout << "✓ Mesh shader manager initialized!" << std::endl;
+            }
+            else {
+                std::cout << "✗ Failed to get mesh shader function pointer!" << std::endl;
+            }
+        }
+
+        /**
+         * STEP 3: Load Taffy asset and create mesh shader pipeline
+         */
+        bool load_taffy_asset(const std::string& filepath) {
+            std::cout << "🔥 Loading Taffy mesh shader asset: " << filepath << std::endl;
+
+            // Load Taffy asset
+            Taffy::Asset asset;
+            if (!asset.load_from_file(filepath)) {
+                std::cerr << "Failed to load Taffy asset: " << filepath << std::endl;
+                return false;
+            }
+
+            // Check for mesh shader support
+            if (!asset.has_feature(Taffy::FeatureFlags::MeshShaders)) {
+                std::cout << "Asset doesn't contain mesh shaders, using fallback" << std::endl;
+                return false;
+            }
+
+            if (!asset.has_chunk(Taffy::ChunkType::SHDR)) {
+                std::cout << "No shader chunk found in asset" << std::endl;
+                return false;
+            }
+
+            // Create mesh shader pipeline
+            auto pipeline = std::make_unique<TaffyMeshShaderPipeline>(device_, physical_device_, render_pass_);
+
+            if (!pipeline->create_from_taffy_asset(asset)) {
+                std::cerr << "Failed to create mesh shader pipeline from asset" << std::endl;
+                return false;
+            }
+
+            // Store pipeline for rendering
+            pipelines_[filepath] = std::move(pipeline);
+
+            std::cout << "🚀 Mesh shader pipeline created successfully for: " << filepath << std::endl;
+            return true;
+        }
+
+        /**
+         * STEP 4: Render mesh shader asset
+         */
+        void render_asset(const std::string& filepath, VkCommandBuffer command_buffer) {
+            auto it = pipelines_.find(filepath);
+            if (it == pipelines_.end()) {
+                std::cerr << "Pipeline not found for asset: " << filepath << std::endl;
+                return;
+            }
+
+            // Render using mesh shader pipeline
+            it->second->render(command_buffer, vkCmdDrawMeshTasksEXT_);
+        }
+
+        /**
+         * Get all loaded pipelines
+         */
+        const std::unordered_map<std::string, std::unique_ptr<TaffyMeshShaderPipeline>>& get_pipelines() const {
+            return pipelines_;
+        }
+    };
+
 
     class VulkanDevice {
     public:
@@ -272,6 +788,9 @@ namespace tremor::gfx {
         std::atomic<uint32_t> m_nextTextureId{ 1 };
 
     public:
+		VkDevice device() const { return m_device; }
+		VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
+
         VulkanResourceManager(VkDevice device, VkPhysicalDevice physicalDevice)
             : m_device(device), m_physicalDevice(physicalDevice) {
 
@@ -1260,6 +1779,9 @@ namespace tremor::gfx {
 
         VkShaderModule loadShader(const std::string& filename);
 
+        std::unique_ptr<TaffyMeshShaderManager> m_taffyMeshShaderManager;
+        PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT_ = nullptr;
+
     private:
         // === CORE VULKAN OBJECTS ===
 
@@ -1525,6 +2047,9 @@ namespace tremor::gfx {
 
     class VulkanClusteredRenderer : public ClusteredRenderer {
     public:
+
+        std::unique_ptr<TaffyMeshShaderManager> mesh_shader_manager_;
+
         VulkanClusteredRenderer(VkDevice device, VkPhysicalDevice physicalDevice,
             VkQueue graphicsQueue, uint32_t graphicsQueueFamily,
             VkCommandPool commandPool, const ClusterConfig& config);
