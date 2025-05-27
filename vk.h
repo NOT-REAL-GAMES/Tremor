@@ -2533,6 +2533,8 @@ namespace tremor::gfx {
         std::unordered_map<std::string, std::shared_ptr<ShaderModule>> m_shaders;
         std::unordered_map<std::string, std::filesystem::file_time_type> m_shaderFileTimestamps;
     };
+    
+    using namespace Taffy;
 
 
 

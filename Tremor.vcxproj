@@ -153,7 +153,6 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="mem.h" />
     <ClCompile Include="oldmain.cpp" />
-    <ClCompile Include="renderer\taffy_asset.cpp" />
     <ClCompile Include="renderer\taffy_integration.cpp" />
     <ClCompile Include="renderer\taffy_mesh.cpp" />
     <ClCompile Include="res.h" />
@@ -170,7 +169,6 @@
     <ClInclude Include="quan.h" />
     <ClInclude Include="RenderBackend.h" />
     <ClInclude Include="RenderBackendBase.h" />
-    <ClInclude Include="renderer\taffy_asset.h" />
     <ClInclude Include="renderer\taffy_integration.h" />
     <ClInclude Include="renderer\taffy_mesh.h" />
     <ClInclude Include="taffy\taffy.h" />
