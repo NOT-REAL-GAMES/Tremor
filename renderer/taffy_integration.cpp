@@ -15,7 +15,7 @@ namespace Tremor {
         // Load the Taffy asset
         Taffy::Asset asset;
         std::cout << "About to call asset.load_from_file()..." << std::endl;
-        if (!asset.load_from_file(filepath)) {
+        if (!asset.load_from_file_safe(filepath)) {
             std::cerr << "Failed to load Taffy asset: " << filepath << std::endl;
             return nullptr;
         }
@@ -68,7 +68,7 @@ namespace Tremor {
 
     std::unique_ptr<TaffyMesh> TaffyAssetLoader::load_mesh_only(const std::string& filepath) {
         Taffy::Asset asset;
-        if (!asset.load_from_file(filepath)) {
+        if (!asset.load_from_file_safe(filepath)) {
             return nullptr;
         }
 
@@ -84,7 +84,7 @@ namespace Tremor {
         std::vector<uint32_t> material_ids;
 
         // Get materials chunk if it exists
-        auto materials_opt = asset.get_materials();
+        auto materials_opt = asset.get_chunk_data(Taffy::ChunkType::MTRL);
         if (!materials_opt) {
             return material_ids; // Empty vector
         }
@@ -101,16 +101,9 @@ namespace Tremor {
         const Taffy::MaterialChunk::Material* materials =
             reinterpret_cast<const Taffy::MaterialChunk::Material*>(chunk_ptr + sizeof(Taffy::MaterialChunk));
 
-        // Convert each material
-        for (uint32_t i = 0; i < materials_chunk.material_count; ++i) {
-            tremor::gfx::PBRMaterial pbr_material = convert_taffy_material(materials[i]);
-            uint32_t material_id = renderer_.createMaterial(pbr_material);
-            material_ids.push_back(material_id);
+       
 
-            std::cout << "Loaded material: " << materials[i].name << " (ID: " << material_id << ")" << std::endl;
-        }
-
-        return material_ids;
+        return {};
     }
 
     tremor::gfx::PBRMaterial TaffyAssetLoader::convert_taffy_material(const Taffy::MaterialChunk::Material& taffy_mat) {

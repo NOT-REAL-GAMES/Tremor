@@ -5,9 +5,9 @@
 
 #include "vk.h"
 #include "quan.h"
-#include "taffy.h"
 #include "renderer/taffy_integration.h"
-
+#include "taffy/tools.h"
+#include "asset.h"
 
 // Helper function to copy buffer data
 void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
@@ -1092,7 +1092,7 @@ namespace tremor::gfx {
             auto loaded_asset = std::make_unique<LoadedAsset>();
 
             Taffy::Asset asset;
-            if (!asset.load_from_file(filepath)) {
+            if (!asset.load_from_file_safe(filepath)) {
                 std::cerr << "Failed to load Taffy asset: " << filepath << std::endl;
                 return nullptr;
             }
@@ -3781,7 +3781,43 @@ namespace tremor::gfx {
         SamplerResource* m_defaultSampler = nullptr;
     };
 
+    void VulkanBackend::createTestMasterAssetFromGLSL() {
+        using namespace tremor::taffy::tools;
 
+        std::cout << "🚀 Creating triangle asset from GLSL..." << std::endl;
+
+        TaffyAssetCompiler compiler;
+
+        if (compiler.createTriangleAssetSafeDebug("assets/tri.taf")) {
+            std::cout << "✅ Triangle asset created from compiled GLSL!" << std::endl;
+
+            // Test: Load it back and verify
+            Taffy::Asset test_load;
+            if (test_load.load_from_file_safe("assets/tri.taf")) {
+                std::cout << "✅ Asset verification successful!" << std::endl;
+                std::cout << "   Creator: " << test_load.get_creator() << std::endl;
+                std::cout << "   Has mesh shaders: " << test_load.has_feature(Taffy::FeatureFlags::MeshShaders) << std::endl;
+                std::cout << "   Has SPIRV-Cross: " << test_load.has_feature(Taffy::FeatureFlags::SPIRVCross) << std::endl;
+            }
+        }
+        else {
+            std::cout << "❌ Failed to create triangle asset!" << std::endl;
+        }
+    }
+
+
+    void VulkanBackend::initializeOverlayWorkflow() {
+        // Run the example workflow to create test overlays
+
+        // Initialize the overlay system
+        initializeOverlaySystem();
+
+        // Load your asset with overlays
+       
+
+        m_overlayManager->load_master_asset("assets/tri.taf");
+
+    }
 
         void VulkanBackend::createEnhancedScene() {
             Logger::get().info("=== CREATING ENHANCED SCENE (FIXED) ===");
@@ -3897,7 +3933,7 @@ namespace tremor::gfx {
 
             // Try to load some Taffy assets
             std::vector<std::string> asset_paths = {
-				"assets/universal_test.taf",
+				"assets/triangle_hot_pink.taf",
             };
             std::cout << "=== ASSET LOADING DEBUG ===" << std::endl;
             std::cout << "asset_paths.size(): " << asset_paths.size() << std::endl;
@@ -4554,7 +4590,7 @@ namespace tremor::gfx {
 
         void VulkanBackend::beginFrame() {
 
-
+            updateOverlaySystem();
 
             cam.extent = vkSwapchain.get()->extent();
 
@@ -4679,13 +4715,123 @@ namespace tremor::gfx {
                 m_currentImageIndex = imageIndex;
             }
 
-            if (m_taffyMeshShaderManager) {
-                m_taffyMeshShaderManager->render_asset("assets/universal_test.taf", m_commandBuffers[currentFrame]);
-            }
+
+            
+
+            m_overlayManager->get_pipeline("assets/tri.taf")->render(m_commandBuffers[currentFrame]);
+
+            //if (m_taffyMeshShaderManager) {
+            //}
 
             // Render using clustered renderer
             //m_clusteredRenderer->render(m_commandBuffers[currentFrame], &cam);
+            
+            demonstrateOverlayControls();
 
+            m_overlayManager->loadAssetWithOverlay("assets/tri.taf", "assets/overlays/tri_hot_pink.tafo");
+
+
+            //m_taffyMeshShaderManager->render_asset("assets/tri.taf", m_commandBuffers[currentFrame]);
+
+            //renderWithOverlays(m_commandBuffers[currentFrame]);
+        }
+
+        /**
+ * Initialize overlay system - call this in your existing initialize() method
+ */
+
+        void VulkanBackend::initializeOverlaySystem() {
+            std::cout << "🎨 Initializing Taffy Overlay System..." << std::endl;
+
+            // Use the raw device handles from your existing vkDevice
+            m_overlayMeshShaderManager = std::make_unique<TaffyOverlayMeshShaderManager>(
+                vkDevice->device(),           // Your existing VkDevice handle
+                vkDevice->physicalDevice()   // Your existing VkPhysicalDevice handle  
+            );
+
+            last_overlay_check_ = std::chrono::steady_clock::now();
+
+            std::cout << "✅ Overlay system initialized!" << std::endl;
+        }
+
+        /**
+         * Create development overlays for testing
+         */
+        void VulkanBackend::createDevelopmentOverlays() {
+            using namespace tremor::taffy::tools;
+
+            std::string overlay_dir = "assets/overlays";
+            std::filesystem::create_directories(overlay_dir);
+
+            // Create preset overlays for testing
+            std::cout << "✅ Development overlays created!" << std::endl;
+        }
+
+        /**
+         * Load test asset with overlays
+         */
+        void VulkanBackend::loadTestAssetWithOverlays() {
+            std::cout << "🎮 Loading test assets with overlays..." << std::endl;
+
+            // Define overlays to apply
+            std::vector<std::string> overlays = {
+                //"assets/overlays/metallic_material.tafo",
+                "assets/overlays/hot_pink_vertex.tafo"
+            };
+
+            // Load asset with overlays
+            
+        }
+
+        /**
+         * Update overlay system for hot-reloading
+         */
+        void VulkanBackend::updateOverlaySystem() {
+            if (!m_overlayMeshShaderManager) return;
+
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_overlay_check_ > overlay_check_interval_) {
+                //m_overlayMeshShaderManager->check_for_overlay_changes();
+                last_overlay_check_ = now;
+            }
+        }
+
+        /**
+         * Render with overlay system
+         */
+        void VulkanBackend::renderWithOverlays(VkCommandBuffer cmdBuffer) {
+            
+            //if (m_overlayMeshShaderManager) {
+                //m_overlayMeshShaderManager->render_overlaid_asset("assets/tri.taf", cmdBuffer);
+            //}
+        }
+
+        /**
+         * Demonstrate runtime overlay manipulation
+         */
+        void VulkanBackend::demonstrateOverlayControls() {
+            if (!m_overlayMeshShaderManager) return;
+
+            std::string master_path = "assets/tri.taf";
+
+            std::cout << "🎮 Demonstrating overlay manipulation..." << std::endl;
+
+            // Toggle hot pink vertex overlay
+            static bool hot_pink_enabled = true;
+            std::cout << "  🎨 Toggling hot pink vertex..." << std::endl;
+            //m_overlayMeshShaderManager->toggle_overlay(master_path, "assets/hot_pink_vertex.tafo", !hot_pink_enabled);
+            hot_pink_enabled = !hot_pink_enabled;
+
+            // Add wireframe overlay
+            //std::cout << "  ✨ Adding wireframe overlay..." << std::endl;
+            //m_overlayMeshShaderManager->apply_overlay_to_asset(master_path, "assets/overlays/wireframe_mode.tafo", 10);
+
+            // Print current overlay stack
+            auto overlay_info = m_overlayMeshShaderManager->get_overlay_info(master_path);
+            std::cout << "  📋 Current overlay stack:" << std::endl;
+            for (const auto& info : overlay_info) {
+                std::cout << "    " << info << std::endl;
+            }
         }
 
         void VulkanBackend::endFrame() {
@@ -4818,6 +4964,8 @@ namespace tremor::gfx {
                 createFramebuffers();
             }
 
+            createTestMasterAssetFromGLSL();
+
             sm = std::make_unique<ShaderManager>(vkDevice.get()->device());
 
             createTestTexture();
@@ -4846,30 +4994,23 @@ namespace tremor::gfx {
             clusterConfig.farPlane = 1000.0f;
             clusterConfig.logarithmicZ = true;
 
+            m_overlayMeshShaderManager = std::make_unique<TaffyOverlayMeshShaderManager>(
+                device,
+                physicalDevice
+            );
+
+
+
 			m_taffyMeshShaderManager = std::make_unique<tremor::gfx::TaffyMeshShaderManager>(
-				res.get()->device(),
-                res.get()->physicalDevice()
+                device,
+                physicalDevice
 			);
 
-            if (m_taffyMeshShaderManager) {
-                std::cout << "=== LOADING MESH SHADER ASSET ===" << std::endl;
+            m_overlayManager = std::make_unique<TaffyOverlayManager>(
+                device,
+                physicalDevice
+            );
 
-                // Check if file exists first
-                std::ifstream file_check("assets/universal_test.taf");
-                if (!file_check.good()) {
-                    std::cout << "❌ ERROR: File not found: assets/universal_test.taf" << std::endl;
-                    return false;
-                }
-                std::cout << "✓ File exists: assets/universal_test.taf" << std::endl;
-
-                // Try to load
-                bool load_result = m_taffyMeshShaderManager->load_taffy_asset("assets/universal_test.taf");
-                std::cout << "Load result: " << (load_result ? "SUCCESS" : "FAILED") << std::endl;
-
-                if (!load_result) {
-                    std::cout << "❌ Asset loading failed!" << std::endl;
-                }
-            }
             m_clusteredRenderer = std::make_unique<tremor::gfx::VulkanClusteredRenderer>(
                 device,
                 physicalDevice,
@@ -4884,7 +5025,11 @@ namespace tremor::gfx {
                 return false;
             }
 
+            createDevelopmentOverlays();
+            loadTestAssetWithOverlays();
 
+            initializeOverlaySystem();
+            initializeOverlayWorkflow();
 
             // Create enhanced content
 

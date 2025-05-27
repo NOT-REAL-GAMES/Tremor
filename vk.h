@@ -22,8 +22,10 @@
 #include "quan.h"
 #include "handle.h"
 #include "taffy.h"
+#include "taffy/tools.h"
 #include "renderer/taffy_mesh.h"
 #include "renderer/taffy_integration.h"
+#include "asset.h"
 
 // Define concepts for Vulkan types
 template<typename T>
@@ -61,173 +63,117 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
 
 namespace tremor::gfx {
 
-    class TaffyShaderTranspiler {
+    using namespace tremor::taffy::tools;
+
+    class VulkanDevice {
     public:
-        enum class TargetAPI {
-            Vulkan_SPIRV,    // Native SPIR-V for Vulkan
-            Vulkan_GLSL,     // GLSL for Vulkan
-            OpenGL_GLSL,     // GLSL for OpenGL
-            DirectX_HLSL,    // HLSL for DirectX 12
-            Metal_MSL,       // MSL for Metal
-            WebGL_GLSL       // WebGL-compatible GLSL
+        // Structure for tracking physical device capabilities
+        struct VulkanDeviceCapabilities {
+            bool dedicatedAllocation = false;
+            bool fullScreenExclusive = false;
+            bool rayQuery = false;
+            bool meshShaders = false;
+            bool bresenhamLineRasterization = false;
+            bool nonSolidFill = false;
+            bool multiDrawIndirect = false;
+            bool sparseBinding = false;  // For megatextures
+            bool bufferDeviceAddress = false;  // For ray tracing
+            bool dynamicRendering = false;  // Modern rendering without render passes
         };
 
-        /**
-         * Transpile SPIR-V to target shader language
-         */
-        static std::string transpile_shader(const std::vector<uint32_t>& spirv,
-            TargetAPI target,
-            Taffy::ShaderChunk::ShaderStage stage) {
-            try {
-                switch (target) {
-                case TargetAPI::Vulkan_SPIRV:
-                    return ""; // Return empty - use raw SPIR-V
+        // Structure for tracking preferences in device selection
+        struct DevicePreferences {
+            bool preferDiscreteGPU = true;
+            bool requireMeshShaders = false;
+            bool requireRayQuery = true;
+            bool requireSparseBinding = true;  // For megatextures
+            int preferredDeviceIndex = -1;     // -1 means auto-select
+        };
 
-                case TargetAPI::Vulkan_GLSL:
-                case TargetAPI::OpenGL_GLSL: {
-                    spirv_cross::CompilerGLSL glsl_compiler(spirv);
+        // Constructor
+        VulkanDevice(VkInstance instance, VkSurfaceKHR surface,
+            const DevicePreferences& preferences = {});
 
-                    // Configure GLSL options using set_common_options
-                    spirv_cross::CompilerGLSL::Options glsl_options;
-                    if (target == TargetAPI::Vulkan_GLSL) {
-                        glsl_options.version = 460;
-                        glsl_options.vulkan_semantics = true;
-                    }
-                    else {
-                        glsl_options.version = 460;
-                        glsl_options.vulkan_semantics = false;
-                    }
-
-                    // Enable mesh shader extensions if needed
-                    if (stage == Taffy::ShaderChunk::ShaderStage::MeshShader ||
-                        stage == Taffy::ShaderChunk::ShaderStage::TaskShader) {
-                        glsl_options.version = 460; // Mesh shaders need GLSL 4.6+
-                    }
-
-                    glsl_compiler.set_common_options(glsl_options);
-                    return glsl_compiler.compile();
-                }
-
-                case TargetAPI::DirectX_HLSL: {
-                    spirv_cross::CompilerHLSL hlsl_compiler(spirv);
-
-                    // For HLSL, use default options or set_common_options with basic GLSL options
-                    spirv_cross::CompilerGLSL::Options basic_options;
-                    basic_options.version = 450;
-                    hlsl_compiler.set_common_options(basic_options);
-
-                    return hlsl_compiler.compile();
-                }
-
-                case TargetAPI::Metal_MSL: {
-                    spirv_cross::CompilerMSL msl_compiler(spirv);
-
-                    // For MSL, use default options or set_common_options with basic GLSL options  
-                    spirv_cross::CompilerGLSL::Options basic_options;
-                    basic_options.version = 450;
-                    msl_compiler.set_common_options(basic_options);
-
-                    return msl_compiler.compile();
-                }
-
-                case TargetAPI::WebGL_GLSL: {
-                    spirv_cross::CompilerGLSL webgl_compiler(spirv);
-
-                    // Configure WebGL options
-                    spirv_cross::CompilerGLSL::Options webgl_options;
-                    webgl_options.version = 300;
-                    webgl_options.es = true;
-                    webgl_options.vulkan_semantics = false;
-                    webgl_compiler.set_common_options(webgl_options);
-
-                    return webgl_compiler.compile();
-                }
-                }
+        // Destructor - automatically cleans up Vulkan resources
+        ~VulkanDevice() {
+            if (m_device != VK_NULL_HANDLE) {
+                vkDestroyDevice(m_device, nullptr);
+                m_device = VK_NULL_HANDLE;
             }
-            catch (const spirv_cross::CompilerError& e) {
-                std::cerr << "SPIR-V Cross compilation failed: " << e.what() << std::endl;
-            }
-
-            return "";
         }
 
-        /**
- * Get the best target API for current platform/engine
- */
-        static TargetAPI get_preferred_target() {
-#ifdef TREMOR_VULKAN
-            return TargetAPI::Vulkan_SPIRV; // Use native SPIR-V for best performance
-#elif defined(TREMOR_DIRECTX12)
-            return TargetAPI::DirectX_HLSL;
-#elif defined(TREMOR_METAL)
-            return TargetAPI::Metal_MSL;
-#elif defined(TREMOR_OPENGL)
-            return TargetAPI::OpenGL_GLSL;
-#elif defined(TREMOR_WEBGL)
-            return TargetAPI::WebGL_GLSL;
-#else
-            return TargetAPI::Vulkan_GLSL; // Default fallback
-#endif
-        }
-    };
+        // Delete copy operations to prevent double-free
+        VulkanDevice(const VulkanDevice&) = delete;
+        VulkanDevice& operator=(const VulkanDevice&) = delete;
 
-    class Buffer {
-    public:
-        Buffer() = default;
-        Buffer(VkDevice device, VkPhysicalDevice physicalDevice,
-            VkDeviceSize size, VkBufferUsageFlags usage,
-            VkMemoryPropertyFlags memoryProps);
+        // Move operations
+        VulkanDevice(VulkanDevice&& other) noexcept;
+        VulkanDevice& operator=(VulkanDevice&& other) noexcept;
 
-        // Method declarations only - implementations go to vk.cpp
-        void update(const void* data, VkDeviceSize size, VkDeviceSize offset = 0);
+        // Access the Vulkan handles
+        VkDevice device() const { return m_device; }
+        VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
+        VkQueue graphicsQueue() const { return m_graphicsQueue; }
+        uint32_t graphicsQueueFamily() const { return m_graphicsQueueFamily; }
 
-        // Simple getters can stay inline
-        VkBuffer getBuffer() const { return m_buffer; }
-        VkDeviceSize getSize() const { return m_size; }
-        VkDeviceMemory getMemory() const { return m_memory; }
+        // Get device capabilities and properties
+        const VulkanDeviceCapabilities& capabilities() const { return m_capabilities; }
+        const VkPhysicalDeviceProperties& properties() const { return m_deviceProperties; }
+        const VkPhysicalDeviceMemoryProperties& memoryProperties() const { return m_memoryProperties; }
+
+        // Format information
+        VkFormat colorFormat() const { return m_colorFormat; }
+        VkFormat depthFormat() const { return m_depthFormat; }
+
+        // Utility functions
+        std::optional<uint32_t> findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
+
+        // Setup functions for specialized features
+        void setupBresenhamLineRasterization(VkPipelineRasterizationStateCreateInfo& rasterInfo) const;
+        void setupFloatingOriginUniforms(VkDescriptorSetLayoutCreateInfo& layoutInfo) const;
 
     private:
+        // Vulkan handles
+        VkInstance m_instance = VK_NULL_HANDLE;
+        VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
         VkDevice m_device = VK_NULL_HANDLE;
-        BufferResource m_buffer;
-        DeviceMemoryResource m_memory;
-        VkDeviceSize m_size = 0;
+        VkQueue m_graphicsQueue = VK_NULL_HANDLE;
+        uint32_t m_graphicsQueueFamily = 0;
 
-        // Helper function declaration
-        uint32_t findMemoryType(VkPhysicalDevice physicalDevice,
-            uint32_t typeFilter, VkMemoryPropertyFlags properties);
+        // Device properties
+        VkPhysicalDeviceProperties m_deviceProperties{};
+        VkPhysicalDeviceFeatures2 m_deviceFeatures2{};
+        VkPhysicalDeviceMemoryProperties m_memoryProperties{};
+
+        // Formats
+        VkFormat m_colorFormat = VK_FORMAT_UNDEFINED;
+        VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
+
+        // Capabilities
+        VulkanDeviceCapabilities m_capabilities{};
+
+        // The surface we're rendering to
+        VkSurfaceKHR m_surface = VK_NULL_HANDLE;
+
+        // Initialization helpers
+        void selectPhysicalDevice(const DevicePreferences& preferences);
+        void createLogicalDevice(const DevicePreferences& preferences);
+        void determineFormats();
+        void logDeviceInfo() const;
+
+        // Template for structure initialization with sType
+        template<typename T>
+        static T createStructure() {
+            T result{};
+            result.sType = getStructureType<T>();
+            return result;
+        }
+
+        // Helper to get correct sType for Vulkan structures
+        template<typename T>
+        static VkStructureType getStructureType();
     };
 
-
-    struct PBRMaterialUBO {
-        // Basic properties
-        alignas(16) float baseColor[4];   // vec4 in shader
-        float metallic;        // float in shader
-        float roughness;       // float in shader
-        float ao;              // float in shader
-        alignas(16) float emissive[3];    // vec3 in shader (padded to 16 bytes)
-
-        // Texture availability flags
-        int hasAlbedoMap;
-        int hasNormalMap;
-        int hasMetallicRoughnessMap;
-        int hasAoMap;
-        int hasEmissiveMap;
-    };
-
-    class TaffyMeshShaderPipeline;
-    class ShaderManager;
-    class RenderPass;
-    class VertexBufferSimple;
-    class IndexBuffer;
-    class Framebuffer;
-    class SwapChain;
-    class VulkanResourceManager;
-    class DynamicRenderer;
-    class CommandPoolResource;
-    class DescriptorBuilder;
-    class DescriptorLayoutCache;
-    class DescriptorAllocator;
-    class DescriptorWriter;
 
     class TaffyMeshShaderPipeline {
     private:
@@ -249,8 +195,8 @@ namespace tremor::gfx {
         uint32_t max_primitives_ = 0;
 
     public:
-        TaffyMeshShaderPipeline(VkDevice device, VkPhysicalDevice physical_device, VkRenderPass render_pass = VK_NULL_HANDLE)
-            : device_(device), physical_device_(physical_device), render_pass_(render_pass) {
+        TaffyMeshShaderPipeline(VkDevice device, VkPhysicalDevice physical_device)
+            : device_(device), physical_device_(physical_device) {
         }
 
         /**
@@ -279,7 +225,7 @@ namespace tremor::gfx {
             // Extract individual shaders
             size_t offset = sizeof(shader_header);
             for (uint32_t i = 0; i < shader_header.shader_count; ++i) {
-                if (!extract_and_compile_shader(*shader_data, offset)) {
+                if (!extract_and_compile_shader(*shader_data, i)) {
                     std::cerr << "Failed to extract shader " << i << std::endl;
                     return false;
                 }
@@ -328,74 +274,111 @@ namespace tremor::gfx {
 
             // Draw using mesh tasks instead of traditional vertex buffers!
             // This is the magic - no vertex data needed, mesh shader generates geometry!
-            vkCmdDrawMeshTasksEXT(command_buffer, 1, 1 , 1);
+            vkCmdDrawMeshTasksEXT(command_buffer, 1, 1, 1);
 
             std::cout << "✓ Mesh shader draw call submitted!" << std::endl;
         }
 
     private:
-        bool extract_and_compile_shader(const std::vector<uint8_t>& shader_data, size_t& offset) {
-            if (offset + sizeof(Taffy::ShaderChunk::Shader) > shader_data.size()) {
+        bool extract_and_compile_shader(const std::vector<uint8_t>& shader_data, uint32_t shader_index) {
+            std::cout << "🔍 EXTRACTING SHADER " << shader_index << ":" << std::endl;
+
+            const uint8_t* chunk_ptr = shader_data.data();
+            size_t chunk_size = shader_data.size();
+
+            // Parse header first
+            Taffy::ShaderChunk header;
+            std::memcpy(&header, chunk_ptr, sizeof(header));
+            std::cout << "  Total shaders in chunk: " << header.shader_count << std::endl;
+
+            if (shader_index >= header.shader_count) {
+                std::cerr << "  ❌ Shader index out of range!" << std::endl;
                 return false;
             }
 
-            // Read shader metadata
+            // Calculate offset to this shader's info
+            size_t shader_info_offset = sizeof(Taffy::ShaderChunk) + shader_index * sizeof(Taffy::ShaderChunk::Shader);
+            std::cout << "  Shader info offset: " << shader_info_offset << std::endl;
+
+            if (shader_info_offset + sizeof(Taffy::ShaderChunk::Shader) > chunk_size) {
+                std::cerr << "  ❌ Shader info extends beyond chunk!" << std::endl;
+                return false;
+            }
+
+            // Read shader info
             Taffy::ShaderChunk::Shader shader_info;
-            std::memcpy(&shader_info, shader_data.data() + offset, sizeof(shader_info));
-            offset += sizeof(shader_info);
+            std::memcpy(&shader_info, chunk_ptr + shader_info_offset, sizeof(shader_info));
 
-            // Read SPIR-V data
-            if (offset + shader_info.spirv_size > shader_data.size()) {
+            std::cout << "  Name hash: 0x" << std::hex << shader_info.name_hash << std::dec << std::endl;
+            std::cout << "  Stage: " << static_cast<uint32_t>(shader_info.stage) << std::endl;
+            std::cout << "  SPIR-V size: " << shader_info.spirv_size << " bytes" << std::endl;
+
+            // Calculate SPIR-V offset for THIS specific shader
+            size_t spirv_data_start = sizeof(Taffy::ShaderChunk) + header.shader_count * sizeof(Taffy::ShaderChunk::Shader);
+            size_t spirv_offset = spirv_data_start;
+
+            // Skip SPIR-V data for previous shaders
+            for (uint32_t i = 0; i < shader_index; ++i) {
+                size_t prev_shader_info_offset = sizeof(Taffy::ShaderChunk) + i * sizeof(Taffy::ShaderChunk::Shader);
+                Taffy::ShaderChunk::Shader prev_shader;
+                std::memcpy(&prev_shader, chunk_ptr + prev_shader_info_offset, sizeof(prev_shader));
+                spirv_offset += prev_shader.spirv_size;
+                std::cout << "  Skipping shader " << i << " SPIR-V: " << prev_shader.spirv_size << " bytes" << std::endl;
+            }
+
+            std::cout << "  This shader's SPIR-V offset: " << spirv_offset << std::endl;
+
+            // Validate SPIR-V bounds
+            if (spirv_offset + shader_info.spirv_size > chunk_size) {
+                std::cerr << "  ❌ SPIR-V data extends beyond chunk!" << std::endl;
+                std::cerr << "    SPIR-V end: " << (spirv_offset + shader_info.spirv_size) << std::endl;
+                std::cerr << "    Chunk size: " << chunk_size << std::endl;
                 return false;
             }
 
-            std::vector<uint32_t> spirv_code((shader_info.spirv_size / sizeof(uint32_t)));
-            std::memcpy(spirv_code.data(), shader_data.data() + offset, shader_info.spirv_size);
-            offset += shader_info.spirv_size;
+            // Validate SPIR-V magic
+            if (shader_info.spirv_size >= 4) {
+                uint32_t magic;
+                std::memcpy(&magic, chunk_ptr + spirv_offset, sizeof(magic));
+                std::cout << "  SPIR-V magic: 0x" << std::hex << magic << std::dec;
 
-            // Create Vulkan shader module
-            VkShaderModuleCreateInfo create_info{};
-            create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-            create_info.codeSize = shader_info.spirv_size;
-            create_info.pCode = spirv_code.data();
-
-            VkShaderModule* target_module = nullptr;
-
-            switch (shader_info.stage) {
-            case Taffy::ShaderChunk::ShaderStage::TaskShader:
-                target_module = &task_shader_module_;
-                std::cout << "  ✓ Task shader compiled" << std::endl;
-                break;
-
-            case Taffy::ShaderChunk::ShaderStage::MeshShader:
-                target_module = &mesh_shader_module_;
-                max_vertices_ = shader_info.max_vertices;
-                max_primitives_ = shader_info.max_primitives;
-                std::cout << "  ✓ Mesh shader compiled (max vertices: " << max_vertices_
-                    << ", max primitives: " << max_primitives_ << ")" << std::endl;
-                break;
-
-            case Taffy::ShaderChunk::ShaderStage::Fragment:
-                target_module = &fragment_shader_module_;
-                std::cout << "  ✓ Fragment shader compiled" << std::endl;
-                break;
-
-            default:
-                std::cerr << "Unsupported shader stage: " << static_cast<int>(shader_info.stage) << std::endl;
-                return false;
-            }
-
-            if (target_module) {
-                VkResult result = vkCreateShaderModule(device_, &create_info, nullptr, target_module);
-                if (result != VK_SUCCESS) {
-                    std::cerr << "Failed to create shader module: " << result << std::endl;
+                if (magic == 0x07230203) {
+                    std::cout << " ✅ VALID" << std::endl;
+                }
+                else {
+                    std::cout << " ❌ INVALID! Expected 0x07230203" << std::endl;
                     return false;
                 }
             }
 
+            // Create Vulkan shader module
+            VkShaderModuleCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            createInfo.codeSize = shader_info.spirv_size;
+            createInfo.pCode = reinterpret_cast<const uint32_t*>(chunk_ptr + spirv_offset);
+
+            VkShaderModule shaderModule;
+            VkResult result = vkCreateShaderModule(device_, &createInfo, nullptr, &shaderModule);
+
+            if (result != VK_SUCCESS) {
+                std::cerr << "  ❌ Failed to create Vulkan shader module! VkResult: " << result << std::endl;
+                return false;
+            }
+
+            std::cout << "  ✅ Shader " << shader_index << " extracted and compiled successfully!" << std::endl;
+
+            // Store the shader module based on stage
+            if (shader_info.stage == Taffy::ShaderChunk::Shader::ShaderStage::MeshShader) {
+                mesh_shader_module_ = shaderModule;  // Store mesh shader
+                std::cout << "    → Stored as mesh shader module" << std::endl;
+            }
+            else if (shader_info.stage == Taffy::ShaderChunk::Shader::ShaderStage::Fragment) {
+                fragment_shader_module_ = shaderModule;  // Store fragment shader
+                std::cout << "    → Stored as fragment shader module" << std::endl;
+            }
+
             return true;
         }
-
         bool create_pipeline_layout() {
             VkPipelineLayoutCreateInfo layout_info{};
             layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -535,11 +518,6 @@ namespace tremor::gfx {
 
     public:
         ~TaffyMeshShaderPipeline() {
-            if (graphics_pipeline_) vkDestroyPipeline(device_, graphics_pipeline_, nullptr);
-            if (pipeline_layout_) vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
-            if (task_shader_module_) vkDestroyShaderModule(device_, task_shader_module_, nullptr);
-            if (mesh_shader_module_) vkDestroyShaderModule(device_, mesh_shader_module_, nullptr);
-            if (fragment_shader_module_) vkDestroyShaderModule(device_, fragment_shader_module_, nullptr);
         }
     };
 
@@ -548,7 +526,6 @@ namespace tremor::gfx {
     private:
         VkDevice device_;
         VkPhysicalDevice physical_device_;
-        VkRenderPass render_pass_;
         PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT_ = nullptr;
 
         // Pipeline cache for loaded mesh shader assets
@@ -570,6 +547,16 @@ namespace tremor::gfx {
             }
         }
 
+        void debug_print_pipelines() {
+            std::cout << "🔍 Registered pipelines:" << std::endl;
+            for (const auto& [key, pipeline] : pipelines_) {
+                std::cout << "    \"" << key << "\" -> " << pipeline.get() << std::endl;
+            }
+            if (pipelines_.empty()) {
+                std::cout << "    (No pipelines registered!)" << std::endl;
+            }
+        }
+
         /**
          * STEP 3: Load Taffy asset and create mesh shader pipeline
          */
@@ -578,7 +565,7 @@ namespace tremor::gfx {
 
             // Load Taffy asset
             Taffy::Asset asset;
-            if (!asset.load_from_file(filepath)) {
+            if (!asset.load_from_file_safe(filepath)) {
                 std::cerr << "Failed to load Taffy asset: " << filepath << std::endl;
                 return false;
             }
@@ -595,7 +582,7 @@ namespace tremor::gfx {
             }
 
             // Create mesh shader pipeline
-            auto pipeline = std::make_unique<TaffyMeshShaderPipeline>(device_, physical_device_, render_pass_);
+            auto pipeline = std::make_unique<TaffyMeshShaderPipeline>(device_, physical_device_);
 
             if (!pipeline->create_from_taffy_asset(asset)) {
                 std::cerr << "Failed to create mesh shader pipeline from asset" << std::endl;
@@ -632,114 +619,452 @@ namespace tremor::gfx {
     };
 
 
-    class VulkanDevice {
+    class TaffyOverlayManager {
     public:
-        // Structure for tracking physical device capabilities
-        struct VulkanDeviceCapabilities {
-            bool dedicatedAllocation = false;
-            bool fullScreenExclusive = false;
-            bool rayQuery = false;
-            bool meshShaders = false;
-            bool bresenhamLineRasterization = false;
-            bool nonSolidFill = false;
-            bool multiDrawIndirect = false;
-            bool sparseBinding = false;  // For megatextures
-            bool bufferDeviceAddress = false;  // For ray tracing
-            bool dynamicRendering = false;  // Modern rendering without render passes
+        struct OverlayStackEntry {
+            std::string overlay_path;
+            std::unique_ptr<Taffy::Overlay> overlay;
+            int priority = 0;  // Higher priority applied later
+            bool enabled = true;
         };
 
-        // Structure for tracking preferences in device selection
-        struct DevicePreferences {
-            bool preferDiscreteGPU = true;
-            bool requireMeshShaders = false;
-            bool requireRayQuery = true;
-            bool requireSparseBinding = true;  // For megatextures
-            int preferredDeviceIndex = -1;     // -1 means auto-select
+        struct MasterAssetEntry {
+            std::string asset_path;
+            std::unique_ptr<Taffy::Asset> master_asset;
+            std::unique_ptr<Taffy::Asset> current_modified_asset;  // Result after applying overlays
+            std::vector<OverlayStackEntry> overlay_stack;
+            uint64_t last_modification_hash = 0;  // For change detection
+
+            // Vulkan-specific cached resources
+            std::unique_ptr<TaffyMeshShaderPipeline> cached_pipeline;
+            bool pipeline_needs_rebuild = true;
         };
 
-        // Constructor
-        VulkanDevice(VkInstance instance, VkSurfaceKHR surface,
-            const DevicePreferences& preferences = {});
 
-        // Destructor - automatically cleans up Vulkan resources
-        ~VulkanDevice() {
-            if (m_device != VK_NULL_HANDLE) {
-                vkDestroyDevice(m_device, nullptr);
-                m_device = VK_NULL_HANDLE;
+        TaffyOverlayManager(VkDevice device, VkPhysicalDevice physical_device)
+            : device_(device), physical_device_(physical_device) {
+
+            std::cout << "🎨 Taffy Overlay Manager initialized!" << std::endl;
+        }
+
+        /**
+         * Load a master asset (.taf file)
+         */
+        bool load_master_asset(const std::string& asset_path) {
+            std::cout << "📦 Loading master asset: " << asset_path << std::endl;
+
+            auto master_asset = std::make_unique<Taffy::Asset>();
+            if (!master_asset->load_from_file_safe(asset_path)) {
+                std::cerr << "❌ Failed to load master asset: " << asset_path << std::endl;
+                return false;
+            }
+
+            // Create entry for this master asset
+            MasterAssetEntry entry;
+            entry.asset_path = asset_path;
+            entry.master_asset = std::move(master_asset);
+            entry.current_modified_asset = clone_asset(*entry.master_asset);
+
+            master_assets_[asset_path] = std::move(entry);
+
+            std::cout << "✅ Master asset loaded: " << asset_path << std::endl;
+            return true;
+        }
+
+        /**
+         * Apply overlay to a master asset
+         */
+        bool loadAssetWithOverlay(const std::string& asset_path, const std::string& overlay_path) {
+            // Load master asset (now hash-based)
+            Taffy::Asset asset;
+            if (!asset.load_from_file_safe(asset_path)) {
+                return false;
+            }
+
+            
+
+            // Load overlay (now hash-based)
+            Taffy::Overlay overlay;
+            if (!overlay.load_from_file(overlay_path)) {
+                return false;
+            }
+
+            // Apply overlay (hash-based targeting)
+            if (!overlay.apply_to_asset(asset)) {
+                std::cout << "❌ Overlay doesn't target this master asset!" << std::endl;
+                return false;
+            }
+
+
+
+            MasterAssetEntry entry;
+
+
+            std::cout << "✅ Hash-based overlay applied successfully!" << std::endl;
+            return true;
+        }
+        /**
+         * Remove overlay from asset
+         */
+
+        /**
+         * Toggle overlay on/off
+         */
+
+
+        /**
+         * Get the current modified asset (with all overlays applied)
+         */
+        Taffy::Asset* get_modified_asset(const std::string& master_path) {
+            auto it = master_assets_.find(master_path);
+            return (it != master_assets_.end()) ? it->second.current_modified_asset.get() : nullptr;
+        }
+
+        /**
+         * Get or create Vulkan pipeline for modified asset
+         */
+        TaffyMeshShaderPipeline* get_pipeline(const std::string& master_path) {
+            std::cout << "🔍 Registered pipelines:" << std::endl;
+            for (const auto& [key, pp] : master_assets_) {
+                std::cout << "    \"" << key << "\" -> " << pp.cached_pipeline << std::endl;
+            }
+            if (master_assets_.empty()) {
+                std::cout << "    (No pipelines registered!)" << std::endl;
+            }
+            auto master_it = master_assets_.find(master_path);
+            if (master_it == master_assets_.end()) {
+                return nullptr;
+            }
+
+            auto& entry = master_it->second;
+
+            // Rebuild pipeline if needed
+            if (entry.pipeline_needs_rebuild || !entry.cached_pipeline) {
+                std::cout << "🔧 Rebuilding pipeline for: " << master_path << std::endl;
+
+                entry.cached_pipeline = std::make_unique<TaffyMeshShaderPipeline>(
+                    device_, physical_device_);
+
+                if (entry.cached_pipeline->create_from_taffy_asset(*entry.current_modified_asset)) {
+                    entry.pipeline_needs_rebuild = false;
+                    std::cout << "✅ Pipeline rebuilt successfully!" << std::endl;
+                }
+                else {
+                    std::cerr << "❌ Failed to rebuild pipeline!" << std::endl;
+                    entry.cached_pipeline.reset();
+                    return nullptr;
+                }
+            }
+
+            return entry.cached_pipeline.get();
+        }
+
+        /**
+         * Hot-reload overlay files (for development)
+         */
+        /**
+         * Get overlay information for debugging
+         */
+        std::vector<std::string> get_overlay_info(const std::string& master_path) {
+            std::vector<std::string> info;
+
+            auto master_it = master_assets_.find(master_path);
+            if (master_it == master_assets_.end()) {
+                return info;
+            }
+
+            const auto& entry = master_it->second;
+            info.push_back("Master: " + master_path);
+
+            for (const auto& overlay : entry.overlay_stack) {
+                std::string status = overlay.enabled ? "✅" : "❌";
+                info.push_back(status + " " + overlay.overlay_path + " (priority: " +
+                    std::to_string(overlay.priority) + ")");
+            }
+
+            return info;
+        }
+
+        /**
+         * Clear all overlays from an asset
+         */
+        void clear_overlays(const std::string& master_path) {
+            auto master_it = master_assets_.find(master_path);
+            if (master_it != master_assets_.end()) {
+                auto& entry = master_it->second;
+                entry.overlay_stack.clear();
+                entry.current_modified_asset = clone_asset(*entry.master_asset);
+                entry.pipeline_needs_rebuild = true;
             }
         }
 
-        // Delete copy operations to prevent double-free
-        VulkanDevice(const VulkanDevice&) = delete;
-        VulkanDevice& operator=(const VulkanDevice&) = delete;
-
-        // Move operations
-        VulkanDevice(VulkanDevice&& other) noexcept;
-        VulkanDevice& operator=(VulkanDevice&& other) noexcept;
-
-        // Access the Vulkan handles
-        VkDevice device() const { return m_device; }
-        VkPhysicalDevice physicalDevice() const { return m_physicalDevice; }
-        VkQueue graphicsQueue() const { return m_graphicsQueue; }
-        uint32_t graphicsQueueFamily() const { return m_graphicsQueueFamily; }
-
-        // Get device capabilities and properties
-        const VulkanDeviceCapabilities& capabilities() const { return m_capabilities; }
-        const VkPhysicalDeviceProperties& properties() const { return m_deviceProperties; }
-        const VkPhysicalDeviceMemoryProperties& memoryProperties() const { return m_memoryProperties; }
-
-        // Format information
-        VkFormat colorFormat() const { return m_colorFormat; }
-        VkFormat depthFormat() const { return m_depthFormat; }
-
-        // Utility functions
-        std::optional<uint32_t> findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const;
-
-        // Setup functions for specialized features
-        void setupBresenhamLineRasterization(VkPipelineRasterizationStateCreateInfo& rasterInfo) const;
-        void setupFloatingOriginUniforms(VkDescriptorSetLayoutCreateInfo& layoutInfo) const;
-
     private:
-        // Vulkan handles
-        VkInstance m_instance = VK_NULL_HANDLE;
-        VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
-        VkDevice m_device = VK_NULL_HANDLE;
-        VkQueue m_graphicsQueue = VK_NULL_HANDLE;
-        uint32_t m_graphicsQueueFamily = 0;
+        VkDevice device_;
+        VkPhysicalDevice physical_device_;
+        VkRenderPass render_pass_;
 
-        // Device properties
-        VkPhysicalDeviceProperties m_deviceProperties{};
-        VkPhysicalDeviceFeatures2 m_deviceFeatures2{};
-        VkPhysicalDeviceMemoryProperties m_memoryProperties{};
+        std::unordered_map<std::string, MasterAssetEntry> master_assets_;
 
-        // Formats
-        VkFormat m_colorFormat = VK_FORMAT_UNDEFINED;
-        VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
-
-        // Capabilities
-        VulkanDeviceCapabilities m_capabilities{};
-
-        // The surface we're rendering to
-        VkSurfaceKHR m_surface = VK_NULL_HANDLE;
-
-        // Initialization helpers
-        void selectPhysicalDevice(const DevicePreferences& preferences);
-        void createLogicalDevice(const DevicePreferences& preferences);
-        void determineFormats();
-        void logDeviceInfo() const;
-
-        // Template for structure initialization with sType
-        template<typename T>
-        static T createStructure() {
-            T result{};
-            result.sType = getStructureType<T>();
-            return result;
+        /**
+         * Clone an asset using the built-in clone method
+         */
+        std::unique_ptr<Taffy::Asset> clone_asset(const Taffy::Asset& source) {
+            return source.clone();
         }
 
-        // Helper to get correct sType for Vulkan structures
-        template<typename T>
-        static VkStructureType getStructureType();
+        /**
+         * Rebuild the modified asset by applying all enabled overlays in order
+         */
+
+        /**
+         * Extract filename from path
+         */
+        std::string extract_filename(const std::string& path) {
+            auto pos = path.find_last_of("/\\");
+            return (pos != std::string::npos) ? path.substr(pos + 1) : path;
+        }
+
+        /**
+         * Calculate simple hash for change detection
+         */
+        uint64_t calculate_asset_hash(const Taffy::Asset& asset) {
+            // Simple hash based on file size and chunk count for now
+            // In production, you'd want a proper content hash
+            return static_cast<uint64_t>(asset.get_file_size()) ^
+                (static_cast<uint64_t>(asset.get_header().chunk_count) << 32);
+        }
     };
+
+    // =============================================================================
+    // ENHANCED TAFFY MESH SHADER MANAGER WITH OVERLAY SUPPORT
+    // =============================================================================
+
+    class TaffyOverlayMeshShaderManager : public TaffyMeshShaderManager {
+    private:
+        std::unique_ptr<TaffyOverlayManager> overlay_manager_;
+
+    public:
+
+		PFN_vkCmdDrawMeshTasksEXT dmt = nullptr;
+
+        TaffyOverlayMeshShaderManager(VkDevice device, VkPhysicalDevice physical_device)
+            : TaffyMeshShaderManager(device, physical_device) {
+
+			dmt = (PFN_vkCmdDrawMeshTasksEXT)
+				vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT");
+
+            overlay_manager_ = std::make_unique<TaffyOverlayManager>(device, physical_device);
+            std::cout << "🎨 Enhanced Taffy Mesh Shader Manager with Overlay support initialized!" << std::endl;
+        }
+
+        /**
+         * Load master asset and optionally apply overlays
+         */
+        /**
+         * Apply new overlay to existing asset
+         */
+
+        /**
+         * Remove overlay from asset
+         */
+        /**
+         * Toggle overlay on/off for hot-swapping effects
+         */
+        
+
+        /**
+         * Render asset with current overlay configuration
+         */
+
+        /**
+         * Hot-reload overlays for development workflow
+         */
+
+        /**
+         * Get overlay information for debugging/UI
+         */
+        std::vector<std::string> get_overlay_info(const std::string& master_path) {
+            return overlay_manager_->get_overlay_info(master_path);
+        }
+
+        /**
+         * Clear all overlays and revert to master asset
+         */
+        void clear_all_overlays(const std::string& master_path) {
+            overlay_manager_->clear_overlays(master_path);
+        }
+    };
+
+    class TaffyShaderTranspiler {
+    public:
+        enum class TargetAPI {
+            Vulkan_SPIRV,    // Native SPIR-V for Vulkan
+            Vulkan_GLSL,     // GLSL for Vulkan
+            OpenGL_GLSL,     // GLSL for OpenGL
+            DirectX_HLSL,    // HLSL for DirectX 12
+            Metal_MSL,       // MSL for Metal
+            WebGL_GLSL       // WebGL-compatible GLSL
+        };
+
+        /**
+         * Transpile SPIR-V to target shader language
+         */
+        static std::string transpile_shader(const std::vector<uint32_t>& spirv,
+            TargetAPI target,
+            Taffy::ShaderChunk::Shader::ShaderStage stage) {
+            try {
+                switch (target) {
+                case TargetAPI::Vulkan_SPIRV:
+                    return ""; // Return empty - use raw SPIR-V
+
+                case TargetAPI::Vulkan_GLSL:
+                case TargetAPI::OpenGL_GLSL: {
+                    spirv_cross::CompilerGLSL glsl_compiler(spirv);
+
+                    // Configure GLSL options using set_common_options
+                    spirv_cross::CompilerGLSL::Options glsl_options;
+                    if (target == TargetAPI::Vulkan_GLSL) {
+                        glsl_options.version = 460;
+                        glsl_options.vulkan_semantics = true;
+                    }
+                    else {
+                        glsl_options.version = 460;
+                        glsl_options.vulkan_semantics = false;
+                    }
+
+                    // Enable mesh shader extensions if needed
+                    if (stage == Taffy::ShaderChunk::Shader::ShaderStage::MeshShader ||
+                        stage == Taffy::ShaderChunk::Shader::ShaderStage::TaskShader) {
+                        glsl_options.version = 460; // Mesh shaders need GLSL 4.6+
+                    }
+
+                    glsl_compiler.set_common_options(glsl_options);
+                    return glsl_compiler.compile();
+                }
+
+                case TargetAPI::DirectX_HLSL: {
+                    spirv_cross::CompilerHLSL hlsl_compiler(spirv);
+
+                    // For HLSL, use default options or set_common_options with basic GLSL options
+                    spirv_cross::CompilerGLSL::Options basic_options;
+                    basic_options.version = 450;
+                    hlsl_compiler.set_common_options(basic_options);
+
+                    return hlsl_compiler.compile();
+                }
+
+                case TargetAPI::Metal_MSL: {
+                    spirv_cross::CompilerMSL msl_compiler(spirv);
+
+                    // For MSL, use default options or set_common_options with basic GLSL options  
+                    spirv_cross::CompilerGLSL::Options basic_options;
+                    basic_options.version = 450;
+                    msl_compiler.set_common_options(basic_options);
+
+                    return msl_compiler.compile();
+                }
+
+                case TargetAPI::WebGL_GLSL: {
+                    spirv_cross::CompilerGLSL webgl_compiler(spirv);
+
+                    // Configure WebGL options
+                    spirv_cross::CompilerGLSL::Options webgl_options;
+                    webgl_options.version = 300;
+                    webgl_options.es = true;
+                    webgl_options.vulkan_semantics = false;
+                    webgl_compiler.set_common_options(webgl_options);
+
+                    return webgl_compiler.compile();
+                }
+                }
+            }
+            catch (const spirv_cross::CompilerError& e) {
+                std::cerr << "SPIR-V Cross compilation failed: " << e.what() << std::endl;
+            }
+
+            return "";
+        }
+
+        /**
+ * Get the best target API for current platform/engine
+ */
+        static TargetAPI get_preferred_target() {
+#ifdef TREMOR_VULKAN
+            return TargetAPI::Vulkan_SPIRV; // Use native SPIR-V for best performance
+#elif defined(TREMOR_DIRECTX12)
+            return TargetAPI::DirectX_HLSL;
+#elif defined(TREMOR_METAL)
+            return TargetAPI::Metal_MSL;
+#elif defined(TREMOR_OPENGL)
+            return TargetAPI::OpenGL_GLSL;
+#elif defined(TREMOR_WEBGL)
+            return TargetAPI::WebGL_GLSL;
+#else
+            return TargetAPI::Vulkan_GLSL; // Default fallback
+#endif
+        }
+    };
+
+    class Buffer {
+    public:
+        Buffer() = default;
+        Buffer(VkDevice device, VkPhysicalDevice physicalDevice,
+            VkDeviceSize size, VkBufferUsageFlags usage,
+            VkMemoryPropertyFlags memoryProps);
+
+        // Method declarations only - implementations go to vk.cpp
+        void update(const void* data, VkDeviceSize size, VkDeviceSize offset = 0);
+
+        // Simple getters can stay inline
+        VkBuffer getBuffer() const { return m_buffer; }
+        VkDeviceSize getSize() const { return m_size; }
+        VkDeviceMemory getMemory() const { return m_memory; }
+
+    private:
+        VkDevice m_device = VK_NULL_HANDLE;
+        BufferResource m_buffer;
+        DeviceMemoryResource m_memory;
+        VkDeviceSize m_size = 0;
+
+        // Helper function declaration
+        uint32_t findMemoryType(VkPhysicalDevice physicalDevice,
+            uint32_t typeFilter, VkMemoryPropertyFlags properties);
+    };
+
+
+    struct PBRMaterialUBO {
+        // Basic properties
+        alignas(16) float baseColor[4];   // vec4 in shader
+        float metallic;        // float in shader
+        float roughness;       // float in shader
+        float ao;              // float in shader
+        alignas(16) float emissive[3];    // vec3 in shader (padded to 16 bytes)
+
+        // Texture availability flags
+        int hasAlbedoMap;
+        int hasNormalMap;
+        int hasMetallicRoughnessMap;
+        int hasAoMap;
+        int hasEmissiveMap;
+    };
+
+    class TaffyMeshShaderPipeline;
+    class ShaderManager;
+    class RenderPass;
+    class VertexBufferSimple;
+    class IndexBuffer;
+    class Framebuffer;
+    class SwapChain;
+    class VulkanResourceManager;
+    class DynamicRenderer;
+    class CommandPoolResource;
+    class DescriptorBuilder;
+    class DescriptorLayoutCache;
+    class DescriptorAllocator;
+    class DescriptorWriter;
+
+
+
 
     class Framebuffer {
     public:
@@ -1772,15 +2097,34 @@ namespace tremor::gfx {
         VkPhysicalDevice getPhysicalDevice() const { return physicalDevice; }
         VkQueue getGraphicsQueue() const { return graphicsQueue; }
 
+        std::unique_ptr<TaffyOverlayManager> m_overlayManager;
+
         // Scene management
         void createEnhancedScene();
         void createTaffyScene();
         void createSceneLighting();
+        void simpleColorCyclingTest();
+
+        void initializeOverlayWorkflow();
 
         VkShaderModule loadShader(const std::string& filename);
 
         std::unique_ptr<TaffyMeshShaderManager> m_taffyMeshShaderManager;
         PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT_ = nullptr;
+
+        std::unique_ptr<TaffyOverlayMeshShaderManager> m_overlayMeshShaderManager;
+        std::chrono::steady_clock::time_point last_overlay_check_;
+        const std::chrono::milliseconds overlay_check_interval_{ 1000 };
+
+        // ADD THESE NEW METHODS FOR OVERLAY SUPPORT:
+        void initializeOverlaySystem();
+        void createDevelopmentOverlays();
+        void loadTestAssetWithOverlays();
+        void updateOverlaySystem();
+        void createTestMasterAssetFromGLSL();
+        void renderWithOverlays(VkCommandBuffer cmdBuffer);
+        void demonstrateOverlayControls();
+
 
     private:
         // === CORE VULKAN OBJECTS ===
