@@ -619,281 +619,228 @@ namespace tremor::gfx {
     };
 
 
+    VkDescriptorSetLayout createMeshShaderDescriptorSetLayout(VkDevice device);
+
+    struct MeshShaderPushConstants {
+        uint32_t vertex_count;
+        uint32_t primitive_count;
+        uint32_t vertex_stride_floats;
+        uint32_t reserved;
+    };
+
+    /**
+     * @brief Unified manager for Taffy assets with overlay support and mesh shader rendering
+     *
+     * This class combines the functionality of the original TaffyOverlayManager and TaffyAssetRenderer,
+     * providing a single interface for loading, managing, and rendering Taffy assets with overlay support.
+     * It also manages pipeline creation and caching for simplified rendering.
+     */
     class TaffyOverlayManager {
     public:
-        struct OverlayStackEntry {
-            std::string overlay_path;
-            std::unique_ptr<Taffy::Overlay> overlay;
-            int priority = 0;  // Higher priority applied later
-            bool enabled = true;
-        };
-
-        struct MasterAssetEntry {
-            std::string asset_path;
-            std::unique_ptr<Taffy::Asset> master_asset;
-            std::unique_ptr<Taffy::Asset> current_modified_asset;  // Result after applying overlays
-            std::vector<OverlayStackEntry> overlay_stack;
-            uint64_t last_modification_hash = 0;  // For change detection
-
-            // Vulkan-specific cached resources
-            std::unique_ptr<TaffyMeshShaderPipeline> cached_pipeline;
-            bool pipeline_needs_rebuild = true;
+        /**
+         * @brief GPU data for mesh shader assets
+         */
+        struct MeshAssetGPUData {
+            VkBuffer vertexStorageBuffer = VK_NULL_HANDLE;
+            VkDeviceMemory vertexStorageMemory = VK_NULL_HANDLE;
+            VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+            uint32_t vertexCount = 0;
+            uint32_t primitiveCount = 0;
+            uint32_t vertexStrideFloats = 0;
+            bool usesMeshShader = false;
         };
 
 
-        TaffyOverlayManager(VkDevice device, VkPhysicalDevice physical_device)
-            : device_(device), physical_device_(physical_device) {
-
-            std::cout << "🎨 Taffy Overlay Manager initialized!" << std::endl;
-        }
+        /**
+         * @brief Constructor
+         * @param device Vulkan device handle
+         * @param physicalDevice Vulkan physical device handle
+         * @param renderPass Render pass for pipeline creation (can be VK_NULL_HANDLE for dynamic rendering)
+         * @param swapchainExtent Current swapchain extent for viewport setup
+         */
+        TaffyOverlayManager(VkDevice device, VkPhysicalDevice physicalDevice,
+            VkRenderPass renderPass, VkExtent2D swapchainExtent);
 
         /**
-         * Load a master asset (.taf file)
+         * @brief Destructor - cleans up all Vulkan resources including pipelines
          */
-        bool load_master_asset(const std::string& asset_path) {
-            std::cout << "📦 Loading master asset: " << asset_path << std::endl;
+        ~TaffyOverlayManager();
 
-            auto master_asset = std::make_unique<Taffy::Asset>();
-            if (!master_asset->load_from_file_safe(asset_path)) {
-                std::cerr << "❌ Failed to load master asset: " << asset_path << std::endl;
-                return false;
-            }
+        // Simplified rendering interface
+        /**
+         * @brief Render a Taffy asset with automatic pipeline management
+         * @param asset_path Path to the .taf file
+         * @param cmd Command buffer to record rendering commands
+         *
+         * This method handles:
+         * - Loading the asset if not already loaded
+         * - Creating/caching the pipeline for the asset
+         * - Uploading geometry to GPU
+         * - Binding pipeline and resources
+         * - Issuing draw commands
+         */
+        void renderMeshAsset(const std::string& asset_path, VkCommandBuffer cmd);
 
-            // Create entry for this master asset
-            MasterAssetEntry entry;
-            entry.asset_path = asset_path;
-            entry.master_asset = std::move(master_asset);
-            entry.current_modified_asset = clone_asset(*entry.master_asset);
-
-            master_assets_[asset_path] = std::move(entry);
-
-            std::cout << "✅ Master asset loaded: " << asset_path << std::endl;
-            return true;
-        }
+        // Asset loading and overlay management
+        /**
+         * @brief Load a master asset
+         * @param master_path Path to the master .taf file
+         */
+        void load_master_asset(const std::string& master_path);
 
         /**
-         * Apply overlay to a master asset
+         * @brief Load an asset with overlay applied
+         * @param master_path Path to the master .taf file
+         * @param overlay_path Path to the overlay .tafo file
          */
-        bool loadAssetWithOverlay(const std::string& asset_path, const std::string& overlay_path) {
-            // Load master asset (now hash-based)
-            Taffy::Asset asset;
-            if (!asset.load_from_file_safe(asset_path)) {
-                return false;
-            }
-
-            
-
-            // Load overlay (now hash-based)
-            Taffy::Overlay overlay;
-            if (!overlay.load_from_file(overlay_path)) {
-                return false;
-            }
-
-            // Apply overlay (hash-based targeting)
-            if (!overlay.apply_to_asset(asset)) {
-                std::cout << "❌ Overlay doesn't target this master asset!" << std::endl;
-                return false;
-            }
-
-
-
-            MasterAssetEntry entry;
-
-
-            std::cout << "✅ Hash-based overlay applied successfully!" << std::endl;
-            return true;
-        }
-        /**
-         * Remove overlay from asset
-         */
+        void loadAssetWithOverlay(const std::string& master_path, const std::string& overlay_path);
 
         /**
-         * Toggle overlay on/off
+         * @brief Clear all overlays for a master asset
+         * @param master_path Path to the master .taf file
          */
-
+        void clear_overlays(const std::string& master_path);
 
         /**
-         * Get the current modified asset (with all overlays applied)
+         * @brief Check if any pipelines need rebuilding and rebuild them
+         * Call this periodically or after overlay changes
          */
-        Taffy::Asset* get_modified_asset(const std::string& master_path) {
-            auto it = master_assets_.find(master_path);
-            return (it != master_assets_.end()) ? it->second.current_modified_asset.get() : nullptr;
-        }
+        void checkForPipelineUpdates();
 
         /**
-         * Get or create Vulkan pipeline for modified asset
+         * @brief Update the swapchain extent (needed after window resize)
+         * @param newExtent New swapchain extent
          */
-        TaffyMeshShaderPipeline* get_pipeline(const std::string& master_path) {
-            std::cout << "🔍 Registered pipelines:" << std::endl;
-            for (const auto& [key, pp] : master_assets_) {
-                std::cout << "    \"" << key << "\" -> " << pp.cached_pipeline << std::endl;
-            }
-            if (master_assets_.empty()) {
-                std::cout << "    (No pipelines registered!)" << std::endl;
-            }
-            auto master_it = master_assets_.find(master_path);
-            if (master_it == master_assets_.end()) {
-                return nullptr;
-            }
-
-            auto& entry = master_it->second;
-
-            // Rebuild pipeline if needed
-            if (entry.pipeline_needs_rebuild || !entry.cached_pipeline) {
-                std::cout << "🔧 Rebuilding pipeline for: " << master_path << std::endl;
-
-                entry.cached_pipeline = std::make_unique<TaffyMeshShaderPipeline>(
-                    device_, physical_device_);
-
-                if (entry.cached_pipeline->create_from_taffy_asset(*entry.current_modified_asset)) {
-                    entry.pipeline_needs_rebuild = false;
-                    std::cout << "✅ Pipeline rebuilt successfully!" << std::endl;
-                }
-                else {
-                    std::cerr << "❌ Failed to rebuild pipeline!" << std::endl;
-                    entry.cached_pipeline.reset();
-                    return nullptr;
-                }
-            }
-
-            return entry.cached_pipeline.get();
-        }
+        void updateSwapchainExtent(VkExtent2D newExtent) { swapchain_extent_ = newExtent; }
 
         /**
-         * Hot-reload overlay files (for development)
+         * @brief Mark a pipeline for rebuild (e.g., after shader hot-reload)
+         * @param asset_path Path to the asset whose pipeline needs rebuilding
          */
-        /**
-         * Get overlay information for debugging
-         */
-        std::vector<std::string> get_overlay_info(const std::string& master_path) {
-            std::vector<std::string> info;
+        void invalidatePipeline(const std::string& asset_path);
 
-            auto master_it = master_assets_.find(master_path);
-            if (master_it == master_assets_.end()) {
-                return info;
-            }
-
-            const auto& entry = master_it->second;
-            info.push_back("Master: " + master_path);
-
-            for (const auto& overlay : entry.overlay_stack) {
-                std::string status = overlay.enabled ? "✅" : "❌";
-                info.push_back(status + " " + overlay.overlay_path + " (priority: " +
-                    std::to_string(overlay.priority) + ")");
-            }
-
-            return info;
-        }
-
-        /**
-         * Clear all overlays from an asset
-         */
-        void clear_overlays(const std::string& master_path) {
-            auto master_it = master_assets_.find(master_path);
-            if (master_it != master_assets_.end()) {
-                auto& entry = master_it->second;
-                entry.overlay_stack.clear();
-                entry.current_modified_asset = clone_asset(*entry.master_asset);
-                entry.pipeline_needs_rebuild = true;
-            }
-        }
+        // Accessors
+        VkDescriptorPool getDescriptorPool() const { return descriptorPool; }
+        VkDescriptorSetLayout getMeshShaderDescriptorSetLayout() const { return meshShaderDescSetLayout; }
 
     private:
+        struct PipelineInfo {
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            VkPipelineLayout layout = VK_NULL_HANDLE;
+            VkShaderModule taskShader = VK_NULL_HANDLE;
+            VkShaderModule meshShader = VK_NULL_HANDLE;
+            VkShaderModule fragmentShader = VK_NULL_HANDLE;
+            std::string vertexShaderHash;
+            std::string fragmentShaderHash;
+        };
+
         VkDevice device_;
         VkPhysicalDevice physical_device_;
         VkRenderPass render_pass_;
+        VkExtent2D swapchain_extent_;
+        VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+        VkDescriptorSetLayout meshShaderDescSetLayout = VK_NULL_HANDLE;
 
-        std::unordered_map<std::string, MasterAssetEntry> master_assets_;
-
-        /**
-         * Clone an asset using the built-in clone method
-         */
-        std::unique_ptr<Taffy::Asset> clone_asset(const Taffy::Asset& source) {
-            return source.clone();
-        }
-
-        /**
-         * Rebuild the modified asset by applying all enabled overlays in order
-         */
+        // Storage for loaded assets and their resources
+        std::unordered_map<std::string, std::unique_ptr<Taffy::Asset>> loaded_assets_;
+        std::unordered_map<std::string, MeshAssetGPUData> gpu_data_cache_;
+        std::unordered_map<std::string, PipelineInfo> pipeline_cache_;
+        std::unordered_map<std::string, bool> pipeline_rebuild_flags_;
 
         /**
-         * Extract filename from path
+         * @brief Ensure an asset is loaded and ready for rendering
+         * @param asset_path Path to the asset
+         * @return true if asset is loaded successfully
          */
-        std::string extract_filename(const std::string& path) {
-            auto pos = path.find_last_of("/\\");
-            return (pos != std::string::npos) ? path.substr(pos + 1) : path;
-        }
+        bool ensureAssetLoaded(const std::string& asset_path);
 
         /**
-         * Calculate simple hash for change detection
+         * @brief Get or create a pipeline for the given asset
+         * @param asset_path Path to the asset
+         * @return Pointer to pipeline info, or nullptr on failure
          */
-        uint64_t calculate_asset_hash(const Taffy::Asset& asset) {
-            // Simple hash based on file size and chunk count for now
-            // In production, you'd want a proper content hash
-            return static_cast<uint64_t>(asset.get_file_size()) ^
-                (static_cast<uint64_t>(asset.get_header().chunk_count) << 32);
-        }
+        PipelineInfo* getOrCreatePipeline(const std::string& asset_path);
+
+        /**
+         * @brief Create a new pipeline for an asset
+         * @param asset_path Path to the asset
+         * @return Pointer to pipeline info in cache, or nullptr on failure
+         */
+        PipelineInfo* createPipelineForAsset(const std::string& asset_path);
+
+        /**
+         * @brief Create a mesh shader pipeline
+         * @param pipelineInfo Pipeline info with shader modules
+         * @return Created pipeline handle
+         */
+        VkPipeline createMeshShaderPipeline(const PipelineInfo& pipelineInfo);
+
+        /**
+         * @brief Rebuild a pipeline (e.g., after overlay changes)
+         * @param asset_path Path to the asset
+         */
+        void rebuildPipeline(const std::string& asset_path);
+
+        /**
+         * @brief Clean up shader modules
+         * @param pipelineInfo Pipeline info containing shader modules
+         */
+        void cleanupShaderModules(const PipelineInfo& pipelineInfo);
+
+        /**
+         * @brief Internal render method with explicit pipeline and GPU data
+         */
+        void renderMeshAssetInternal(VkCommandBuffer cmd, VkPipeline meshPipeline,
+            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData);
+
+        /**
+         * @brief Upload a Taffy asset to GPU memory
+         * @param asset The Taffy asset to upload
+         * @return GPU data structure
+         */
+        MeshAssetGPUData uploadTaffyAsset(const Taffy::Asset& asset);
+
+        /**
+         * @brief Extract and create shader modules from a Taffy asset
+         * @param asset The Taffy asset containing shader data
+         * @param meshShaderModule Output mesh shader module
+         * @param fragmentShaderModule Output fragment shader module
+         * @return true if successful
+         */
+        bool extractShadersFromAsset(const Taffy::Asset& asset,
+            VkShaderModule& meshShaderModule,
+            VkShaderModule& fragmentShaderModule);
+
+        /**
+         * @brief Initialize descriptor pool and layouts
+         */
+        void initializeDescriptorResources();
+
+        /**
+         * @brief Find suitable memory type for allocation
+         * @param typeFilter Memory type filter
+         * @param properties Required memory properties
+         * @return Memory type index
+         */
+        uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
+
+        /**
+         * @brief Extract and compile a single shader from shader data
+         * @param shader_data Raw shader chunk data
+         * @param shader_index Index of the shader to extract
+         * @param meshShaderModule Output mesh shader module
+         * @param fragmentShaderModule Output fragment shader module
+         * @return true if successful
+         */
+        bool extractAndCompileShader(const std::vector<uint8_t>& shader_data,
+            uint32_t shader_index,
+            VkShaderModule& meshShaderModule,
+            VkShaderModule& fragmentShaderModule);
     };
-
     // =============================================================================
     // ENHANCED TAFFY MESH SHADER MANAGER WITH OVERLAY SUPPORT
     // =============================================================================
 
-    class TaffyOverlayMeshShaderManager : public TaffyMeshShaderManager {
-    private:
-        std::unique_ptr<TaffyOverlayManager> overlay_manager_;
-
-    public:
-
-		PFN_vkCmdDrawMeshTasksEXT dmt = nullptr;
-
-        TaffyOverlayMeshShaderManager(VkDevice device, VkPhysicalDevice physical_device)
-            : TaffyMeshShaderManager(device, physical_device) {
-
-			dmt = (PFN_vkCmdDrawMeshTasksEXT)
-				vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT");
-
-            overlay_manager_ = std::make_unique<TaffyOverlayManager>(device, physical_device);
-            std::cout << "🎨 Enhanced Taffy Mesh Shader Manager with Overlay support initialized!" << std::endl;
-        }
-
-        /**
-         * Load master asset and optionally apply overlays
-         */
-        /**
-         * Apply new overlay to existing asset
-         */
-
-        /**
-         * Remove overlay from asset
-         */
-        /**
-         * Toggle overlay on/off for hot-swapping effects
-         */
-        
-
-        /**
-         * Render asset with current overlay configuration
-         */
-
-        /**
-         * Hot-reload overlays for development workflow
-         */
-
-        /**
-         * Get overlay information for debugging/UI
-         */
-        std::vector<std::string> get_overlay_info(const std::string& master_path) {
-            return overlay_manager_->get_overlay_info(master_path);
-        }
-
-        /**
-         * Clear all overlays and revert to master asset
-         */
-        void clear_all_overlays(const std::string& master_path) {
-            overlay_manager_->clear_overlays(master_path);
-        }
-    };
 
     class TaffyShaderTranspiler {
     public:
@@ -2115,7 +2062,6 @@ namespace tremor::gfx {
         std::unique_ptr<TaffyMeshShaderManager> m_taffyMeshShaderManager;
         PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT_ = nullptr;
 
-        std::unique_ptr<TaffyOverlayMeshShaderManager> m_overlayMeshShaderManager;
         std::chrono::steady_clock::time_point last_overlay_check_;
         const std::chrono::milliseconds overlay_check_interval_{ 1000 };
 

@@ -86,6 +86,675 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
 
 namespace tremor::gfx {
 
+    // Helper function to create descriptor set layout for mesh shaders
+    VkDescriptorSetLayout createMeshShaderDescriptorSetLayout(VkDevice device) {
+        std::vector<VkDescriptorSetLayoutBinding> bindings;
+
+        // Binding 0: Vertex/Geometry data as storage buffer
+        VkDescriptorSetLayoutBinding vertexStorageBinding{};
+        vertexStorageBinding.binding = 0;
+        vertexStorageBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        vertexStorageBinding.descriptorCount = 1;
+        vertexStorageBinding.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;  // Only mesh shader needs this
+        vertexStorageBinding.pImmutableSamplers = nullptr;
+        bindings.push_back(vertexStorageBinding);
+
+        // Add other bindings if needed in the future (textures, uniforms, etc.)
+        // For example:
+        // Binding 1: Material data
+        // VkDescriptorSetLayoutBinding materialBinding{};
+        // materialBinding.binding = 1;
+        // materialBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        // materialBinding.descriptorCount = 1;
+        // materialBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        // materialBinding.pImmutableSamplers = nullptr;
+        // bindings.push_back(materialBinding);
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutInfo.pBindings = bindings.data();
+
+        VkDescriptorSetLayout descriptorSetLayout;
+        if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create mesh shader descriptor set layout!");
+        }
+
+        return descriptorSetLayout;
+    }
+
+    // TaffyOverlayManager with merged TaffyAssetRenderer functionality and pipeline management
+    
+        TaffyOverlayManager::TaffyOverlayManager(VkDevice device, VkPhysicalDevice physicalDevice,
+            VkRenderPass renderPass, VkExtent2D swapchainExtent)
+            : device_(device), physical_device_(physicalDevice),
+            render_pass_(renderPass), swapchain_extent_(swapchainExtent) {
+
+            // Initialize descriptor pool and layouts for mesh shader rendering
+            initializeDescriptorResources();
+        }
+
+        TaffyOverlayManager::~TaffyOverlayManager() {
+            // Clean up all pipelines
+            
+        }
+
+        // Simplified render method - just pass asset path and command buffer
+        void TaffyOverlayManager::renderMeshAsset(const std::string& asset_path, VkCommandBuffer cmd) {
+            // Ensure asset is loaded
+            if (!ensureAssetLoaded(asset_path)) {
+                std::cerr << "Failed to load asset: " << asset_path << std::endl;
+                return;
+            }
+
+            // Get or create pipeline for this asset
+            PipelineInfo* pipeline = getOrCreatePipeline(asset_path);
+            if (!pipeline) {
+                std::cerr << "Failed to create pipeline for: " << asset_path << std::endl;
+                return;
+            }
+
+            // Get GPU data for this asset
+            auto gpuDataIt = gpu_data_cache_.find(asset_path);
+            if (gpuDataIt == gpu_data_cache_.end()) {
+                std::cerr << "No GPU data for asset: " << asset_path << std::endl;
+                return;
+            }
+
+            const MeshAssetGPUData& gpuData = gpuDataIt->second;
+
+            // Now render using the cached pipeline and GPU data
+            renderMeshAssetInternal(cmd, pipeline->pipeline, pipeline->layout, gpuData);
+        }
+
+        // Asset loading and management
+        void TaffyOverlayManager::load_master_asset(const std::string& master_path) {
+            ensureAssetLoaded(master_path);
+        }
+
+        void TaffyOverlayManager::loadAssetWithOverlay(const std::string& master_path, const std::string& overlay_path) {
+            // Implementation from original TaffyOverlayManager
+            ensureAssetLoaded(master_path);
+            // Apply overlay logic here
+        }
+
+        void TaffyOverlayManager::clear_overlays(const std::string& master_path) {
+            // Clear overlays and potentially invalidate pipeline
+            invalidatePipeline(master_path);
+        }
+
+        // Check if pipeline needs rebuild (e.g., after overlay changes)
+        void TaffyOverlayManager::checkForPipelineUpdates() {
+            for (auto& [path, needsRebuild] : pipeline_rebuild_flags_) {
+                if (needsRebuild) {
+                    rebuildPipeline(path);
+                    needsRebuild = false;
+                }
+            }
+        }
+
+        
+
+        
+        // Storage for loaded assets and their resources
+
+        bool TaffyOverlayManager::ensureAssetLoaded(const std::string& asset_path) {
+            // Check if already loaded
+            if (loaded_assets_.find(asset_path) != loaded_assets_.end()) {
+                return true;
+            }
+
+            // Load the asset
+            auto asset = std::make_unique<Taffy::Asset>();
+            if (!asset->load_from_file_safe(asset_path)) {
+                std::cerr << "Failed to load Taffy asset: " << asset_path << std::endl;
+                return false;
+            }
+
+            // Upload to GPU
+            MeshAssetGPUData gpuData = uploadTaffyAsset(*asset);
+            if (!gpuData.vertexStorageBuffer) {
+                std::cerr << "Failed to upload asset to GPU: " << asset_path << std::endl;
+                return false;
+            }
+
+            // Store the loaded asset and GPU data
+            loaded_assets_[asset_path] = std::move(asset);
+            gpu_data_cache_[asset_path] = gpuData;
+
+            return true;
+        }
+
+        TaffyOverlayManager::PipelineInfo* TaffyOverlayManager::getOrCreatePipeline(const std::string& asset_path) {
+            // Check if pipeline exists
+            auto it = pipeline_cache_.find(asset_path);
+            if (it != pipeline_cache_.end()) {
+                return &it->second;
+            }
+
+            // Create new pipeline for this asset
+            return createPipelineForAsset(asset_path);
+        }
+
+        TaffyOverlayManager::PipelineInfo* TaffyOverlayManager::createPipelineForAsset(const std::string& asset_path) {
+            auto assetIt = loaded_assets_.find(asset_path);
+            if (assetIt == loaded_assets_.end()) {
+                return nullptr;
+            }
+
+            const Taffy::Asset& asset = *assetIt->second;
+            PipelineInfo pipelineInfo;
+
+            // Extract shaders from asset
+            if (!extractShadersFromAsset(asset, pipelineInfo.meshShader, pipelineInfo.fragmentShader)) {
+                std::cerr << "Failed to extract shaders from asset: " << asset_path << std::endl;
+                return nullptr;
+            }
+
+            // Create pipeline layout
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            pipelineLayoutInfo.setLayoutCount = 1;
+            pipelineLayoutInfo.pSetLayouts = &meshShaderDescSetLayout;
+
+            // Push constants for mesh shader
+            VkPushConstantRange pushConstantRange{};
+            pushConstantRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
+            pushConstantRange.offset = 0;
+            pushConstantRange.size = sizeof(MeshShaderPushConstants);
+            pipelineLayoutInfo.pushConstantRangeCount = 1;
+            pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+            if (vkCreatePipelineLayout(device_, &pipelineLayoutInfo, nullptr, &pipelineInfo.layout) != VK_SUCCESS) {
+                std::cerr << "Failed to create pipeline layout" << std::endl;
+                cleanupShaderModules(pipelineInfo);
+                return nullptr;
+            }
+
+            // Create pipeline
+            pipelineInfo.pipeline = createMeshShaderPipeline(pipelineInfo);
+            if (!pipelineInfo.pipeline) {
+                vkDestroyPipelineLayout(device_, pipelineInfo.layout, nullptr);
+                cleanupShaderModules(pipelineInfo);
+                return nullptr;
+            }
+
+            // Store in cache
+            pipeline_cache_[asset_path] = pipelineInfo;
+            return &pipeline_cache_[asset_path];
+        }
+
+        VkPipeline TaffyOverlayManager::createMeshShaderPipeline(const PipelineInfo& pipelineInfo) {
+            // Shader stages
+            std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+
+            // Task shader (optional)
+            if (pipelineInfo.taskShader) {
+                VkPipelineShaderStageCreateInfo taskStageInfo{};
+                taskStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                taskStageInfo.stage = VK_SHADER_STAGE_TASK_BIT_EXT;
+                taskStageInfo.module = pipelineInfo.taskShader;
+                taskStageInfo.pName = "main";
+                shaderStages.push_back(taskStageInfo);
+            }
+
+            // Mesh shader
+            VkPipelineShaderStageCreateInfo meshStageInfo{};
+            meshStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            meshStageInfo.stage = VK_SHADER_STAGE_MESH_BIT_EXT;
+            meshStageInfo.module = pipelineInfo.meshShader;
+            meshStageInfo.pName = "main";
+            shaderStages.push_back(meshStageInfo);
+
+            // Fragment shader
+            VkPipelineShaderStageCreateInfo fragStageInfo{};
+            fragStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            fragStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+            fragStageInfo.module = pipelineInfo.fragmentShader;
+            fragStageInfo.pName = "main";
+            shaderStages.push_back(fragStageInfo);
+
+            // Viewport state
+            VkPipelineViewportStateCreateInfo viewportState{};
+            viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            viewportState.viewportCount = 1;
+            viewportState.scissorCount = 1;
+
+            // Rasterizer
+            VkPipelineRasterizationStateCreateInfo rasterizer{};
+            rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            rasterizer.depthClampEnable = VK_FALSE;
+            rasterizer.rasterizerDiscardEnable = VK_FALSE;
+            rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+            rasterizer.lineWidth = 1.0f;
+            rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+            rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+            rasterizer.depthBiasEnable = VK_FALSE;
+
+            // Multisampling
+            VkPipelineMultisampleStateCreateInfo multisampling{};
+            multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            multisampling.sampleShadingEnable = VK_FALSE;
+            multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+            // Depth testing
+            VkPipelineDepthStencilStateCreateInfo depthStencil{};
+            depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            depthStencil.depthTestEnable = VK_TRUE;
+            depthStencil.depthWriteEnable = VK_TRUE;
+            depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+            depthStencil.depthBoundsTestEnable = VK_FALSE;
+            depthStencil.stencilTestEnable = VK_FALSE;
+
+            // Color blending
+            VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+            colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            colorBlendAttachment.blendEnable = VK_FALSE;
+
+            VkPipelineColorBlendStateCreateInfo colorBlending{};
+            colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            colorBlending.logicOpEnable = VK_FALSE;
+            colorBlending.attachmentCount = 1;
+            colorBlending.pAttachments = &colorBlendAttachment;
+
+            // Dynamic state
+            std::vector<VkDynamicState> dynamicStates = {
+                VK_DYNAMIC_STATE_VIEWPORT,
+                VK_DYNAMIC_STATE_SCISSOR
+            };
+
+            VkPipelineDynamicStateCreateInfo dynamicState{};
+            dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+            dynamicState.pDynamicStates = dynamicStates.data();
+
+            // Create pipeline
+            VkGraphicsPipelineCreateInfo ppInfo{};
+            ppInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            ppInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+            ppInfo.pStages = shaderStages.data();
+            ppInfo.pVertexInputState = nullptr;  // Not used for mesh shaders
+            ppInfo.pInputAssemblyState = nullptr; // Not used for mesh shaders
+            ppInfo.pViewportState = &viewportState;
+            ppInfo.pRasterizationState = &rasterizer;
+            ppInfo.pMultisampleState = &multisampling;
+            ppInfo.pDepthStencilState = &depthStencil;
+            ppInfo.pColorBlendState = &colorBlending;
+            ppInfo.pDynamicState = &dynamicState;
+            ppInfo.layout = pipelineInfo.layout;
+            ppInfo.renderPass = render_pass_;
+            ppInfo.subpass = 0;
+
+            VkPipeline pipeline;
+            if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &ppInfo, nullptr, &pipeline) != VK_SUCCESS) {
+                std::cerr << "Failed to create graphics pipeline!" << std::endl;
+                return VK_NULL_HANDLE;
+            }
+
+            return pipeline;
+        }
+
+        void TaffyOverlayManager::invalidatePipeline(const std::string& asset_path) {
+            pipeline_rebuild_flags_[asset_path] = true;
+        }
+
+        void TaffyOverlayManager::rebuildPipeline(const std::string& asset_path) {
+            // Clean up old pipeline
+            auto it = pipeline_cache_.find(asset_path);
+            if (it != pipeline_cache_.end()) {
+                vkDestroyPipeline(device_, it->second.pipeline, nullptr);
+                vkDestroyPipelineLayout(device_, it->second.layout, nullptr);
+                cleanupShaderModules(it->second);
+                pipeline_cache_.erase(it);
+            }
+
+            // Create new pipeline
+            createPipelineForAsset(asset_path);
+        }
+
+        void TaffyOverlayManager::cleanupShaderModules(const PipelineInfo& pipelineInfo) {
+            if (pipelineInfo.taskShader) {
+                vkDestroyShaderModule(device_, pipelineInfo.taskShader, nullptr);
+            }
+            if (pipelineInfo.meshShader) {
+                vkDestroyShaderModule(device_, pipelineInfo.meshShader, nullptr);
+            }
+            if (pipelineInfo.fragmentShader) {
+                vkDestroyShaderModule(device_, pipelineInfo.fragmentShader, nullptr);
+            }
+        }
+
+        void TaffyOverlayManager::renderMeshAssetInternal(VkCommandBuffer cmd, VkPipeline meshPipeline,
+            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData) {
+            if (!gpuData.usesMeshShader) {
+                std::cerr << "⚠️  Asset doesn't use mesh shaders!" << std::endl;
+                return;
+            }
+
+            // Bind mesh shader pipeline
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
+
+            // Set viewport
+            VkViewport viewport{};
+            viewport.x = 0.0f;
+            viewport.y = 0.0f;
+            viewport.width = static_cast<float>(swapchain_extent_.width);
+            viewport.height = static_cast<float>(swapchain_extent_.height);
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+            // Set scissor
+            VkRect2D scissor{};
+            scissor.offset = { 0, 0 };
+            scissor.extent = swapchain_extent_;
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+            // Bind descriptor set with vertex storage buffer
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipelineLayout, 0, 1, &gpuData.descriptorSet, 0, nullptr);
+
+            // Set push constants
+            MeshShaderPushConstants pushConstants{};
+            pushConstants.vertex_count = gpuData.vertexCount;
+            pushConstants.primitive_count = gpuData.primitiveCount;
+            pushConstants.vertex_stride_floats = gpuData.vertexStrideFloats;
+            pushConstants.reserved = 0;
+
+            Logger::get().info("Push constants: vertices={}, primitives={}, stride={}",
+                pushConstants.vertex_count,
+                pushConstants.primitive_count,
+                pushConstants.vertex_stride_floats);
+
+            vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT,
+                0, sizeof(pushConstants), &pushConstants);
+
+            // Draw with mesh shader
+            vkCmdDrawMeshTasksEXT(cmd, 1, 1, 1);  // 1x1x1 workgroups
+        }
+
+        TaffyOverlayManager::MeshAssetGPUData TaffyOverlayManager::uploadTaffyAsset(const Taffy::Asset& asset) {
+            MeshAssetGPUData gpuData{};
+
+            // Get geometry chunk data
+            auto geomData = asset.get_chunk_data(Taffy::ChunkType::GEOM);
+            if (!geomData) {
+                std::cerr << "❌ No geometry chunk found!" << std::endl;
+                return gpuData;
+            }
+
+            // Parse geometry header
+            Taffy::GeometryChunk geomHeader;
+            std::memcpy(&geomHeader, geomData->data(), sizeof(geomHeader));
+
+            std::cout << "📊 Geometry info:" << std::endl;
+            std::cout << "  Vertex count: " << geomHeader.vertex_count << std::endl;
+            std::cout << "  Vertex stride: " << geomHeader.vertex_stride << " bytes" << std::endl;
+            std::cout << "  Render mode: " << (geomHeader.render_mode == Taffy::GeometryChunk::MeshShader ? "Mesh Shader" : "Traditional") << std::endl;
+
+            // Check if this uses mesh shaders
+            gpuData.usesMeshShader = (geomHeader.render_mode == Taffy::GeometryChunk::MeshShader);
+
+            if (gpuData.usesMeshShader) {
+                std::cout << "🔧 Creating storage buffer for mesh shader..." << std::endl;
+
+                // Calculate vertex data size and offset
+                size_t vertexDataOffset = sizeof(Taffy::GeometryChunk);
+                size_t vertexDataSize = geomHeader.vertex_count * geomHeader.vertex_stride;
+
+                // Validate data bounds
+                if (vertexDataOffset + vertexDataSize > geomData->size()) {
+                    std::cerr << "❌ Vertex data extends beyond chunk!" << std::endl;
+                    return gpuData;
+                }
+
+                const uint8_t* vertexData = geomData->data() + vertexDataOffset;
+
+                // Create buffer with STORAGE_BUFFER usage
+                VkBufferCreateInfo bufferInfo{};
+                bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bufferInfo.size = vertexDataSize;
+                bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+                if (vkCreateBuffer(device_, &bufferInfo, nullptr, &gpuData.vertexStorageBuffer) != VK_SUCCESS) {
+                    std::cerr << "❌ Failed to create storage buffer!" << std::endl;
+                    return gpuData;
+                }
+
+                // Allocate memory for buffer
+                VkMemoryRequirements memRequirements;
+                vkGetBufferMemoryRequirements(device_, gpuData.vertexStorageBuffer, &memRequirements);
+
+                VkMemoryAllocateInfo allocInfo{};
+                allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                allocInfo.allocationSize = memRequirements.size;
+                allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+                if (vkAllocateMemory(device_, &allocInfo, nullptr, &gpuData.vertexStorageMemory) != VK_SUCCESS) {
+                    std::cerr << "❌ Failed to allocate buffer memory!" << std::endl;
+                    vkDestroyBuffer(device_, gpuData.vertexStorageBuffer, nullptr);
+                    return gpuData;
+                }
+
+                vkBindBufferMemory(device_, gpuData.vertexStorageBuffer, gpuData.vertexStorageMemory, 0);
+
+                // Copy vertex data to buffer
+                void* mappedData;
+                vkMapMemory(device_, gpuData.vertexStorageMemory, 0, vertexDataSize, 0, &mappedData);
+                std::memcpy(mappedData, vertexData, vertexDataSize);
+                vkUnmapMemory(device_, gpuData.vertexStorageMemory);
+
+                std::cout << "✅ Storage buffer created with " << vertexDataSize << " bytes" << std::endl;
+
+                // Allocate descriptor set
+                VkDescriptorSetAllocateInfo descAllocInfo{};
+                descAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+                descAllocInfo.descriptorPool = descriptorPool;
+                descAllocInfo.descriptorSetCount = 1;
+                descAllocInfo.pSetLayouts = &meshShaderDescSetLayout;
+
+                if (vkAllocateDescriptorSets(device_, &descAllocInfo, &gpuData.descriptorSet) != VK_SUCCESS) {
+                    std::cerr << "❌ Failed to allocate descriptor set!" << std::endl;
+                    vkDestroyBuffer(device_, gpuData.vertexStorageBuffer, nullptr);
+                    vkFreeMemory(device_, gpuData.vertexStorageMemory, nullptr);
+                    return gpuData;
+                }
+
+                // Update descriptor set to point to storage buffer
+                VkDescriptorBufferInfo bufferDescInfo{};
+                bufferDescInfo.buffer = gpuData.vertexStorageBuffer;
+                bufferDescInfo.offset = 0;
+                bufferDescInfo.range = vertexDataSize;
+
+                VkWriteDescriptorSet descriptorWrite{};
+                descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                descriptorWrite.dstSet = gpuData.descriptorSet;
+                descriptorWrite.dstBinding = 0;
+                descriptorWrite.dstArrayElement = 0;
+                descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                descriptorWrite.descriptorCount = 1;
+                descriptorWrite.pBufferInfo = &bufferDescInfo;
+
+                vkUpdateDescriptorSets(device_, 1, &descriptorWrite, 0, nullptr);
+
+                std::cout << "✅ Descriptor set updated" << std::endl;
+
+                // Store mesh shader info
+                gpuData.vertexCount = geomHeader.vertex_count;
+                gpuData.primitiveCount = geomHeader.ms_max_primitives;
+                gpuData.vertexStrideFloats = geomHeader.vertex_stride / sizeof(float);
+
+                std::cout << "📊 Mesh shader parameters:" << std::endl;
+                std::cout << "  Vertex count: " << gpuData.vertexCount << std::endl;
+                std::cout << "  Primitive count: " << gpuData.primitiveCount << std::endl;
+                std::cout << "  Vertex stride (floats): " << gpuData.vertexStrideFloats << std::endl;
+            }
+            else {
+                std::cout << "📐 Using traditional vertex buffer setup..." << std::endl;
+                // Traditional vertex buffer setup would go here
+            }
+
+            return gpuData;
+        }
+
+        // Extract and create shader modules from Taffy asset
+        bool TaffyOverlayManager::extractShadersFromAsset(const Taffy::Asset& asset,
+            VkShaderModule& meshShaderModule,
+            VkShaderModule& fragmentShaderModule) {
+            std::cout << "🔍 Extracting shaders from Taffy asset..." << std::endl;
+
+            auto shaderData = asset.get_chunk_data(Taffy::ChunkType::SHDR);
+            if (!shaderData) {
+                std::cerr << "❌ No shader chunk found!" << std::endl;
+                return false;
+            }
+
+            const uint8_t* chunk_ptr = shaderData->data();
+            size_t chunk_size = shaderData->size();
+
+            // Parse header
+            Taffy::ShaderChunk header;
+            if (chunk_size < sizeof(header)) {
+                std::cerr << "❌ Shader chunk too small for header!" << std::endl;
+                return false;
+            }
+
+            std::memcpy(&header, chunk_ptr, sizeof(header));
+            std::cout << "  Total shaders in chunk: " << header.shader_count << std::endl;
+
+            // Process each shader
+            for (uint32_t i = 0; i < header.shader_count; ++i) {
+                if (!extractAndCompileShader(*shaderData, i, meshShaderModule, fragmentShaderModule)) {
+                    std::cerr << "❌ Failed to extract shader " << i << std::endl;
+                    return false;
+                }
+            }
+
+            std::cout << "✅ All shaders extracted successfully!" << std::endl;
+            return true;
+        }
+
+        void TaffyOverlayManager::initializeDescriptorResources() {
+            // Create descriptor pool for mesh shader resources
+            std::vector<VkDescriptorPoolSize> poolSizes = {
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000}
+            };
+
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.maxSets = 1000;
+            poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+            poolInfo.pPoolSizes = poolSizes.data();
+
+            if (vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create descriptor pool!");
+            }
+
+            // Create mesh shader descriptor set layout
+            meshShaderDescSetLayout = createMeshShaderDescriptorSetLayout(device_);
+        }
+
+        uint32_t TaffyOverlayManager::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+            VkPhysicalDeviceMemoryProperties memProperties;
+            vkGetPhysicalDeviceMemoryProperties(physical_device_, &memProperties);
+
+            for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+                if ((typeFilter & (1 << i)) &&
+                    (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                    return i;
+                }
+            }
+
+            throw std::runtime_error("Failed to find suitable memory type!");
+        }
+
+        bool TaffyOverlayManager::extractAndCompileShader(const std::vector<uint8_t>& shader_data,
+            uint32_t shader_index,
+            VkShaderModule& meshShaderModule,
+            VkShaderModule& fragmentShaderModule) {
+            std::cout << "  🔍 Extracting shader " << shader_index << ":" << std::endl;
+
+            const uint8_t* chunk_ptr = shader_data.data();
+            size_t chunk_size = shader_data.size();
+
+            // Parse header
+            Taffy::ShaderChunk header;
+            std::memcpy(&header, chunk_ptr, sizeof(header));
+
+            if (shader_index >= header.shader_count) {
+                std::cerr << "    ❌ Shader index out of range!" << std::endl;
+                return false;
+            }
+
+            // Calculate offset to this shader's info
+            size_t shader_info_offset = sizeof(Taffy::ShaderChunk) +
+                shader_index * sizeof(Taffy::ShaderChunk::Shader);
+
+            if (shader_info_offset + sizeof(Taffy::ShaderChunk::Shader) > chunk_size) {
+                std::cerr << "    ❌ Shader info extends beyond chunk!" << std::endl;
+                return false;
+            }
+
+            // Read shader info
+            Taffy::ShaderChunk::Shader shader_info;
+            std::memcpy(&shader_info, chunk_ptr + shader_info_offset, sizeof(shader_info));
+
+            std::cout << "    Name hash: 0x" << std::hex << shader_info.name_hash << std::dec << std::endl;
+            std::cout << "    Stage: " << static_cast<uint32_t>(shader_info.stage) << std::endl;
+            std::cout << "    SPIR-V size: " << shader_info.spirv_size << " bytes" << std::endl;
+
+            // Calculate SPIR-V offset
+            size_t spirv_data_start = sizeof(Taffy::ShaderChunk) +
+                header.shader_count * sizeof(Taffy::ShaderChunk::Shader);
+            size_t spirv_offset = spirv_data_start;
+
+            // Skip SPIR-V data for previous shaders
+            for (uint32_t i = 0; i < shader_index; ++i) {
+                size_t prev_shader_info_offset = sizeof(Taffy::ShaderChunk) +
+                    i * sizeof(Taffy::ShaderChunk::Shader);
+                Taffy::ShaderChunk::Shader prev_shader;
+                std::memcpy(&prev_shader, chunk_ptr + prev_shader_info_offset, sizeof(prev_shader));
+                spirv_offset += prev_shader.spirv_size;
+            }
+
+            // Validate SPIR-V bounds
+            if (spirv_offset + shader_info.spirv_size > chunk_size) {
+                std::cerr << "    ❌ SPIR-V data extends beyond chunk!" << std::endl;
+                return false;
+            }
+
+            // Create Vulkan shader module
+            VkShaderModuleCreateInfo createInfo{};
+            createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            createInfo.codeSize = shader_info.spirv_size;
+            createInfo.pCode = reinterpret_cast<const uint32_t*>(chunk_ptr + spirv_offset);
+
+            VkShaderModule shaderModule;
+            VkResult result = vkCreateShaderModule(device_, &createInfo, nullptr, &shaderModule);
+
+            if (result != VK_SUCCESS) {
+                std::cerr << "    ❌ Failed to create shader module! VkResult: " << result << std::endl;
+                return false;
+            }
+
+            std::cout << "    ✅ Shader extracted and compiled successfully!" << std::endl;
+
+            // Store the shader module based on stage
+            if (shader_info.stage == Taffy::ShaderChunk::Shader::ShaderStage::MeshShader) {
+                meshShaderModule = shaderModule;
+                std::cout << "      → Stored as mesh shader module" << std::endl;
+            }
+            else if (shader_info.stage == Taffy::ShaderChunk::Shader::ShaderStage::Fragment) {
+                fragmentShaderModule = shaderModule;
+                std::cout << "      → Stored as fragment shader module" << std::endl;
+            }
+
+            return true;
+        }
+
     shaderc_shader_kind ShaderCompiler::getShaderKind(ShaderType type) {
         switch (type) {
         case ShaderType::Vertex:
@@ -4705,7 +5374,15 @@ namespace tremor::gfx {
             else {
 				m_overlayManager->clear_overlays("assets/tri.taf");
             }
-            m_overlayManager->get_pipeline("assets/tri.taf")->render(m_commandBuffers[currentFrame]);
+            
+			m_overlayManager->invalidatePipeline("assets/tri.taf");
+
+			m_overlayManager->checkForPipelineUpdates();
+
+			m_overlayManager->renderMeshAsset("assets/tri.taf", m_commandBuffers[currentFrame]);
+
+
+            //m_overlayManager->get_pipeline("assets/tri.taf")->render(m_commandBuffers[currentFrame]);
 
 
             //m_taffyMeshShaderManager->render_asset("assets/tri.taf", m_commandBuffers[currentFrame]);
@@ -4721,10 +5398,6 @@ namespace tremor::gfx {
             std::cout << "🎨 Initializing Taffy Overlay System..." << std::endl;
 
             // Use the raw device handles from your existing vkDevice
-            m_overlayMeshShaderManager = std::make_unique<TaffyOverlayMeshShaderManager>(
-                vkDevice->device(),           // Your existing VkDevice handle
-                vkDevice->physicalDevice()   // Your existing VkPhysicalDevice handle  
-            );
 
             last_overlay_check_ = std::chrono::steady_clock::now();
 
@@ -4764,7 +5437,6 @@ namespace tremor::gfx {
          * Update overlay system for hot-reloading
          */
         void VulkanBackend::updateOverlaySystem() {
-            if (!m_overlayMeshShaderManager) return;
 
             auto now = std::chrono::steady_clock::now();
             if (now - last_overlay_check_ > overlay_check_interval_) {
@@ -4787,7 +5459,6 @@ namespace tremor::gfx {
          * Demonstrate runtime overlay manipulation
          */
         void VulkanBackend::demonstrateOverlayControls() {
-            if (!m_overlayMeshShaderManager) return;
 
             std::string master_path = "assets/tri.taf";
 
@@ -4803,11 +5474,7 @@ namespace tremor::gfx {
             //m_overlayMeshShaderManager->apply_overlay_to_asset(master_path, "assets/overlays/wireframe_mode.tafo", 10);
 
             // Print current overlay stack
-            auto overlay_info = m_overlayMeshShaderManager->get_overlay_info(master_path);
             std::cout << "  📋 Current overlay stack:" << std::endl;
-            for (const auto& info : overlay_info) {
-                std::cout << "    " << info << std::endl;
-            }
         }
 
         void VulkanBackend::endFrame() {
@@ -4968,10 +5635,6 @@ namespace tremor::gfx {
             clusterConfig.farPlane = 1000.0f;
             clusterConfig.logarithmicZ = true;
 
-            m_overlayMeshShaderManager = std::make_unique<TaffyOverlayMeshShaderManager>(
-                device,
-                physicalDevice
-            );
 
 
 
@@ -4982,7 +5645,9 @@ namespace tremor::gfx {
 
             m_overlayManager = std::make_unique<TaffyOverlayManager>(
                 device,
-                physicalDevice
+                physicalDevice,
+                vkDevice->capabilities().dynamicRendering ? VK_NULL_HANDLE : *rp,  // Use null for dynamic rendering
+                vkSwapchain->extent()
             );
 
             m_clusteredRenderer = std::make_unique<tremor::gfx::VulkanClusteredRenderer>(
@@ -5004,6 +5669,8 @@ namespace tremor::gfx {
 
             initializeOverlaySystem();
             initializeOverlayWorkflow();
+
+			m_overlayManager->load_master_asset("assets/tri.taf");
 
             // Create enhanced content
 
