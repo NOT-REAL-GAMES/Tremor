@@ -165,10 +165,10 @@ namespace Tremor {
                 float tangent[4];
                 std::memcpy(tangent, vertex_ptr + offset, 4 * sizeof(float));
                 offset += 4 * sizeof(float);
-                vertex.tangent = glm::vec4(tangent[0], tangent[1], tangent[2], tangent[3]);
+                //vertex.tangent = glm::vec4(tangent[0], tangent[1], tangent[2], tangent[3]);
             }
             else {
-                vertex.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // Default tangent
+                //vertex.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // Default tangent
             }
 
             vertices_.push_back(vertex);

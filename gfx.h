@@ -26,8 +26,10 @@ namespace tremor::gfx {
     struct alignas(16) MeshVertex {
         Vec3Q position;
         glm::vec3 normal;
+		glm::vec4 color; // COLORE
         glm::vec2 texCoord;
-        glm::vec4 tangent; // w component stores handedness
+        glm::vec2 padding;
+        //glm::vec4 tangent; // w component stores handedness
     };
 
     // Material structures

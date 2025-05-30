@@ -1656,8 +1656,9 @@ namespace tremor::gfx {
 
         attributes[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(MeshVertex, position) };
         attributes[1] = { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(MeshVertex, normal) };
-        attributes[2] = { 2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(MeshVertex, texCoord) };
-        attributes[3] = { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(MeshVertex, tangent) };
+        attributes[2] = { 2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(MeshVertex, color) };
+        attributes[3] = { 3, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(MeshVertex, texCoord) };
+        //attributes[3] = { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(MeshVertex, tangent) };
 
         return attributes;
     }
@@ -2077,6 +2078,8 @@ namespace tremor::gfx {
         // Constructor/Destructor
         ~VulkanBackend() override = default;
 
+        bool hot_pink_enabled = true;
+
         // RenderBackend interface implementation
         bool initialize(SDL_Window* window) override;
         void shutdown() override;
@@ -2477,11 +2480,8 @@ namespace tremor::gfx {
         std::unique_ptr<SamplerResource> m_defaultSampler;
 
         // Private method declarations - implementations go to vk.cpp
-        bool createShaderResources();
         bool createMeshBuffers();
         bool createDefaultTextures();
-        bool createGraphicsPipeline();
-        void updateDescriptorSet();
         void updateUniformBuffers(Camera* camera);
         void updateMeshBuffers();
         void updateMaterialBuffer();
