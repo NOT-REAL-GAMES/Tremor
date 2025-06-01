@@ -57,14 +57,17 @@ public:
     std::unique_ptr<tremor::gfx::RenderBackend> rb;
 
     Engine() {
-
+        Logger::get().critical("Engine constructor called!");
+        Logger::get().critical("  Engine instance: {}", (void*)this);
 
         if (SDL_Init(SDL_INIT_EVERYTHING) < 0) {
             Logger::get().critical("SDL INITIALIZATION FAILED.");
         }
 
         window = SDL_CreateWindow("Tremor", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_VULKAN);
+        Logger::get().critical("Creating RenderBackend...");
         rb = tremor::gfx::RenderBackend::create(window);
+        Logger::get().critical("RenderBackend created: {}", (void*)rb.get());
 
 
     }
@@ -95,17 +98,21 @@ public:
 
 int main(int argc, char** argv) {
 
+#ifdef _WIN32
 	LPWSTR cmdLineW = GetCommandLineW();
+#endif
 
 	std::cout << "Initializing..." << std::endl;
 
-	Logger::create({
-	.enableConsole = true,
-	.enableFileOutput = true,
-	.logFilePath = "tremor_engine.log",
-	.minLevel = Logger::Level::Debug,
-	.showSourceLocation = true
-		});
+    Logger::Config l{};
+    l.enableConsole = true;
+    l.enableFileOutput = true;
+    l.logFilePath = "tremor_engine.log";
+    l.minLevel = Logger::Level::Debug;
+    l.showSourceLocation = true;
+
+
+	Logger::create(l);
 
 	Logger::get().info("Welcome. Starting Tremor...");
 

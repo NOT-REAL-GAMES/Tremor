@@ -34,6 +34,24 @@ concept VulkanStructure = requires(T t) {
     { t.pNext } -> std::convertible_to<void*>;
 };
 
+// Template function declarations - these need to be specialized for each type
+template<typename T>
+VkStructureType getVulkanStructureType();
+
+template<typename T>
+VkStructureType getStructureType();
+
+// Template specializations for common Vulkan structures
+template<> inline VkStructureType getVulkanStructureType<VkDeviceCreateInfo>() { return VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO; }
+template<> inline VkStructureType getVulkanStructureType<VkPhysicalDeviceFeatures2>() { return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2; }
+template<> inline VkStructureType getVulkanStructureType<VkPhysicalDeviceVulkan12Features>() { return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES; }
+template<> inline VkStructureType getVulkanStructureType<VkPhysicalDeviceVulkan13Features>() { return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES; }
+template<> inline VkStructureType getVulkanStructureType<VkPhysicalDeviceProperties2>() { return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; }
+
+// Alias getStructureType to getVulkanStructureType for consistency
+template<typename T>
+inline VkStructureType getStructureType() { return getVulkanStructureType<T>(); }
+
 // Type-safe structure creation - KEEP INLINE
 template<VulkanStructure T>
 inline T createVulkanStructure() {
@@ -92,7 +110,7 @@ namespace tremor::gfx {
 
         // Constructor
         VulkanDevice(VkInstance instance, VkSurfaceKHR surface,
-            const DevicePreferences& preferences = {});
+            const DevicePreferences& preferences);
 
         // Destructor - automatically cleans up Vulkan resources
         ~VulkanDevice() {
@@ -622,6 +640,7 @@ namespace tremor::gfx {
     VkDescriptorSetLayout createMeshShaderDescriptorSetLayout(VkDevice device);
 
     struct MeshShaderPushConstants {
+        glm::mat4 mvp;  // Model-View-Projection matrix
         uint32_t vertex_count;
         uint32_t primitive_count;
         uint32_t vertex_stride_floats;
@@ -657,9 +676,13 @@ namespace tremor::gfx {
          * @param physicalDevice Vulkan physical device handle
          * @param renderPass Render pass for pipeline creation (can be VK_NULL_HANDLE for dynamic rendering)
          * @param swapchainExtent Current swapchain extent for viewport setup
+         * @param swapchainFormat Format of the swapchain images
+         * @param depthFormat Format of the depth buffer
          */
         TaffyOverlayManager(VkDevice device, VkPhysicalDevice physicalDevice,
-            VkRenderPass renderPass, VkExtent2D swapchainExtent);
+            VkRenderPass renderPass, VkExtent2D swapchainExtent,
+            VkFormat swapchainFormat = VK_FORMAT_B8G8R8A8_SRGB,
+            VkFormat depthFormat = VK_FORMAT_D32_SFLOAT);
 
         /**
          * @brief Destructor - cleans up all Vulkan resources including pipelines
@@ -679,7 +702,7 @@ namespace tremor::gfx {
          * - Binding pipeline and resources
          * - Issuing draw commands
          */
-        void renderMeshAsset(const std::string& asset_path, VkCommandBuffer cmd);
+        void renderMeshAsset(const std::string& asset_path, VkCommandBuffer cmd, const glm::mat4& viewProj);
 
         // Asset loading and overlay management
         /**
@@ -700,6 +723,12 @@ namespace tremor::gfx {
          * @param master_path Path to the master .taf file
          */
         void clear_overlays(const std::string& master_path);
+
+        /**
+         * @brief Reload an asset from disk (useful when asset has been regenerated)
+         * @param asset_path Path to the .taf file to reload
+         */
+        void reloadAsset(const std::string& asset_path);
 
         /**
          * @brief Check if any pipelines need rebuilding and rebuild them
@@ -738,6 +767,8 @@ namespace tremor::gfx {
         VkPhysicalDevice physical_device_;
         VkRenderPass render_pass_;
         VkExtent2D swapchain_extent_;
+        VkFormat swapchain_format_;
+        VkFormat depth_format_;
         VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
         VkDescriptorSetLayout meshShaderDescSetLayout = VK_NULL_HANDLE;
 
@@ -791,7 +822,7 @@ namespace tremor::gfx {
          * @brief Internal render method with explicit pipeline and GPU data
          */
         void renderMeshAssetInternal(VkCommandBuffer cmd, VkPipeline meshPipeline,
-            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData);
+            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj);
 
         /**
          * @brief Upload a Taffy asset to GPU memory
@@ -1711,7 +1742,7 @@ namespace tremor::gfx {
         std::vector<uint32_t> compileToSpv(const std::string& source, ShaderType type,
             const std::string& filename, int flags = 0);
         std::vector<uint32_t> compileFileToSpv(const std::string& filename, ShaderType type,
-            const CompileOptions& options = {});
+            const CompileOptions& options);
 
     private:
 
@@ -1831,7 +1862,7 @@ namespace tremor::gfx {
             ShaderType type = ShaderType::Vertex, const std::string& entryPoint = "main");
         static std::unique_ptr<ShaderModule> compileFromSource(VkDevice device, const std::string& source,
             ShaderType type, const std::string& filename = "unnamed_shader",
-            const std::string& entryPoint = "main", const ShaderCompiler::CompileOptions& options = {});
+            const std::string& entryPoint = "main", const ShaderCompiler::CompileOptions& options = ShaderCompiler::CompileOptions{});
         static std::unique_ptr<ShaderModule> compileFromFile(VkDevice device, const std::string& filename,
             const std::string& entryPoint = "main", int flags = 0);
 
@@ -2023,9 +2054,11 @@ namespace tremor::gfx {
     class VulkanBackend : public RenderBackend {
     public:
         // Constructor/Destructor
+        VulkanBackend();
         ~VulkanBackend() override = default;
 
         bool hot_pink_enabled = true;
+        bool reload_assets_requested = false;
 
         // RenderBackend interface implementation
         bool initialize(SDL_Window* window) override;
@@ -2259,7 +2292,7 @@ namespace tremor::gfx {
         bool createCubeMesh() { return true; }
         bool createTestTexture();
         bool createDescriptorSetLayouts();
-        bool createAndUpdateDescriptorSets(){}
+        bool createAndUpdateDescriptorSets() { return true; }
         bool createMinimalMeshShaderPipeline();
         bool createGraphicsPipeline() { return true; }
 
@@ -2463,7 +2496,7 @@ namespace tremor::gfx {
         std::shared_ptr<ShaderModule> loadShader(
             const std::string & filename,
             const std::string & entryPoint = "main",
-            const ShaderCompiler::CompileOptions & options = {});
+            const ShaderCompiler::CompileOptions & options = ShaderCompiler::CompileOptions{});
 
         void checkForChanges();
 

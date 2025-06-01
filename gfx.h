@@ -658,7 +658,7 @@ namespace tremor::gfx {
 
     inline void Camera::updateProjectionMatrix() const {
         // Use reverse depth for better precision
-        m_projectionMatrix = glm::perspectiveZO(m_fovRadians, m_aspectRatio, m_farZ, m_nearZ);
+        m_projectionMatrix = glm::perspectiveZO(m_fovRadians, m_aspectRatio, m_nearZ, m_farZ);
 
         // Fix Vulkan's coordinate system (flip Y)
         m_projectionMatrix[1][1] *= -1;

@@ -1,6 +1,4 @@
-﻿#pragma once
-
-#define GLM_FORCE_RADIANS
+﻿#define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE  // Important for Vulkan depth range
 
 #include "vk.h"
@@ -8,6 +6,8 @@
 #include "renderer/taffy_integration.h"
 #include "taffy/tools.h"
 #include "asset.h"
+#include "overlay.h"
+#include <iomanip>
 
 // Helper function to copy buffer data
 void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
@@ -86,6 +86,19 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
 
 namespace tremor::gfx {
 
+    VulkanBackend::VulkanBackend() {
+        static int instanceCount = 0;
+        instanceCount++;
+        Logger::get().critical("VulkanBackend CONSTRUCTOR called!");
+        Logger::get().critical("  This is instance #{}", instanceCount);
+        Logger::get().critical("  VulkanBackend this pointer: {}", (void*)this);
+        
+        if (instanceCount > 1) {
+            Logger::get().critical("WARNING: Multiple VulkanBackend instances created!");
+            Logger::get().critical("Stack trace would be helpful here...");
+        }
+    }
+
     // Helper function to create descriptor set layout for mesh shaders
     VkDescriptorSetLayout createMeshShaderDescriptorSetLayout(VkDevice device) {
         std::vector<VkDescriptorSetLayoutBinding> bindings;
@@ -126,9 +139,11 @@ namespace tremor::gfx {
     // TaffyOverlayManager with merged TaffyAssetRenderer functionality and pipeline management
     
         TaffyOverlayManager::TaffyOverlayManager(VkDevice device, VkPhysicalDevice physicalDevice,
-            VkRenderPass renderPass, VkExtent2D swapchainExtent)
+            VkRenderPass renderPass, VkExtent2D swapchainExtent,
+            VkFormat swapchainFormat, VkFormat depthFormat)
             : device_(device), physical_device_(physicalDevice),
-            render_pass_(renderPass), swapchain_extent_(swapchainExtent) {
+            render_pass_(renderPass), swapchain_extent_(swapchainExtent),
+            swapchain_format_(swapchainFormat), depth_format_(depthFormat) {
 
             // Initialize descriptor pool and layouts for mesh shader rendering
             initializeDescriptorResources();
@@ -140,12 +155,19 @@ namespace tremor::gfx {
         }
 
         // Simplified render method - just pass asset path and command buffer
-        void TaffyOverlayManager::renderMeshAsset(const std::string& asset_path, VkCommandBuffer cmd) {
+        void TaffyOverlayManager::renderMeshAsset(const std::string& asset_path, VkCommandBuffer cmd, const glm::mat4& viewProj) {
+            // Extract camera position from view matrix (inverse of last column)
+            glm::vec3 camPos = -glm::vec3(viewProj[3]);
+            
+            std::cout << "\n=== renderMeshAsset called for: " << asset_path << " ===" << std::endl;
+            std::cout << "Camera position from viewProj: (" << camPos.x << ", " << camPos.y << ", " << camPos.z << ")" << std::endl;
+            
             // Ensure asset is loaded
             if (!ensureAssetLoaded(asset_path)) {
                 std::cerr << "Failed to load asset: " << asset_path << std::endl;
                 return;
             }
+            std::cout << "Asset loaded successfully" << std::endl;
 
             // Get or create pipeline for this asset
             PipelineInfo* pipeline = getOrCreatePipeline(asset_path);
@@ -164,7 +186,7 @@ namespace tremor::gfx {
             const MeshAssetGPUData& gpuData = gpuDataIt->second;
 
             // Now render using the cached pipeline and GPU data
-            renderMeshAssetInternal(cmd, pipeline->pipeline, pipeline->layout, gpuData);
+            renderMeshAssetInternal(cmd, pipeline->pipeline, pipeline->layout, gpuData, viewProj);
         }
 
         // Asset loading and management
@@ -173,14 +195,137 @@ namespace tremor::gfx {
         }
 
         void TaffyOverlayManager::loadAssetWithOverlay(const std::string& master_path, const std::string& overlay_path) {
-            // Implementation from original TaffyOverlayManager
+            // First ensure the master asset is loaded
             ensureAssetLoaded(master_path);
-            // Apply overlay logic here
+            
+            // IMPORTANT: Create a working copy to ensure we never modify the cached master
+            // This allows us to apply different overlays without accumulating changes
+            auto working_copy = std::make_unique<Taffy::Asset>(*loaded_assets_[master_path]);
+            
+            // Load the overlay
+            Taffy::Overlay overlay;
+            if (!overlay.load_from_file(overlay_path)) {
+                std::cerr << "Failed to load overlay: " << overlay_path << std::endl;
+                return;
+            }
+            
+            // Apply the overlay to the WORKING COPY, not the master
+            if (!overlay.apply_to_asset(*working_copy)) {
+                std::cerr << "Failed to apply overlay to asset" << std::endl;
+                return;
+            }
+            
+            Logger::get().info("Overlay applied to working copy of {}", master_path);
+            Logger::get().info("Original asset remains unchanged");
+            
+            // Re-upload the modified WORKING COPY to GPU
+            MeshAssetGPUData gpuData = uploadTaffyAsset(*working_copy);
+            if (!gpuData.vertexStorageBuffer) {
+                std::cerr << "Failed to re-upload asset with overlay to GPU" << std::endl;
+                return;
+            }
+            
+            // Wait for GPU to finish before cleaning up resources
+            vkDeviceWaitIdle(device_);
+            
+            // Clean up old GPU data before replacing
+            auto oldDataIt = gpu_data_cache_.find(master_path);
+            if (oldDataIt != gpu_data_cache_.end()) {
+                // Clean up old buffers
+                if (oldDataIt->second.vertexStorageBuffer) {
+                    vkDestroyBuffer(device_, oldDataIt->second.vertexStorageBuffer, nullptr);
+                }
+                if (oldDataIt->second.vertexStorageMemory) {
+                    vkFreeMemory(device_, oldDataIt->second.vertexStorageMemory, nullptr);
+                }
+                // Note: Descriptor sets are automatically returned to pool when freed
+                // The new uploadTaffyAsset call will allocate a fresh descriptor set
+            }
+            
+            // Update the GPU data cache with the new data
+            gpu_data_cache_[master_path] = gpuData;
+            
+            // Mark pipeline for rebuild to use new vertex data
+            invalidatePipeline(master_path);
+            
+            std::cout << "Successfully applied overlay " << overlay_path << " to " << master_path << std::endl;
+        }
+
+        void TaffyOverlayManager::reloadAsset(const std::string& asset_path) {
+            Logger::get().info("Reloading asset: {}", asset_path);
+            
+            // Wait for GPU to finish
+            vkDeviceWaitIdle(device_);
+            
+            // Clean up old GPU data
+            auto gpuDataIt = gpu_data_cache_.find(asset_path);
+            if (gpuDataIt != gpu_data_cache_.end()) {
+                if (gpuDataIt->second.vertexStorageBuffer) {
+                    vkDestroyBuffer(device_, gpuDataIt->second.vertexStorageBuffer, nullptr);
+                }
+                if (gpuDataIt->second.vertexStorageMemory) {
+                    vkFreeMemory(device_, gpuDataIt->second.vertexStorageMemory, nullptr);
+                }
+                gpu_data_cache_.erase(gpuDataIt);
+            }
+            
+            // Remove from loaded assets cache
+            loaded_assets_.erase(asset_path);
+            
+            // Invalidate pipeline
+            invalidatePipeline(asset_path);
+            
+            // Reload the asset
+            if (!ensureAssetLoaded(asset_path)) {
+                Logger::get().error("Failed to reload asset: {}", asset_path);
+                return;
+            }
+            
+            Logger::get().info("Asset reloaded successfully");
         }
 
         void TaffyOverlayManager::clear_overlays(const std::string& master_path) {
-            // Clear overlays and potentially invalidate pipeline
+            Logger::get().info("Clearing overlays for: {}", master_path);
+            
+            // Ensure the master asset is loaded
+            if (!ensureAssetLoaded(master_path)) {
+                Logger::get().error("Failed to load master asset: {}", master_path);
+                return;
+            }
+            
+            // Re-upload the ORIGINAL master asset to GPU (no overlays)
+            const auto& master_asset = *loaded_assets_[master_path];
+            MeshAssetGPUData gpuData = uploadTaffyAsset(master_asset);
+            
+            if (!gpuData.vertexStorageBuffer) {
+                Logger::get().error("Failed to re-upload original asset to GPU");
+                return;
+            }
+            
+            // Wait for GPU to finish before cleaning up resources
+            vkDeviceWaitIdle(device_);
+            
+            // Clean up old GPU data before replacing
+            auto oldDataIt = gpu_data_cache_.find(master_path);
+            if (oldDataIt != gpu_data_cache_.end()) {
+                // Clean up old buffers
+                if (oldDataIt->second.vertexStorageBuffer) {
+                    vkDestroyBuffer(device_, oldDataIt->second.vertexStorageBuffer, nullptr);
+                }
+                if (oldDataIt->second.vertexStorageMemory) {
+                    vkFreeMemory(device_, oldDataIt->second.vertexStorageMemory, nullptr);
+                }
+                // Note: Descriptor sets are automatically returned to pool when freed
+                // The new uploadTaffyAsset call will allocate a fresh descriptor set
+            }
+            
+            // Update GPU data cache with original data
+            gpu_data_cache_[master_path] = gpuData;
+            
+            // Invalidate pipeline to ensure it uses the original data
             invalidatePipeline(master_path);
+            
+            Logger::get().info("Overlays cleared - restored original asset");
         }
 
         // Check if pipeline needs rebuild (e.g., after overlay changes)
@@ -201,8 +346,13 @@ namespace tremor::gfx {
         bool TaffyOverlayManager::ensureAssetLoaded(const std::string& asset_path) {
             // Check if already loaded
             if (loaded_assets_.find(asset_path) != loaded_assets_.end()) {
+                Logger::get().info("Asset already loaded: {}", asset_path);
+                Logger::get().info("  TaffyOverlayManager instance: {}", (void*)this);
                 return true;
             }
+            
+            Logger::get().info("Loading new asset: {}", asset_path);
+            Logger::get().info("  TaffyOverlayManager instance: {}", (void*)this);
 
             // Load the asset
             auto asset = std::make_unique<Taffy::Asset>();
@@ -219,8 +369,15 @@ namespace tremor::gfx {
             }
 
             // Store the loaded asset and GPU data
+            // IMPORTANT: This is the MASTER copy - never modify it directly!
+            // Always create working copies when applying overlays
             loaded_assets_[asset_path] = std::move(asset);
             gpu_data_cache_[asset_path] = gpuData;
+            
+            Logger::get().info("Asset loaded and cached: {}", asset_path);
+            Logger::get().info("  Loaded assets count: {}", loaded_assets_.size());
+            Logger::get().info("  GPU data cache count: {}", gpu_data_cache_.size());
+            Logger::get().info("  Vertex storage buffer: {}", (void*)gpuData.vertexStorageBuffer);
 
             return true;
         }
@@ -229,8 +386,15 @@ namespace tremor::gfx {
             // Check if pipeline exists
             auto it = pipeline_cache_.find(asset_path);
             if (it != pipeline_cache_.end()) {
+                Logger::get().info("Reusing cached pipeline for: {}", asset_path);
+                Logger::get().info("  Cached pipeline: {}", (void*)it->second.pipeline);
+                Logger::get().info("  Cached layout: {}", (void*)it->second.layout);
+                Logger::get().info("  Pipeline cache size: {}", pipeline_cache_.size());
                 return &it->second;
             }
+            Logger::get().info("Creating new pipeline for: {}", asset_path);
+            Logger::get().info("  TaffyOverlayManager instance: {}", (void*)this);
+            Logger::get().info("  Pipeline cache size before: {}", pipeline_cache_.size());
 
             // Create new pipeline for this asset
             return createPipelineForAsset(asset_path);
@@ -261,7 +425,8 @@ namespace tremor::gfx {
             VkPushConstantRange pushConstantRange{};
             pushConstantRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
             pushConstantRange.offset = 0;
-            pushConstantRange.size = sizeof(MeshShaderPushConstants);
+            // Data-driven mesh shader now expects MVP matrix + metadata (80 bytes total)
+            pushConstantRange.size = sizeof(MeshShaderPushConstants); // MVP (64) + 4 uint32_t (16) = 80 bytes
             pipelineLayoutInfo.pushConstantRangeCount = 1;
             pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
@@ -327,7 +492,7 @@ namespace tremor::gfx {
             rasterizer.rasterizerDiscardEnable = VK_FALSE;
             rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
             rasterizer.lineWidth = 1.0f;
-            rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+            rasterizer.cullMode = VK_CULL_MODE_NONE; // Disable culling for debugging
             rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
             rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -340,9 +505,9 @@ namespace tremor::gfx {
             // Depth testing
             VkPipelineDepthStencilStateCreateInfo depthStencil{};
             depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-            depthStencil.depthTestEnable = VK_TRUE;
-            depthStencil.depthWriteEnable = VK_TRUE;
-            depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+            depthStencil.depthTestEnable = VK_FALSE; // Disable depth test for debugging
+            depthStencil.depthWriteEnable = VK_FALSE;
+            depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
             depthStencil.depthBoundsTestEnable = VK_FALSE;
             depthStencil.stencilTestEnable = VK_FALSE;
 
@@ -369,9 +534,28 @@ namespace tremor::gfx {
             dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
             dynamicState.pDynamicStates = dynamicStates.data();
 
+            // Setup for dynamic rendering if render pass is null
+            VkPipelineRenderingCreateInfo renderingInfo{};
+            
+            if (render_pass_ == VK_NULL_HANDLE) {
+                Logger::get().info("Creating mesh shader pipeline for dynamic rendering");
+                Logger::get().info("  Color format: {}", (int)swapchain_format_);
+                Logger::get().info("  Depth format: {}", (int)depth_format_);
+                renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+                renderingInfo.colorAttachmentCount = 1;
+                renderingInfo.pColorAttachmentFormats = &swapchain_format_;
+                renderingInfo.depthAttachmentFormat = depth_format_;
+                renderingInfo.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+            } else {
+                Logger::get().info("Creating mesh shader pipeline for traditional render pass");
+            }
+
             // Create pipeline
             VkGraphicsPipelineCreateInfo ppInfo{};
             ppInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            if (render_pass_ == VK_NULL_HANDLE) {
+                ppInfo.pNext = &renderingInfo;  // Chain the rendering info for dynamic rendering
+            }
             ppInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
             ppInfo.pStages = shaderStages.data();
             ppInfo.pVertexInputState = nullptr;  // Not used for mesh shaders
@@ -385,13 +569,16 @@ namespace tremor::gfx {
             ppInfo.layout = pipelineInfo.layout;
             ppInfo.renderPass = render_pass_;
             ppInfo.subpass = 0;
+            ppInfo.basePipelineHandle = VK_NULL_HANDLE;
 
             VkPipeline pipeline;
-            if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &ppInfo, nullptr, &pipeline) != VK_SUCCESS) {
-                std::cerr << "Failed to create graphics pipeline!" << std::endl;
+            VkResult pipelineResult = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &ppInfo, nullptr, &pipeline);
+            if (pipelineResult != VK_SUCCESS) {
+                std::cerr << "Failed to create graphics pipeline! Error: " << pipelineResult << std::endl;
                 return VK_NULL_HANDLE;
             }
 
+            Logger::get().info("Mesh shader pipeline created successfully!");
             return pipeline;
         }
 
@@ -426,13 +613,14 @@ namespace tremor::gfx {
         }
 
         void TaffyOverlayManager::renderMeshAssetInternal(VkCommandBuffer cmd, VkPipeline meshPipeline,
-            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData) {
+            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj) {
             if (!gpuData.usesMeshShader) {
                 std::cerr << "⚠️  Asset doesn't use mesh shaders!" << std::endl;
                 return;
             }
 
             // Bind mesh shader pipeline
+            Logger::get().info("Binding mesh shader pipeline");
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
 
             // Set viewport
@@ -443,6 +631,9 @@ namespace tremor::gfx {
             viewport.height = static_cast<float>(swapchain_extent_.height);
             viewport.minDepth = 0.0f;
             viewport.maxDepth = 1.0f;
+            Logger::get().info("Viewport: {}x{} at ({}, {})", viewport.width, viewport.height, viewport.x, viewport.y);
+            Logger::get().info("Depth range: {} to {}", viewport.minDepth, viewport.maxDepth);
+            Logger::get().info("Swapchain extent: {}x{}", swapchain_extent_.width, swapchain_extent_.height);
             vkCmdSetViewport(cmd, 0, 1, &viewport);
 
             // Set scissor
@@ -452,11 +643,16 @@ namespace tremor::gfx {
             vkCmdSetScissor(cmd, 0, 1, &scissor);
 
             // Bind descriptor set with vertex storage buffer
+            if (gpuData.descriptorSet == VK_NULL_HANDLE) {
+                Logger::get().error("Descriptor set is null!");
+                return;
+            }
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 pipelineLayout, 0, 1, &gpuData.descriptorSet, 0, nullptr);
 
             // Set push constants
             MeshShaderPushConstants pushConstants{};
+            pushConstants.mvp = viewProj;  // Use the view-projection matrix directly
             pushConstants.vertex_count = gpuData.vertexCount;
             pushConstants.primitive_count = gpuData.primitiveCount;
             pushConstants.vertex_stride_floats = gpuData.vertexStrideFloats;
@@ -467,11 +663,51 @@ namespace tremor::gfx {
                 pushConstants.primitive_count,
                 pushConstants.vertex_stride_floats);
 
+            // Push the full structure with MVP matrix
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT,
                 0, sizeof(pushConstants), &pushConstants);
 
             // Draw with mesh shader
+            Logger::get().info("Drawing mesh shader with 1x1x1 workgroups");
+            
+            // Debug: Test transform all three vertices
+            glm::vec4 vertices[3] = {
+                glm::vec4(0.0f, 0.5f, 0.0f, 1.0f),    // Top
+                glm::vec4(-0.5f, -0.5f, 0.0f, 1.0f),  // Bottom left
+                glm::vec4(0.5f, -0.5f, 0.0f, 1.0f)    // Bottom right
+            };
+            
+            for (int i = 0; i < 3; i++) {
+                glm::vec4 transformed = viewProj * vertices[i];
+                glm::vec3 ndc = glm::vec3(transformed) / transformed.w;
+                Logger::get().info("Vertex {} -> NDC: ({:.3f}, {:.3f}, {:.3f}) [w={:.3f}]", 
+                    i, ndc.x, ndc.y, ndc.z, transformed.w);
+                
+                // Check if vertex is inside NDC bounds
+                bool inside = (ndc.x >= -1.0f && ndc.x <= 1.0f && 
+                             ndc.y >= -1.0f && ndc.y <= 1.0f && 
+                             ndc.z >= 0.0f && ndc.z <= 1.0f);
+                if (!inside) {
+                    Logger::get().warning("  Vertex {} is OUTSIDE NDC bounds!", i);
+                }
+            }
+            
+            // Ensure vkCmdDrawMeshTasksEXT is available
+            if (!vkCmdDrawMeshTasksEXT) {
+                Logger::get().error("vkCmdDrawMeshTasksEXT is not available! Mesh shader extension not loaded properly.");
+                return;
+            }
+            
+            // Log all state before draw
+            Logger::get().info("Mesh shader draw state:");
+            Logger::get().info("  Pipeline: {}", (void*)meshPipeline);
+            Logger::get().info("  Descriptor set: {}", (void*)gpuData.descriptorSet);
+            Logger::get().info("  Vertex count: {}", gpuData.vertexCount);
+            Logger::get().info("  Storage buffer: {}", (void*)gpuData.vertexStorageBuffer);
+            
+            std::cout << "CALLING vkCmdDrawMeshTasksEXT NOW!" << std::endl;
             vkCmdDrawMeshTasksEXT(cmd, 1, 1, 1);  // 1x1x1 workgroups
+            std::cout << "vkCmdDrawMeshTasksEXT completed successfully!" << std::endl;
         }
 
         TaffyOverlayManager::MeshAssetGPUData TaffyOverlayManager::uploadTaffyAsset(const Taffy::Asset& asset) {
@@ -491,7 +727,14 @@ namespace tremor::gfx {
             std::cout << "📊 Geometry info:" << std::endl;
             std::cout << "  Vertex count: " << geomHeader.vertex_count << std::endl;
             std::cout << "  Vertex stride: " << geomHeader.vertex_stride << " bytes" << std::endl;
+            std::cout << "  Vertex format: 0x" << std::hex << static_cast<uint32_t>(geomHeader.vertex_format) << std::dec << std::endl;
+            std::cout << "  Render mode value: " << geomHeader.render_mode << std::endl;
             std::cout << "  Render mode: " << (geomHeader.render_mode == Taffy::GeometryChunk::MeshShader ? "Mesh Shader" : "Traditional") << std::endl;
+            std::cout << "  MeshShader enum value: " << Taffy::GeometryChunk::MeshShader << std::endl;
+            
+            // Check if this is Vec3Q format
+            bool isVec3Q = asset.has_feature(Taffy::FeatureFlags::QuantizedCoords); // Check Vec3Q flag
+            std::cout << "  Uses Vec3Q: " << (isVec3Q ? "Yes" : "No") << std::endl;
 
             // Check if this uses mesh shaders
             gpuData.usesMeshShader = (geomHeader.render_mode == Taffy::GeometryChunk::MeshShader);
@@ -503,6 +746,11 @@ namespace tremor::gfx {
                 size_t vertexDataOffset = sizeof(Taffy::GeometryChunk);
                 size_t vertexDataSize = geomHeader.vertex_count * geomHeader.vertex_stride;
 
+                std::cout << "  GeometryChunk size: " << sizeof(Taffy::GeometryChunk) << " bytes" << std::endl;
+                std::cout << "  Vertex data offset: " << vertexDataOffset << " bytes" << std::endl;
+                std::cout << "  Vertex data size: " << vertexDataSize << " bytes" << std::endl;
+                std::cout << "  Total chunk size: " << geomData->size() << " bytes" << std::endl;
+
                 // Validate data bounds
                 if (vertexDataOffset + vertexDataSize > geomData->size()) {
                     std::cerr << "❌ Vertex data extends beyond chunk!" << std::endl;
@@ -510,6 +758,38 @@ namespace tremor::gfx {
                 }
 
                 const uint8_t* vertexData = geomData->data() + vertexDataOffset;
+                
+                // Debug: print vertex data
+                if (geomHeader.vertex_count > 0) {
+                    std::cout << "🔍 Vertex stride: " << geomHeader.vertex_stride << " bytes" << std::endl;
+                    
+                    // Print all three vertices
+                    for (int v = 0; v < 3 && v < geomHeader.vertex_count; v++) {
+                        std::cout << "📍 Vertex " << v << " raw bytes (first 32):" << std::endl;
+                        const uint8_t* vertexStart = vertexData + (v * geomHeader.vertex_stride);
+                        
+                        for (int i = 0; i < 32 && i < geomHeader.vertex_stride; i++) {
+                            std::cout << std::hex << std::setw(2) << std::setfill('0') 
+                                      << static_cast<int>(vertexStart[i]) << " ";
+                            if ((i + 1) % 8 == 0) std::cout << std::endl;
+                        }
+                        std::cout << std::dec << std::endl;
+                        
+                        // The position should be the first 24 bytes (3 x int64_t for Vec3Q)
+                        const int64_t* quantPos = reinterpret_cast<const int64_t*>(vertexStart);
+                        std::cout << "  Position (as int64): X=" << quantPos[0] 
+                                  << ", Y=" << quantPos[1] 
+                                  << ", Z=" << quantPos[2] << std::endl;
+                        
+                        // Convert to millimeters (quantization is 1/128mm)
+                        float x_mm = quantPos[0] / 128.0f;
+                        float y_mm = quantPos[1] / 128.0f;
+                        float z_mm = quantPos[2] / 128.0f;
+                        std::cout << "  Position (mm): X=" << x_mm 
+                                  << ", Y=" << y_mm 
+                                  << ", Z=" << z_mm << std::endl;
+                    }
+                }
 
                 // Create buffer with STORAGE_BUFFER usage
                 VkBufferCreateInfo bufferInfo{};
@@ -645,6 +925,7 @@ namespace tremor::gfx {
 
             VkDescriptorPoolCreateInfo poolInfo{};
             poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT; // Allow freeing individual descriptor sets
             poolInfo.maxSets = 1000;
             poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
             poolInfo.pPoolSizes = poolSizes.data();
@@ -1671,7 +1952,7 @@ namespace tremor::gfx {
 
             // Compile file to SPIR-V
             static ShaderCompiler compiler;
-            auto spirv = compiler.compileFileToSpv(filename, type);
+            auto spirv = compiler.compileFileToSpv(filename, type, ShaderCompiler::CompileOptions{});
 
             if (spirv.empty()) {
                 // Compilation failed
@@ -3419,15 +3700,19 @@ namespace tremor::gfx {
     };
 
     // Class for managing Vulkan device and related resources
-    // Template specializations for structure types
-    template<> inline VkStructureType VulkanDevice::getStructureType<VkDeviceCreateInfo>() { return VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO; }
-    template<> inline VkStructureType VulkanDevice::getStructureType<VkPhysicalDeviceFeatures2>() { return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2; }
-    template<> inline VkStructureType VulkanDevice::getStructureType<VkPhysicalDeviceVulkan12Features>() { return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES; }
-    template<> inline VkStructureType VulkanDevice::getStructureType<VkPhysicalDeviceVulkan13Features>() { return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES; }
-    template<> inline VkStructureType VulkanDevice::getStructureType<VkPhysicalDeviceProperties2>() { return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2; }
-    // Add more as needed...
 
     // Implementation
+
+    // Template specializations for VulkanDevice::getStructureType
+    template<> VkStructureType VulkanDevice::getStructureType<VkPhysicalDeviceFeatures2>() { 
+        return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2; 
+    }
+    template<> VkStructureType VulkanDevice::getStructureType<VkPhysicalDeviceVulkan12Features>() { 
+        return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES; 
+    }
+    template<> VkStructureType VulkanDevice::getStructureType<VkPhysicalDeviceVulkan13Features>() { 
+        return VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES; 
+    }
 
     VulkanDevice::VulkanDevice(VkInstance instance, VkSurfaceKHR surface,
         const DevicePreferences& preferences)
@@ -3667,6 +3952,8 @@ namespace tremor::gfx {
         if (m_capabilities.meshShaders) {
             meshShaderFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
             meshShaderFeatures.pNext = nullptr;
+            meshShaderFeatures.meshShader = VK_TRUE;
+            meshShaderFeatures.taskShader = VK_TRUE;
 
             // Chain it to the end
             vulkan13Features.pNext = &meshShaderFeatures;
@@ -4452,10 +4739,8 @@ namespace tremor::gfx {
         // Initialize the overlay system
         initializeOverlaySystem();
 
-        // Load your asset with overlays
-       
-
-        m_overlayManager->load_master_asset("assets/tri.taf");
+        // Asset loading moved to a single location to prevent multiple loads
+        // m_overlayManager->load_master_asset("assets/proper_triangle.taf");
 
     }
 
@@ -5130,6 +5415,7 @@ namespace tremor::gfx {
                 Logger::get().error("Failed to create render pass: {}", e.what());
                 throw; // Rethrow to be caught by initialize
             }
+            return true;
         }
 
         // Make sure you have a method to create depth resources
@@ -5237,6 +5523,8 @@ namespace tremor::gfx {
             updateUniformBuffer();
             updateLight();
 
+            cam.setPosition({sin(std::chrono::steady_clock::now().time_since_epoch().count()/100000000.0f),0.0,5.0});
+
             // Add camera debug info
             glm::vec3 camPos = cam.getLocalPosition();
             glm::vec3 camForward = cam.getForward();
@@ -5319,7 +5607,7 @@ namespace tremor::gfx {
                 depthStencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
                 depthStencilAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
                 depthStencilAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                depthStencilAttachment.clearValue.depthStencil = { 0.0f, 0 };
+                depthStencilAttachment.clearValue.depthStencil = { 0.0f, 1 };
 
                 // Add to the renderingInfo
                 renderingInfo.depthStencilAttachment = depthStencilAttachment;
@@ -5365,21 +5653,65 @@ namespace tremor::gfx {
             // Render using clustered renderer
             //m_clusteredRenderer->render(m_commandBuffers[currentFrame], &cam);
             
-            demonstrateOverlayControls();
-
-            if (hot_pink_enabled) {
-                m_overlayManager->loadAssetWithOverlay("assets/tri.taf", "assets/overlays/tri_hot_pink.tafo");
-
-            }
-            else {
-				m_overlayManager->clear_overlays("assets/tri.taf");
-            }
+            // Removed runtime overlay manipulation to prevent modifying the asset
+            // demonstrateOverlayControls();
             
-			m_overlayManager->invalidatePipeline("assets/tri.taf");
+            // Asset should already be loaded during initialization
+            // Removed duplicate load to prevent multiple instances
 
-			m_overlayManager->checkForPipelineUpdates();
+			// Debug camera and MVP
+			{
+				glm::vec3 camPos = cam.getLocalPosition();
+				glm::vec3 camForward = cam.getForward();
+				Logger::get().info("Camera position: ({:.2f}, {:.2f}, {:.2f})", camPos.x, camPos.y, camPos.z);
+				Logger::get().info("Camera forward: ({:.2f}, {:.2f}, {:.2f})", camForward.x, camForward.y, camForward.z);
+				
+				// Force camera update
+				cam.update(0.0f);
+				
+				glm::mat4 mvp = cam.getViewProjectionMatrix();
+				Logger::get().info("View-Projection Matrix:");
+				for (int i = 0; i < 4; i++) {
+					Logger::get().info("  [{:.3f}, {:.3f}, {:.3f}, {:.3f}]", 
+						mvp[i][0], mvp[i][1], mvp[i][2], mvp[i][3]);
+				}
+				
+				// Also check view and projection separately
+				glm::mat4 view = cam.getViewMatrix();
+				glm::mat4 proj = cam.getProjectionMatrix();
+				Logger::get().info("View Matrix [3]: ({:.3f}, {:.3f}, {:.3f})", view[3][0], view[3][1], view[3][2]);
+				Logger::get().info("Projection Matrix [0][0]: {:.3f}, [1][1]: {:.3f}", proj[0][0], proj[1][1]);
+			}
+			
+			// TEST: Check rendering state
+			{
+				Logger::get().info("=== RENDER STATE CHECK ===");
+				Logger::get().info("Using dynamic rendering: {}", dr ? "YES" : "NO");
+				Logger::get().info("Command buffer: {}", (void*)m_commandBuffers[currentFrame]);
+				Logger::get().info("Current swapchain extent: {}x{}", vkSwapchain.get()->extent().width, vkSwapchain.get()->extent().height);
+			}
+			
+            hot_pink_enabled = !hot_pink_enabled;
+            
+            // Check if asset reload was requested (could be set by keyboard input)
+            if (reload_assets_requested) {
+                Logger::get().info("Reloading assets...");
+                m_overlayManager->reloadAsset("assets/proper_triangle.taf");
+                reload_assets_requested = false;
+                Logger::get().info("Assets reloaded!");
+            }
 
-			m_overlayManager->renderMeshAsset("assets/tri.taf", m_commandBuffers[currentFrame]);
+
+			Logger::get().critical("About to call renderMeshAsset");
+			Logger::get().critical("  m_overlayManager pointer: {}", (void*)m_overlayManager.get());
+			Logger::get().critical("  VulkanBackend instance: {}", (void*)this);
+			
+			if (!m_overlayManager) {
+				Logger::get().error("m_overlayManager is null!");
+				return;
+			}
+			
+			m_overlayManager->renderMeshAsset("assets/proper_triangle.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
 
 
             //m_overlayManager->get_pipeline("assets/tri.taf")->render(m_commandBuffers[currentFrame]);
@@ -5431,6 +5763,43 @@ namespace tremor::gfx {
 
             // Load asset with overlays
             
+            // Create a test triangle with Vec3Q positions to test our conversion fix
+            {
+                std::vector<MeshVertex> testVertices;
+                
+                // Create vertices with Vec3Q positions (testing the conversion)
+                MeshVertex v1;
+                v1.position = Vec3Q::fromFloat(glm::vec3(-0.5f, -0.5f, 0.0f));
+                v1.normal = glm::vec3(0.0f, 0.0f, 1.0f);
+                v1.color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                v1.texCoord = glm::vec2(0.0f, 0.0f);
+                testVertices.push_back(v1);
+                
+                MeshVertex v2;
+                v2.position = Vec3Q::fromFloat(glm::vec3(0.5f, -0.5f, 0.0f));
+                v2.normal = glm::vec3(0.0f, 0.0f, 1.0f);
+                v2.color = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+                v2.texCoord = glm::vec2(1.0f, 0.0f);
+                testVertices.push_back(v2);
+                
+                MeshVertex v3;
+                v3.position = Vec3Q::fromFloat(glm::vec3(0.0f, 0.5f, 0.0f));
+                v3.normal = glm::vec3(0.0f, 0.0f, 1.0f);
+                v3.color = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
+                v3.texCoord = glm::vec2(0.5f, 1.0f);
+                testVertices.push_back(v3);
+                
+                std::vector<uint32_t> testIndices = {0, 1, 2};
+                
+                std::cout << "📐 Creating test triangle with Vec3Q positions..." << std::endl;
+                uint32_t testMeshId = m_clusteredRenderer->loadMesh(testVertices, testIndices, "test_vec3q_triangle");
+                
+                if (testMeshId != UINT32_MAX) {
+                    std::cout << "✅ Test triangle created with mesh ID: " << testMeshId << std::endl;
+                } else {
+                    std::cout << "❌ Failed to create test triangle" << std::endl;
+                }
+            }
         }
 
         /**
@@ -5460,7 +5829,7 @@ namespace tremor::gfx {
          */
         void VulkanBackend::demonstrateOverlayControls() {
 
-            std::string master_path = "assets/tri.taf";
+            std::string master_path = "assets/proper_triangle.taf";
 
             std::cout << "🎮 Demonstrating overlay manipulation..." << std::endl;
 
@@ -5532,6 +5901,16 @@ namespace tremor::gfx {
                 return;
             }
 
+            if(hot_pink_enabled){
+                m_overlayManager->loadAssetWithOverlay("assets/proper_triangle.taf","assets/overlays/tri_hot_pink.tafo");
+            }
+            else {
+                m_overlayManager->clear_overlays("assets/proper_triangle.taf");
+            }
+
+            m_overlayManager->checkForPipelineUpdates();
+
+
             // Move to next frame
             currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
         }
@@ -5575,6 +5954,15 @@ namespace tremor::gfx {
 
 
         bool VulkanBackend::initialize(SDL_Window* window) {
+            Logger::get().critical("VulkanBackend::initialize called!");
+            Logger::get().critical("  VulkanBackend instance: {}", (void*)this);
+            
+            static int initCount = 0;
+            Logger::get().critical("  Initialize call count: {}", ++initCount);
+            
+            if (initCount > 1) {
+                Logger::get().critical("WARNING: VulkanBackend::initialize called multiple times!");
+            }
 
             ShaderReflection combinedReflection;
             m_combinedReflection = combinedReflection;
@@ -5613,7 +6001,6 @@ namespace tremor::gfx {
 
             createDescriptorSetLayouts();
 
-            createMinimalMeshShaderPipeline();
             createGraphicsPipeline();
             createSyncObjects();
 
@@ -5646,8 +6033,10 @@ namespace tremor::gfx {
             m_overlayManager = std::make_unique<TaffyOverlayManager>(
                 device,
                 physicalDevice,
-                vkDevice->capabilities().dynamicRendering ? VK_NULL_HANDLE : *rp,  // Use null for dynamic rendering
-                vkSwapchain->extent()
+                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,  // Use null for dynamic rendering
+                vkSwapchain->extent(),
+                vkSwapchain->imageFormat(),
+                vkDevice->depthFormat()
             );
 
             m_clusteredRenderer = std::make_unique<tremor::gfx::VulkanClusteredRenderer>(
@@ -5670,35 +6059,15 @@ namespace tremor::gfx {
             initializeOverlaySystem();
             initializeOverlayWorkflow();
 
-			m_overlayManager->load_master_asset("assets/tri.taf");
+			// Reload the asset in case it was regenerated
+			m_overlayManager->reloadAsset("assets/proper_triangle.taf");
+			m_overlayManager->load_master_asset("assets/proper_triangle.taf");
 
             // Create enhanced content
 
             return true;
         };
         void VulkanBackend::shutdown() {};
-
-        void VulkanBackend::renderWithMeshShader(VkCommandBuffer cmdBuffer) {
-            if (m_meshShaderPipeline && m_meshShaderPipelineLayout) {
-                // Bind the pipeline
-                vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, *m_meshShaderPipeline);
-
-                // Set viewport and scissor
-                VkViewport viewport{};
-                viewport.width = static_cast<float>(vkSwapchain->extent().width);
-                viewport.height = static_cast<float>(vkSwapchain->extent().height);
-                viewport.minDepth = 0.0f;
-                viewport.maxDepth = 1.0f;
-                vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
-
-                VkRect2D scissor{};
-                scissor.extent = vkSwapchain->extent();
-                vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
-
-                // Draw a mesh - no need for vertex/index buffers!
-                vkCmdDrawMeshTasksEXT(cmdBuffer, 1, 1, 1);
-            }
-        }
 
 
         TextureHandle VulkanBackend::createTexture(const TextureDesc& desc) {
@@ -5733,6 +6102,9 @@ namespace tremor::gfx {
                 delete texture;
                 return {};
             }
+            
+            // Return the created texture handle
+            return TextureHandle(texture);
         }
         BufferHandle createBuffer(const BufferDesc& desc);
         ShaderHandle createShader(const ShaderDesc& desc);
@@ -6314,11 +6686,57 @@ namespace tremor::gfx {
         }
 
         try {
-            // Update vertex buffer
+            // Update vertex buffer - convert Vec3Q to float for shader compatibility
             if (!m_allVertices.empty()) {
-                VkDeviceSize vertexSize = m_allVertices.size() * sizeof(MeshVertex);
+                // The shader expects float vertex data, so we need to convert Vec3Q positions to floats
+                // Calculate the size for float vertex data
+                const size_t floatsPerVertex = sizeof(MeshVertex) / sizeof(float);
+                std::vector<float> floatVertexData;
+                floatVertexData.reserve(m_allVertices.size() * floatsPerVertex);
+                
+                for (size_t i = 0; i < m_allVertices.size(); i++) {
+                    const auto& vertex = m_allVertices[i];
+                    // Convert Vec3Q position to float
+                    glm::vec3 floatPos = vertex.position.toFloat();
+                    
+                    // Debug output for first few vertices
+                    if (i < 3) {
+                        Logger::get().info("Vertex {} - Vec3Q: ({}, {}, {}) -> Float: ({:.6f}, {:.6f}, {:.6f})", 
+                            i, vertex.position.x, vertex.position.y, vertex.position.z,
+                            floatPos.x, floatPos.y, floatPos.z);
+                    }
+                    
+                    floatVertexData.push_back(floatPos.x);
+                    floatVertexData.push_back(floatPos.y);
+                    floatVertexData.push_back(floatPos.z);
+                    floatVertexData.push_back(0.0f); // Padding to align to 16 bytes
+                    
+                    // Normal (already float)
+                    floatVertexData.push_back(vertex.normal.x);
+                    floatVertexData.push_back(vertex.normal.y);
+                    floatVertexData.push_back(vertex.normal.z);
+                    floatVertexData.push_back(0.0f); // Padding
+                    
+                    // Color (already float)
+                    floatVertexData.push_back(vertex.color.x);
+                    floatVertexData.push_back(vertex.color.y);
+                    floatVertexData.push_back(vertex.color.z);
+                    floatVertexData.push_back(vertex.color.w);
+                    
+                    // TexCoord (already float)
+                    floatVertexData.push_back(vertex.texCoord.x);
+                    floatVertexData.push_back(vertex.texCoord.y);
+                    
+                    // Padding
+                    floatVertexData.push_back(vertex.padding.x);
+                    floatVertexData.push_back(vertex.padding.y);
+                }
+                
+                VkDeviceSize vertexSize = floatVertexData.size() * sizeof(float);
                 if (vertexSize <= m_vertexBuffer->getSize()) {
-                    m_vertexBuffer->update(m_allVertices.data(), vertexSize);
+                    m_vertexBuffer->update(floatVertexData.data(), vertexSize);
+                    Logger::get().info("Updated vertex buffer with {} floats ({} vertices)", 
+                        floatVertexData.size(), m_allVertices.size());
                 }
                 else {
                     Logger::get().warning("Vertex buffer too small: need {}, have {}",
@@ -6396,11 +6814,8 @@ namespace tremor::gfx {
             auto currentTime = std::chrono::high_resolution_clock::now();
             auto time = std::chrono::duration<float>(currentTime - startTime).count();
 
-            float radius = 25.0f; // Increased distance
-            float height = 2.0f;  // Higher up
-            camera->setPosition(glm::vec3(sin(time * 0.2f) * radius, height, cos(time * 0.2f) * radius));
-            camera->lookAt(glm::vec3(0.0f, 0.0f, 0.0f)); // Look at center of grid
-            camera->update(0.0f);
+            // Removed automatic camera movement - let the user control the camera
+            // camera->update(0.0f);
 
 
             ubo.viewMatrix = camera->getViewMatrix();

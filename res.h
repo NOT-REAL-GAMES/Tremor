@@ -1,5 +1,5 @@
 #pragma once
-#include "Handle.h"
+#include "handle.h"
 
 namespace tremor::gfx {
 
@@ -62,7 +62,7 @@ namespace tremor::gfx {
         case TextureFormat::BC7_UNORM:          return VK_FORMAT_BC7_UNORM_BLOCK;
         case TextureFormat::BC7_SRGB:           return VK_FORMAT_BC7_SRGB_BLOCK;
         default:
-            SDL_LogError(SDL_LOG_PRIORITY_ERROR, "Unsupported texture format: {}", static_cast<int>(format));
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Unsupported texture format: %d", static_cast<int>(format));
             return VK_FORMAT_R8G8B8A8_UNORM; // Default to a common format
         }
     }

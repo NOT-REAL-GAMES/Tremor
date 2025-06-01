@@ -1,19 +1,34 @@
 #pragma once
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
+
+// Platform detection
+#ifdef _WIN32
+    #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
+    #include <mmsystem.h>
+    #include <io.h>
+    #include <direct.h>
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+#else
+    // Linux/Unix includes
+    #include <unistd.h>
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <sys/stat.h>
+    #include <dirent.h>
 #endif
 
+#ifndef USING_VULKAN
 #define USING_VULKAN
+#endif
 
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 
-#include <windows.h>
-#include <mmsystem.h>
-
 #include <sys/types.h>
 #include <errno.h>
-#include <io.h>
-#include <direct.h>
 
 #include <algorithm>
 #include <future>
@@ -32,9 +47,6 @@
 #include <chrono>
 
 #include <random>
-
-#include <winsock2.h>
-#include <ws2tcpip.h>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
@@ -64,7 +76,9 @@
 
 #define GAMENAME "tremor" // directory to look in by default
 
+#ifdef _WIN32
 #undef SearchPath
+#endif
 
 class Logger {
 public:
@@ -93,12 +107,17 @@ public:
     }
 
     // Create a new logger instance (alternative to singleton)
-    static std::shared_ptr<Logger> create(const Config& config = {}) {
+    static std::shared_ptr<Logger> create(const Config& config) {
         return std::make_shared<Logger>(config);
+    }
+    
+    // Overload for default config
+    static std::shared_ptr<Logger> create() {
+        return std::make_shared<Logger>(Config{});
     }
 
     // Constructor with configuration
-    explicit Logger(const Config& config = {})
+    explicit Logger(const Config& config)
         : m_config(config) {
         if (m_config.enableFileOutput) {
             m_logFile.open(m_config.logFilePath, std::ios::out | std::ios::app);
@@ -107,6 +126,9 @@ public:
             }
         }
     }
+    
+    // Default constructor for singleton
+    Logger() : Logger(Config{}) {}
 
     // Destructor
     ~Logger() {
@@ -269,10 +291,12 @@ private:
 #define TREMOR_LOG_ERROR(...) ::Tremor::Logger::get().error(__VA_ARGS__)
 #define TREMOR_LOG_CRITICAL(...) ::Tremor::Logger::get().critical(__VA_ARGS__)
 
+#ifdef _WIN32
 #undef NEAR
 #undef FAR
 #undef near
 #undef far
+#endif
 //#UNDEF WHEREVER_YOU_ARE
 
 
