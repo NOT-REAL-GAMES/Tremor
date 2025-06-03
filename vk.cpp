@@ -5938,7 +5938,7 @@ namespace tremor::gfx {
 				Logger::get().info("Current swapchain extent: {}x{}", vkSwapchain.get()->extent().width, vkSwapchain.get()->extent().height);
 			}
 			
-            hot_pink_enabled = !hot_pink_enabled;
+            hot_pink_enabled = std::chrono::steady_clock::now().time_since_epoch().count() % 1000000000 > 500000000;
             
             if(hot_pink_enabled){
                 m_overlayManager->loadAssetWithOverlay("assets/fixed_triangle.taf","assets/overlays/tri_hot_pink.tafo");

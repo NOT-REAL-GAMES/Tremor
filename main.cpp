@@ -89,7 +89,7 @@ public:
 
         rb.get()->endFrame();
 
-        SDL_Delay(4); // Simulate a frame delay
+        SDL_Delay(17); // Simulate a frame delay
         return true;
 #endif
     }
