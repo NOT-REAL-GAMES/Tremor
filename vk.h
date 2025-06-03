@@ -644,7 +644,7 @@ namespace tremor::gfx {
         uint32_t vertex_count;
         uint32_t primitive_count;
         uint32_t vertex_stride_floats;
-        uint32_t reserved;
+        uint32_t index_offset_bytes;
     };
 
     /**
@@ -666,6 +666,8 @@ namespace tremor::gfx {
             uint32_t vertexCount = 0;
             uint32_t primitiveCount = 0;
             uint32_t vertexStrideFloats = 0;
+            uint32_t indexOffset = 0;  // Offset in bytes where indices start in the storage buffer
+            uint32_t indexCount = 0;   // Number of indices
             bool usesMeshShader = false;
         };
 

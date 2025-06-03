@@ -85,15 +85,18 @@ namespace Tremor {
             std::cerr << "❌ Geometry chunk missing position data!" << std::endl;
             return false;
         }
+#pragma pack(push, 1)
 
         // Define the actual Taffy vertex structure (matches what we created in tools.cpp)
         struct TaffyVertex {
-            Vec3Q position;      // Quantized position (always present)
-            float normal[3];     // Normal vector (if has_normal)
-            float uv[2];         // Texture coordinates (if has_texcoord)
-            float color[4];      // Vertex color (if has_color)
-            // Note: No tangent in our current implementation
+                Vec3Q position;     // 24 bytes
+                float normal[3];    // 12 bytes
+                float color[4];     // 16 bytes
+                float uv[2];        // 8 bytes
+                float tangent[4];   // 8 bytes
         };
+        
+#pragma pack(pop)
 
         // Validate stride matches expected structure
         size_t expected_stride = sizeof(Vec3Q);  // Position always present
@@ -156,8 +159,11 @@ namespace Tremor {
                 float color[4];
                 std::memcpy(color, vertex_ptr + offset, 4 * sizeof(float));
                 offset += 4 * sizeof(float);
-                // Store color in vertex (you might need to add a color field to MeshVertex)
-                // vertex.color = glm::vec4(color[0], color[1], color[2], color[3]);
+                // Store color in vertex
+                vertex.color = glm::vec4(color[0], color[1], color[2], color[3]);
+            }
+            else {
+                vertex.color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f); // Default white
             }
 
             // Parse tangent (if present)

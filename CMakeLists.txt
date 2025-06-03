@@ -20,6 +20,14 @@ if(NOT glm_FOUND)
     message(STATUS "GLM not found via find_package, using system headers")
 endif()
 
+include(FetchContent)
+FetchContent_Declare(
+    asio
+    GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
+    GIT_TAG asio-1-29-0
+)
+FetchContent_MakeAvailable(asio)
+
 # Create executable
 add_executable(Tremor
     main.cpp
@@ -38,7 +46,12 @@ target_include_directories(Tremor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/taffy
     ${TAFFY_INCLUDE_DIR}
     ${Vulkan_INCLUDE_DIRS}
+    ${asio_SOURCE_DIR}/asio/include
 )
+
+target_compile_definitions(Tremor PRIVATE 
+    ASIO_STANDALONE 
+    ASIO_HAS_STD_COROUTINE)
 
 # Link libraries
 target_link_libraries(Tremor PRIVATE

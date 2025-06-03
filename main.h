@@ -14,10 +14,9 @@
 #else
     // Linux/Unix includes
     #include <unistd.h>
-    #include <sys/socket.h>
+    #include <asio.hpp>
     #include <netinet/in.h>
     #include <arpa/inet.h>
-    #include <sys/stat.h>
     #include <dirent.h>
 #endif
 
@@ -27,7 +26,6 @@
 
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 
-#include <sys/types.h>
 #include <errno.h>
 
 #include <algorithm>

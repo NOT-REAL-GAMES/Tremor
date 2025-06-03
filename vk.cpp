@@ -108,7 +108,7 @@ namespace tremor::gfx {
         vertexStorageBinding.binding = 0;
         vertexStorageBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         vertexStorageBinding.descriptorCount = 1;
-        vertexStorageBinding.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;  // Only mesh shader needs this
+        vertexStorageBinding.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;  // Both mesh and fragment shaders need this
         vertexStorageBinding.pImmutableSamplers = nullptr;
         bindings.push_back(vertexStorageBinding);
 
@@ -196,7 +196,10 @@ namespace tremor::gfx {
 
         void TaffyOverlayManager::loadAssetWithOverlay(const std::string& master_path, const std::string& overlay_path) {
             // First ensure the master asset is loaded
-            ensureAssetLoaded(master_path);
+            if (!ensureAssetLoaded(master_path)){
+                Logger::get().critical("Couldn't load asset: {}",master_path);
+                return;
+            }
             
             // IMPORTANT: Create a working copy to ensure we never modify the cached master
             // This allows us to apply different overlays without accumulating changes
@@ -287,24 +290,43 @@ namespace tremor::gfx {
         void TaffyOverlayManager::clear_overlays(const std::string& master_path) {
             Logger::get().info("Clearing overlays for: {}", master_path);
             
-            // Ensure the master asset is loaded
-            if (!ensureAssetLoaded(master_path)) {
-                Logger::get().error("Failed to load master asset: {}", master_path);
+            // Check if we have the original asset loaded
+            auto assetIt = loaded_assets_.find(master_path);
+            if (assetIt == loaded_assets_.end()) {
+                Logger::get().error("Cannot clear overlays - original asset not found: {}", master_path);
                 return;
             }
             
-            // Re-upload the ORIGINAL master asset to GPU (no overlays)
-            const auto& master_asset = *loaded_assets_[master_path];
-            MeshAssetGPUData gpuData = uploadTaffyAsset(master_asset);
-            
+            // Re-upload the ORIGINAL asset to GPU (this replaces the overlay-modified data)
+            MeshAssetGPUData gpuData = uploadTaffyAsset(*assetIt->second);
             if (!gpuData.vertexStorageBuffer) {
-                Logger::get().error("Failed to re-upload original asset to GPU");
+                Logger::get().error("Failed to re-upload original asset to GPU: {}", master_path);
                 return;
             }
             
-            // Wait for GPU to finish before cleaning up resources
-            vkDeviceWaitIdle(device_);
+            // Clean up the old overlay GPU data
+            auto oldDataIt = gpu_data_cache_.find(master_path);
+            if (oldDataIt != gpu_data_cache_.end()) {
+                // Wait for GPU to finish before cleaning up
+                vkDeviceWaitIdle(device_);
+                
+                // Clean up old buffers
+                if (oldDataIt->second.vertexStorageBuffer) {
+                    vkDestroyBuffer(device_, oldDataIt->second.vertexStorageBuffer, nullptr);
+                }
+                if (oldDataIt->second.vertexStorageMemory) {
+                    vkFreeMemory(device_, oldDataIt->second.vertexStorageMemory, nullptr);
+                }
+                // Note: We're reusing the same descriptor set to avoid pool exhaustion
+            }
             
+            // Update the GPU data cache with the fresh upload of the original
+            gpu_data_cache_[master_path] = gpuData;
+            
+            Logger::get().info("Overlays cleared - original asset restored");
+            return;
+            
+            /* TODO: Re-enable when we have proper descriptor set management
             // Clean up old GPU data before replacing
             auto oldDataIt = gpu_data_cache_.find(master_path);
             if (oldDataIt != gpu_data_cache_.end()) {
@@ -326,6 +348,7 @@ namespace tremor::gfx {
             invalidatePipeline(master_path);
             
             Logger::get().info("Overlays cleared - restored original asset");
+            */
         }
 
         // Check if pipeline needs rebuild (e.g., after overlay changes)
@@ -421,9 +444,9 @@ namespace tremor::gfx {
             pipelineLayoutInfo.setLayoutCount = 1;
             pipelineLayoutInfo.pSetLayouts = &meshShaderDescSetLayout;
 
-            // Push constants for mesh shader
+            // Push constants for mesh and fragment shaders
             VkPushConstantRange pushConstantRange{};
-            pushConstantRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
+            pushConstantRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
             pushConstantRange.offset = 0;
             // Data-driven mesh shader now expects MVP matrix + metadata (80 bytes total)
             pushConstantRange.size = sizeof(MeshShaderPushConstants); // MVP (64) + 4 uint32_t (16) = 80 bytes
@@ -656,7 +679,7 @@ namespace tremor::gfx {
             pushConstants.vertex_count = gpuData.vertexCount;
             pushConstants.primitive_count = gpuData.primitiveCount;
             pushConstants.vertex_stride_floats = gpuData.vertexStrideFloats;
-            pushConstants.reserved = 0;
+            pushConstants.index_offset_bytes = gpuData.indexOffset;
 
             Logger::get().info("Push constants: vertices={}, primitives={}, stride={}",
                 pushConstants.vertex_count,
@@ -698,19 +721,47 @@ namespace tremor::gfx {
                 return;
             }
             
+            // Set push constants for mesh shader
+            struct MeshPushConstantsData {
+                glm::mat4 mvp;
+                uint32_t vertex_count;
+                uint32_t primitive_count;
+                uint32_t vertex_stride_floats;
+                uint32_t index_offset_bytes;
+            } meshPushData;
+            
+            meshPushData.mvp = viewProj;
+            meshPushData.vertex_count = gpuData.vertexCount;
+            meshPushData.primitive_count = gpuData.primitiveCount;
+            meshPushData.vertex_stride_floats = gpuData.vertexStrideFloats;
+            meshPushData.index_offset_bytes = gpuData.indexOffset;
+            
+            std::cout << "🔍 Push constants debug:" << std::endl;
+            std::cout << "  vertex_count: " << meshPushData.vertex_count << std::endl;
+            std::cout << "  primitive_count: " << meshPushData.primitive_count << std::endl;
+            std::cout << "  vertex_stride_floats: " << meshPushData.vertex_stride_floats << std::endl;
+            std::cout << "  index_offset_bytes: " << meshPushData.index_offset_bytes << std::endl;
+            std::cout << "  sizeof(pushConstants): " << sizeof(meshPushData) << " bytes" << std::endl;
+            
+            vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT,
+                0, sizeof(meshPushData), &meshPushData);
+            
             // Log all state before draw
             Logger::get().info("Mesh shader draw state:");
             Logger::get().info("  Pipeline: {}", (void*)meshPipeline);
             Logger::get().info("  Descriptor set: {}", (void*)gpuData.descriptorSet);
             Logger::get().info("  Vertex count: {}", gpuData.vertexCount);
+            Logger::get().info("  Primitive count: {}", gpuData.primitiveCount);
+            Logger::get().info("  Vertex stride floats: {}", gpuData.vertexStrideFloats);
             Logger::get().info("  Storage buffer: {}", (void*)gpuData.vertexStorageBuffer);
             
             std::cout << "CALLING vkCmdDrawMeshTasksEXT NOW!" << std::endl;
-            vkCmdDrawMeshTasksEXT(cmd, 1, 1, 1);  // 1x1x1 workgroups
+            vkCmdDrawMeshTasksEXT(cmd, 3, 1, 1);  // 1x1x1 workgroups
             std::cout << "vkCmdDrawMeshTasksEXT completed successfully!" << std::endl;
         }
 
         TaffyOverlayManager::MeshAssetGPUData TaffyOverlayManager::uploadTaffyAsset(const Taffy::Asset& asset) {
+            std::cout << "🚀 Starting uploadTaffyAsset..." << std::endl;
             MeshAssetGPUData gpuData{};
 
             // Get geometry chunk data
@@ -719,6 +770,7 @@ namespace tremor::gfx {
                 std::cerr << "❌ No geometry chunk found!" << std::endl;
                 return gpuData;
             }
+            std::cout << "✅ Found GEOM chunk, size: " << geomData->size() << " bytes" << std::endl;
 
             // Parse geometry header
             Taffy::GeometryChunk geomHeader;
@@ -737,7 +789,17 @@ namespace tremor::gfx {
             std::cout << "  Uses Vec3Q: " << (isVec3Q ? "Yes" : "No") << std::endl;
 
             // Check if this uses mesh shaders
-            gpuData.usesMeshShader = (geomHeader.render_mode == Taffy::GeometryChunk::MeshShader);
+            // TEMPORARY: Force mesh shader usage for assets with "data-driven mesh shader" in description
+            if (asset.get_description().find("data-driven mesh shader") != std::string::npos) {
+                gpuData.usesMeshShader = true;
+                std::cout << "🔧 FORCING mesh shader mode for data-driven mesh shader asset" << std::endl;
+            } else {
+                gpuData.usesMeshShader = (geomHeader.render_mode == Taffy::GeometryChunk::MeshShader);
+            }
+            
+            std::cout << "🎨 DEBUG: Render mode check - header value: " << geomHeader.render_mode 
+                      << ", MeshShader enum: " << Taffy::GeometryChunk::MeshShader 
+                      << ", uses mesh shader: " << gpuData.usesMeshShader << std::endl;
 
             if (gpuData.usesMeshShader) {
                 std::cout << "🔧 Creating storage buffer for mesh shader..." << std::endl;
@@ -745,15 +807,29 @@ namespace tremor::gfx {
                 // Calculate vertex data size and offset
                 size_t vertexDataOffset = sizeof(Taffy::GeometryChunk);
                 size_t vertexDataSize = geomHeader.vertex_count * geomHeader.vertex_stride;
+                
+                // Calculate index data size and offset
+                size_t indexDataSize = geomHeader.index_count * sizeof(uint32_t);
+                size_t indexDataOffset = vertexDataOffset + vertexDataSize;
+                size_t totalBufferSize = vertexDataSize + indexDataSize;
 
                 std::cout << "  GeometryChunk size: " << sizeof(Taffy::GeometryChunk) << " bytes" << std::endl;
                 std::cout << "  Vertex data offset: " << vertexDataOffset << " bytes" << std::endl;
                 std::cout << "  Vertex data size: " << vertexDataSize << " bytes" << std::endl;
+                std::cout << "  Index data offset: " << indexDataOffset << " bytes" << std::endl;
+                std::cout << "  Index data size: " << indexDataSize << " bytes" << std::endl;
+                std::cout << "  Total buffer size: " << totalBufferSize << " bytes" << std::endl;
                 std::cout << "  Total chunk size: " << geomData->size() << " bytes" << std::endl;
 
                 // Validate data bounds
                 if (vertexDataOffset + vertexDataSize > geomData->size()) {
                     std::cerr << "❌ Vertex data extends beyond chunk!" << std::endl;
+                    return gpuData;
+                }
+                
+                // Validate index data bounds if indices are present
+                if (geomHeader.index_count > 0 && indexDataOffset + indexDataSize > geomData->size()) {
+                    std::cerr << "❌ Index data extends beyond chunk!" << std::endl;
                     return gpuData;
                 }
 
@@ -765,10 +841,10 @@ namespace tremor::gfx {
                     
                     // Print all three vertices
                     for (int v = 0; v < 3 && v < geomHeader.vertex_count; v++) {
-                        std::cout << "📍 Vertex " << v << " raw bytes (first 32):" << std::endl;
+                        std::cout << "📍 Vertex " << v << " raw bytes (full vertex):" << std::endl;
                         const uint8_t* vertexStart = vertexData + (v * geomHeader.vertex_stride);
                         
-                        for (int i = 0; i < 32 && i < geomHeader.vertex_stride; i++) {
+                        for (int i = 0; i < geomHeader.vertex_stride; i++) {
                             std::cout << std::hex << std::setw(2) << std::setfill('0') 
                                       << static_cast<int>(vertexStart[i]) << " ";
                             if ((i + 1) % 8 == 0) std::cout << std::endl;
@@ -788,13 +864,26 @@ namespace tremor::gfx {
                         std::cout << "  Position (mm): X=" << x_mm 
                                   << ", Y=" << y_mm 
                                   << ", Z=" << z_mm << std::endl;
+                                  
+                        // Print color at offset 36
+                        const float* colorPtr = reinterpret_cast<const float*>(vertexStart + 36);
+                        std::cout << "  Color (RGBA): " << colorPtr[0] << ", " << colorPtr[1] 
+                                  << ", " << colorPtr[2] << ", " << colorPtr[3] << std::endl;
+                                  
+                        // DEBUG: Print what the shader will read
+                        std::cout << "  🔍 DEBUG - Color bytes at offset 36: ";
+                        for (int j = 0; j < 16; j++) {
+                            std::cout << std::hex << std::setw(2) << std::setfill('0') 
+                                      << static_cast<int>(vertexStart[36 + j]) << " ";
+                        }
+                        std::cout << std::dec << std::endl;
                     }
                 }
 
                 // Create buffer with STORAGE_BUFFER usage
                 VkBufferCreateInfo bufferInfo{};
                 bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-                bufferInfo.size = vertexDataSize;
+                bufferInfo.size = totalBufferSize;
                 bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -821,13 +910,23 @@ namespace tremor::gfx {
 
                 vkBindBufferMemory(device_, gpuData.vertexStorageBuffer, gpuData.vertexStorageMemory, 0);
 
-                // Copy vertex data to buffer
+                // Copy vertex and index data to buffer
                 void* mappedData;
-                vkMapMemory(device_, gpuData.vertexStorageMemory, 0, vertexDataSize, 0, &mappedData);
+                vkMapMemory(device_, gpuData.vertexStorageMemory, 0, totalBufferSize, 0, &mappedData);
+                
+                // Copy vertex data first
                 std::memcpy(mappedData, vertexData, vertexDataSize);
+                
+                // Copy index data after vertices if present
+                if (geomHeader.index_count > 0) {
+                    const uint8_t* indexData = geomData->data() + indexDataOffset;
+                    std::memcpy((uint8_t*)mappedData + vertexDataSize, indexData, indexDataSize);
+                    std::cout << "✅ Copied " << geomHeader.index_count << " indices to storage buffer" << std::endl;
+                }
+                
                 vkUnmapMemory(device_, gpuData.vertexStorageMemory);
 
-                std::cout << "✅ Storage buffer created with " << vertexDataSize << " bytes" << std::endl;
+                std::cout << "✅ Storage buffer created with " << totalBufferSize << " bytes" << std::endl;
 
                 // Allocate descriptor set
                 VkDescriptorSetAllocateInfo descAllocInfo{};
@@ -836,10 +935,22 @@ namespace tremor::gfx {
                 descAllocInfo.descriptorSetCount = 1;
                 descAllocInfo.pSetLayouts = &meshShaderDescSetLayout;
 
-                if (vkAllocateDescriptorSets(device_, &descAllocInfo, &gpuData.descriptorSet) != VK_SUCCESS) {
-                    std::cerr << "❌ Failed to allocate descriptor set!" << std::endl;
+                std::cout << "🔍 Descriptor allocation debug:" << std::endl;
+                std::cout << "  Descriptor pool: " << (void*)descriptorPool << std::endl;
+                std::cout << "  Descriptor set layout: " << (void*)meshShaderDescSetLayout << std::endl;
+
+                VkResult allocResult = vkAllocateDescriptorSets(device_, &descAllocInfo, &gpuData.descriptorSet);
+                if (allocResult != VK_SUCCESS) {
+                    std::cerr << "❌ Failed to allocate descriptor set! Result: " << allocResult << std::endl;
+                    if (allocResult == VK_ERROR_OUT_OF_POOL_MEMORY) {
+                        std::cerr << "   Error: Out of pool memory - descriptor pool is full!" << std::endl;
+                    } else if (allocResult == VK_ERROR_FRAGMENTED_POOL) {
+                        std::cerr << "   Error: Fragmented pool!" << std::endl;
+                    }
                     vkDestroyBuffer(device_, gpuData.vertexStorageBuffer, nullptr);
                     vkFreeMemory(device_, gpuData.vertexStorageMemory, nullptr);
+                    gpuData.vertexStorageBuffer = VK_NULL_HANDLE;  // Clear the handle
+                    gpuData.vertexStorageMemory = VK_NULL_HANDLE;
                     return gpuData;
                 }
 
@@ -847,7 +958,7 @@ namespace tremor::gfx {
                 VkDescriptorBufferInfo bufferDescInfo{};
                 bufferDescInfo.buffer = gpuData.vertexStorageBuffer;
                 bufferDescInfo.offset = 0;
-                bufferDescInfo.range = vertexDataSize;
+                bufferDescInfo.range = totalBufferSize;
 
                 VkWriteDescriptorSet descriptorWrite{};
                 descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -864,19 +975,112 @@ namespace tremor::gfx {
 
                 // Store mesh shader info
                 gpuData.vertexCount = geomHeader.vertex_count;
-                gpuData.primitiveCount = geomHeader.ms_max_primitives;
-                gpuData.vertexStrideFloats = geomHeader.vertex_stride / sizeof(float);
+                // Calculate actual primitive count from indices or vertices
+                // For triangles: either index_count/3 or vertex_count/3 (if non-indexed)
+                if (geomHeader.index_count > 0) {
+                    gpuData.primitiveCount = geomHeader.index_count / 3;
+                } else {
+                    gpuData.primitiveCount = geomHeader.vertex_count / 3;
+                }
+                
+                // IMPORTANT: For Vec3Q support, the stride needs to account for the fact that
+                // Vec3Q is 24 bytes (3 x int64) but the shader reads it as uint32 pairs
+                // The stride should be in uint32 units, not float units
+                gpuData.vertexStrideFloats = geomHeader.vertex_stride / sizeof(uint32_t);
+                
+                // Calculate index offset (indices come after vertices in the buffer)
+                gpuData.indexOffset = vertexDataSize;
+                gpuData.indexCount = geomHeader.index_count;
 
                 std::cout << "📊 Mesh shader parameters:" << std::endl;
                 std::cout << "  Vertex count: " << gpuData.vertexCount << std::endl;
+                std::cout << "  Index count: " << geomHeader.index_count << std::endl;
+                std::cout << "  Index offset: " << gpuData.indexOffset << " bytes" << std::endl;
                 std::cout << "  Primitive count: " << gpuData.primitiveCount << std::endl;
-                std::cout << "  Vertex stride (floats): " << gpuData.vertexStrideFloats << std::endl;
+                std::cout << "  Vertex stride (bytes): " << geomHeader.vertex_stride << std::endl;
+                std::cout << "  Vertex stride (uint32s): " << gpuData.vertexStrideFloats << std::endl;
+                std::cout << "✅ Successfully created storage buffer: " << gpuData.vertexStorageBuffer << std::endl;
+                std::cout << "✅ Successfully allocated descriptor set: " << gpuData.descriptorSet << std::endl;
             }
             else {
                 std::cout << "📐 Using traditional vertex buffer setup..." << std::endl;
-                // Traditional vertex buffer setup would go here
+                
+                // Calculate vertex data size and offset
+                size_t vertexDataOffset = sizeof(Taffy::GeometryChunk);
+                size_t vertexDataSize = geomHeader.vertex_count * geomHeader.vertex_stride;
+                
+                std::cout << "  Vertex data size: " << vertexDataSize << " bytes" << std::endl;
+                
+                // Validate data bounds
+                if (vertexDataOffset + vertexDataSize > geomData->size()) {
+                    std::cerr << "❌ Vertex data extends beyond chunk!" << std::endl;
+                    return gpuData;
+                }
+                
+                const uint8_t* vertexData = geomData->data() + vertexDataOffset;
+                
+                // Create vertex buffer (using storage buffer for now, but with vertex buffer usage)
+                VkBufferCreateInfo bufferInfo{};
+                bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                bufferInfo.size = vertexDataSize;
+                bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                
+                if (vkCreateBuffer(device_, &bufferInfo, nullptr, &gpuData.vertexStorageBuffer) != VK_SUCCESS) {
+                    std::cerr << "❌ Failed to create vertex buffer!" << std::endl;
+                    return gpuData;
+                }
+                
+                // Allocate memory for buffer
+                VkMemoryRequirements memRequirements;
+                vkGetBufferMemoryRequirements(device_, gpuData.vertexStorageBuffer, &memRequirements);
+                
+                VkMemoryAllocateInfo allocInfo{};
+                allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                allocInfo.allocationSize = memRequirements.size;
+                allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+                
+                if (vkAllocateMemory(device_, &allocInfo, nullptr, &gpuData.vertexStorageMemory) != VK_SUCCESS) {
+                    std::cerr << "❌ Failed to allocate buffer memory!" << std::endl;
+                    vkDestroyBuffer(device_, gpuData.vertexStorageBuffer, nullptr);
+                    return gpuData;
+                }
+                
+                vkBindBufferMemory(device_, gpuData.vertexStorageBuffer, gpuData.vertexStorageMemory, 0);
+                
+                // Copy vertex data to buffer
+                void* mappedData;
+                vkMapMemory(device_, gpuData.vertexStorageMemory, 0, vertexDataSize, 0, &mappedData);
+                std::memcpy(mappedData, vertexData, vertexDataSize);
+                vkUnmapMemory(device_, gpuData.vertexStorageMemory);
+                
+                std::cout << "✅ Vertex buffer created with " << vertexDataSize << " bytes" << std::endl;
+                
+                // Store info for traditional rendering
+                gpuData.vertexCount = geomHeader.vertex_count;
+                gpuData.vertexStrideFloats = geomHeader.vertex_stride / sizeof(float);
+                gpuData.indexOffset = vertexDataSize;  // Indices start after vertices
+                gpuData.indexCount = geomHeader.index_count;
+                gpuData.usesMeshShader = false;
+                
+                // For traditional rendering, we might not need a descriptor set
+                // but let's allocate one anyway for consistency
+                VkDescriptorSetAllocateInfo descAllocInfo{};
+                descAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+                descAllocInfo.descriptorPool = descriptorPool;
+                descAllocInfo.descriptorSetCount = 1;
+                descAllocInfo.pSetLayouts = &meshShaderDescSetLayout;
+                
+                VkResult allocResult = vkAllocateDescriptorSets(device_, &descAllocInfo, &gpuData.descriptorSet);
+                if (allocResult != VK_SUCCESS) {
+                    std::cerr << "⚠️  Warning: Failed to allocate descriptor set for traditional rendering" << std::endl;
+                    // This is not critical for traditional rendering, so we continue
+                }
             }
 
+            std::cout << "🏁 uploadTaffyAsset complete, returning gpuData with buffer: " 
+                      << gpuData.vertexStorageBuffer << std::endl;
             return gpuData;
         }
 
@@ -5523,7 +5727,8 @@ namespace tremor::gfx {
             updateUniformBuffer();
             updateLight();
 
-            cam.setPosition({sin(std::chrono::steady_clock::now().time_since_epoch().count()/100000000.0f),0.0,5.0});
+            cam.setPosition({sin(std::chrono::steady_clock::now().time_since_epoch().count()/100000000.0f)*5,0.0,cos(std::chrono::steady_clock::now().time_since_epoch().count()/100000000.0f)*5});
+            cam.lookAt({0.0f,0.0f,0.0f});
 
             // Add camera debug info
             glm::vec3 camPos = cam.getLocalPosition();
@@ -5696,7 +5901,7 @@ namespace tremor::gfx {
             // Check if asset reload was requested (could be set by keyboard input)
             if (reload_assets_requested) {
                 Logger::get().info("Reloading assets...");
-                m_overlayManager->reloadAsset("assets/proper_triangle.taf");
+                m_overlayManager->reloadAsset("assets/fixed_triangle.taf");
                 reload_assets_requested = false;
                 Logger::get().info("Assets reloaded!");
             }
@@ -5711,7 +5916,8 @@ namespace tremor::gfx {
 				return;
 			}
 			
-			m_overlayManager->renderMeshAsset("assets/proper_triangle.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
+			// Test the fixed triangle instead
+			m_overlayManager->renderMeshAsset("assets/fixed_triangle.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
 
 
             //m_overlayManager->get_pipeline("assets/tri.taf")->render(m_commandBuffers[currentFrame]);
@@ -5771,21 +5977,21 @@ namespace tremor::gfx {
                 MeshVertex v1;
                 v1.position = Vec3Q::fromFloat(glm::vec3(-0.5f, -0.5f, 0.0f));
                 v1.normal = glm::vec3(0.0f, 0.0f, 1.0f);
-                v1.color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                v1.color = glm::vec4(1.0f, 1.0f, 0.0f, 1.0f); // Yellow
                 v1.texCoord = glm::vec2(0.0f, 0.0f);
                 testVertices.push_back(v1);
                 
                 MeshVertex v2;
                 v2.position = Vec3Q::fromFloat(glm::vec3(0.5f, -0.5f, 0.0f));
                 v2.normal = glm::vec3(0.0f, 0.0f, 1.0f);
-                v2.color = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+                v2.color = glm::vec4(1.0f, 0.0f, 1.0f, 1.0f); // Magenta
                 v2.texCoord = glm::vec2(1.0f, 0.0f);
                 testVertices.push_back(v2);
                 
                 MeshVertex v3;
                 v3.position = Vec3Q::fromFloat(glm::vec3(0.0f, 0.5f, 0.0f));
                 v3.normal = glm::vec3(0.0f, 0.0f, 1.0f);
-                v3.color = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
+                v3.color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // Red
                 v3.texCoord = glm::vec2(0.5f, 1.0f);
                 testVertices.push_back(v3);
                 
@@ -5901,11 +6107,19 @@ namespace tremor::gfx {
                 return;
             }
 
+            static bool overlayLoaded = false;
             if(hot_pink_enabled){
-                m_overlayManager->loadAssetWithOverlay("assets/proper_triangle.taf","assets/overlays/tri_hot_pink.tafo");
+                // Only load overlay once, not every frame
+                if (!overlayLoaded) {
+                    m_overlayManager->loadAssetWithOverlay("assets/fixed_triangle.taf","assets/overlays/tri_hot_pink.tafo");
+                    overlayLoaded = true;
+                }
             }
             else {
-                m_overlayManager->clear_overlays("assets/proper_triangle.taf");
+                if (overlayLoaded) {
+                    m_overlayManager->clear_overlays("assets/fixed_triangle.taf");
+                    overlayLoaded = false;
+                }
             }
 
             m_overlayManager->checkForPipelineUpdates();
@@ -6044,7 +6258,7 @@ namespace tremor::gfx {
                 physicalDevice,
                 graphicsQueue,        // Add this
                 vkDevice->graphicsQueueFamily(),  // Add this
-                *m_commandPool,       // Add this - pass the command pool
+                m_commandPool->handle(),       // Add this - pass the command pool
                 clusterConfig
             );
 
@@ -6054,14 +6268,14 @@ namespace tremor::gfx {
             }
 
             createDevelopmentOverlays();
-            loadTestAssetWithOverlays();
+            // loadTestAssetWithOverlays(); // Commented out - creating test triangle interferes with proper_triangle.taf
 
             initializeOverlaySystem();
             initializeOverlayWorkflow();
 
-			// Reload the asset in case it was regenerated
-			m_overlayManager->reloadAsset("assets/proper_triangle.taf");
-			m_overlayManager->load_master_asset("assets/proper_triangle.taf");
+			// Load the fixed triangle
+			m_overlayManager->reloadAsset("assets/fixed_triangle.taf");
+			m_overlayManager->load_master_asset("assets/fixed_triangle.taf");
 
             // Create enhanced content
 
@@ -6728,8 +6942,8 @@ namespace tremor::gfx {
                     floatVertexData.push_back(vertex.texCoord.y);
                     
                     // Padding
-                    floatVertexData.push_back(vertex.padding.x);
-                    floatVertexData.push_back(vertex.padding.y);
+                    //floatVertexData.push_back(vertex.padding.x);
+                    //floatVertexData.push_back(vertex.padding.y);
                 }
                 
                 VkDeviceSize vertexSize = floatVertexData.size() * sizeof(float);
