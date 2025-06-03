@@ -221,8 +221,12 @@ namespace tremor::gfx {
             Logger::get().info("Overlay applied to working copy of {}", master_path);
             Logger::get().info("Original asset remains unchanged");
             
-            // Re-upload the modified WORKING COPY to GPU
-            MeshAssetGPUData gpuData = uploadTaffyAsset(*working_copy);
+            // IMPORTANT: Replace the loaded asset with the working copy so pipeline creation uses it
+            loaded_assets_[master_path] = std::move(working_copy);
+            Logger::get().info("Working copy is now the active asset for {}", master_path);
+            
+            // Re-upload the modified asset to GPU
+            MeshAssetGPUData gpuData = uploadTaffyAsset(*loaded_assets_[master_path]);
             if (!gpuData.vertexStorageBuffer) {
                 std::cerr << "Failed to re-upload asset with overlay to GPU" << std::endl;
                 return;
@@ -290,15 +294,23 @@ namespace tremor::gfx {
         void TaffyOverlayManager::clear_overlays(const std::string& master_path) {
             Logger::get().info("Clearing overlays for: {}", master_path);
             
-            // Check if we have the original asset loaded
+            // Reload the original asset from disk
+            Logger::get().info("Reloading original asset from disk: {}", master_path);
+            
+            // Remove current (possibly modified) asset
             auto assetIt = loaded_assets_.find(master_path);
-            if (assetIt == loaded_assets_.end()) {
-                Logger::get().error("Cannot clear overlays - original asset not found: {}", master_path);
+            if (assetIt != loaded_assets_.end()) {
+                loaded_assets_.erase(assetIt);
+            }
+            
+            // Force reload from disk
+            if (!ensureAssetLoaded(master_path)) {
+                Logger::get().error("Failed to reload original asset: {}", master_path);
                 return;
             }
             
-            // Re-upload the ORIGINAL asset to GPU (this replaces the overlay-modified data)
-            MeshAssetGPUData gpuData = uploadTaffyAsset(*assetIt->second);
+            // Re-upload the fresh asset to GPU
+            MeshAssetGPUData gpuData = uploadTaffyAsset(*loaded_assets_[master_path]);
             if (!gpuData.vertexStorageBuffer) {
                 Logger::get().error("Failed to re-upload original asset to GPU: {}", master_path);
                 return;
@@ -324,6 +336,8 @@ namespace tremor::gfx {
             gpu_data_cache_[master_path] = gpuData;
             
             Logger::get().info("Overlays cleared - original asset restored");
+            invalidatePipeline(master_path);
+
             return;
             
             /* TODO: Re-enable when we have proper descriptor set management
@@ -728,6 +742,8 @@ namespace tremor::gfx {
                 uint32_t primitive_count;
                 uint32_t vertex_stride_floats;
                 uint32_t index_offset_bytes;
+                uint32_t overlay_flags;
+                uint32_t overlay_data_offset;
             } meshPushData;
             
             meshPushData.mvp = viewProj;
@@ -735,12 +751,16 @@ namespace tremor::gfx {
             meshPushData.primitive_count = gpuData.primitiveCount;
             meshPushData.vertex_stride_floats = gpuData.vertexStrideFloats;
             meshPushData.index_offset_bytes = gpuData.indexOffset;
+            meshPushData.overlay_flags = 0; // Overlays will be handled by shader replacement
+            meshPushData.overlay_data_offset = 0;
             
             std::cout << "🔍 Push constants debug:" << std::endl;
             std::cout << "  vertex_count: " << meshPushData.vertex_count << std::endl;
             std::cout << "  primitive_count: " << meshPushData.primitive_count << std::endl;
             std::cout << "  vertex_stride_floats: " << meshPushData.vertex_stride_floats << std::endl;
             std::cout << "  index_offset_bytes: " << meshPushData.index_offset_bytes << std::endl;
+            std::cout << "  overlay_flags: 0x" << std::hex << meshPushData.overlay_flags << std::dec << std::endl;
+            std::cout << "  overlay_data_offset: " << meshPushData.overlay_data_offset << std::endl;
             std::cout << "  sizeof(pushConstants): " << sizeof(meshPushData) << " bytes" << std::endl;
             
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT,
@@ -865,18 +885,6 @@ namespace tremor::gfx {
                                   << ", Y=" << y_mm 
                                   << ", Z=" << z_mm << std::endl;
                                   
-                        // Print color at offset 36
-                        const float* colorPtr = reinterpret_cast<const float*>(vertexStart + 36);
-                        std::cout << "  Color (RGBA): " << colorPtr[0] << ", " << colorPtr[1] 
-                                  << ", " << colorPtr[2] << ", " << colorPtr[3] << std::endl;
-                                  
-                        // DEBUG: Print what the shader will read
-                        std::cout << "  🔍 DEBUG - Color bytes at offset 36: ";
-                        for (int j = 0; j < 16; j++) {
-                            std::cout << std::hex << std::setw(2) << std::setfill('0') 
-                                      << static_cast<int>(vertexStart[36 + j]) << " ";
-                        }
-                        std::cout << std::dec << std::endl;
                     }
                 }
 
@@ -940,13 +948,21 @@ namespace tremor::gfx {
                 std::cout << "  Descriptor set layout: " << (void*)meshShaderDescSetLayout << std::endl;
 
                 VkResult allocResult = vkAllocateDescriptorSets(device_, &descAllocInfo, &gpuData.descriptorSet);
+                if (allocResult == VK_ERROR_OUT_OF_POOL_MEMORY || allocResult == VK_ERROR_FRAGMENTED_POOL) {
+                    std::cout << "⚠️  Descriptor pool exhausted, recreating..." << std::endl;
+                    
+                    // Recreate the descriptor pool with more capacity
+                    recreateDescriptorPool();
+                    
+                    // Update the allocation info with new pool
+                    descAllocInfo.descriptorPool = descriptorPool;
+                    
+                    // Try allocation again
+                    allocResult = vkAllocateDescriptorSets(device_, &descAllocInfo, &gpuData.descriptorSet);
+                }
+                
                 if (allocResult != VK_SUCCESS) {
                     std::cerr << "❌ Failed to allocate descriptor set! Result: " << allocResult << std::endl;
-                    if (allocResult == VK_ERROR_OUT_OF_POOL_MEMORY) {
-                        std::cerr << "   Error: Out of pool memory - descriptor pool is full!" << std::endl;
-                    } else if (allocResult == VK_ERROR_FRAGMENTED_POOL) {
-                        std::cerr << "   Error: Fragmented pool!" << std::endl;
-                    }
                     vkDestroyBuffer(device_, gpuData.vertexStorageBuffer, nullptr);
                     vkFreeMemory(device_, gpuData.vertexStorageMemory, nullptr);
                     gpuData.vertexStorageBuffer = VK_NULL_HANDLE;  // Clear the handle
@@ -1122,24 +1138,50 @@ namespace tremor::gfx {
         }
 
         void TaffyOverlayManager::initializeDescriptorResources() {
-            // Create descriptor pool for mesh shader resources
-            std::vector<VkDescriptorPoolSize> poolSizes = {
-                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000}
-            };
-
-            VkDescriptorPoolCreateInfo poolInfo{};
-            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-            poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT; // Allow freeing individual descriptor sets
-            poolInfo.maxSets = 1000;
-            poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-            poolInfo.pPoolSizes = poolSizes.data();
-
-            if (vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
-                throw std::runtime_error("Failed to create descriptor pool!");
-            }
+            createDescriptorPool(1000); // Initial size
 
             // Create mesh shader descriptor set layout
             meshShaderDescSetLayout = createMeshShaderDescriptorSetLayout(device_);
+        }
+
+        void TaffyOverlayManager::createDescriptorPool(size_t maxSets) {
+            // If there's an existing pool, destroy it
+            if (descriptorPool != VK_NULL_HANDLE) {
+                vkDestroyDescriptorPool(device_, descriptorPool, nullptr);
+                descriptorPool = VK_NULL_HANDLE;
+            }
+
+            // Configure pool sizes for mesh shader resources
+            std::array<VkDescriptorPoolSize, 1> poolSizes{};
+            poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            poolSizes[0].descriptorCount = static_cast<uint32_t>(maxSets);
+
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+            poolInfo.pPoolSizes = poolSizes.data();
+            poolInfo.maxSets = static_cast<uint32_t>(maxSets);
+            poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+
+            VkResult result = vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descriptorPool);
+            if (result != VK_SUCCESS) {
+                std::cerr << "❌ Failed to create descriptor pool! Result: " << result << std::endl;
+                throw std::runtime_error("Failed to create descriptor pool");
+            }
+
+            std::cout << "✅ Created descriptor pool with capacity for " << maxSets << " sets" << std::endl;
+        }
+
+        void TaffyOverlayManager::recreateDescriptorPool() {
+            // Get current pool statistics if possible
+            // For now, we'll just double the capacity
+            static size_t currentCapacity = 1000;
+            currentCapacity *= 2;
+
+            std::cout << "♻️  Recreating descriptor pool with new capacity: " << currentCapacity << std::endl;
+
+            // Create new pool with increased capacity
+            createDescriptorPool(currentCapacity);
         }
 
         uint32_t TaffyOverlayManager::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
@@ -5898,6 +5940,13 @@ namespace tremor::gfx {
 			
             hot_pink_enabled = !hot_pink_enabled;
             
+            if(hot_pink_enabled){
+                m_overlayManager->loadAssetWithOverlay("assets/fixed_triangle.taf","assets/overlays/tri_hot_pink.tafo");
+            }
+            else {
+                m_overlayManager->clear_overlays("assets/fixed_triangle.taf");
+            }
+
             // Check if asset reload was requested (could be set by keyboard input)
             if (reload_assets_requested) {
                 Logger::get().info("Reloading assets...");
@@ -5905,6 +5954,8 @@ namespace tremor::gfx {
                 reload_assets_requested = false;
                 Logger::get().info("Assets reloaded!");
             }
+
+            m_overlayManager->checkForPipelineUpdates();
 
 
 			Logger::get().critical("About to call renderMeshAsset");
@@ -5920,12 +5971,6 @@ namespace tremor::gfx {
 			m_overlayManager->renderMeshAsset("assets/fixed_triangle.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
 
 
-            //m_overlayManager->get_pipeline("assets/tri.taf")->render(m_commandBuffers[currentFrame]);
-
-
-            //m_taffyMeshShaderManager->render_asset("assets/tri.taf", m_commandBuffers[currentFrame]);
-
-            //renderWithOverlays(m_commandBuffers[currentFrame]);
         }
 
         /**
@@ -6020,38 +6065,6 @@ namespace tremor::gfx {
             }
         }
 
-        /**
-         * Render with overlay system
-         */
-        void VulkanBackend::renderWithOverlays(VkCommandBuffer cmdBuffer) {
-            
-            //if (m_overlayMeshShaderManager) {
-                //m_overlayMeshShaderManager->render_overlaid_asset("assets/tri.taf", cmdBuffer);
-            //}
-        }
-
-        /**
-         * Demonstrate runtime overlay manipulation
-         */
-        void VulkanBackend::demonstrateOverlayControls() {
-
-            std::string master_path = "assets/proper_triangle.taf";
-
-            std::cout << "🎮 Demonstrating overlay manipulation..." << std::endl;
-
-            // Toggle hot pink vertex overlay
-            std::cout << "  🎨 Toggling hot pink vertex..." << std::endl;
-            //m_overlayMeshShaderManager->toggle_overlay(master_path, "assets/hot_pink_vertex.tafo", !hot_pink_enabled);
-            hot_pink_enabled = !hot_pink_enabled;
-
-            // Add wireframe overlay
-            //std::cout << "  ✨ Adding wireframe overlay..." << std::endl;
-            //m_overlayMeshShaderManager->apply_overlay_to_asset(master_path, "assets/overlays/wireframe_mode.tafo", 10);
-
-            // Print current overlay stack
-            std::cout << "  📋 Current overlay stack:" << std::endl;
-        }
-
         void VulkanBackend::endFrame() {
             if (vkDevice->capabilities().dynamicRendering) {
                 dr.get()->end(m_commandBuffers[currentFrame]);
@@ -6107,22 +6120,8 @@ namespace tremor::gfx {
                 return;
             }
 
-            static bool overlayLoaded = false;
-            if(hot_pink_enabled){
-                // Only load overlay once, not every frame
-                if (!overlayLoaded) {
-                    m_overlayManager->loadAssetWithOverlay("assets/fixed_triangle.taf","assets/overlays/tri_hot_pink.tafo");
-                    overlayLoaded = true;
-                }
-            }
-            else {
-                if (overlayLoaded) {
-                    m_overlayManager->clear_overlays("assets/fixed_triangle.taf");
-                    overlayLoaded = false;
-                }
-            }
+            
 
-            m_overlayManager->checkForPipelineUpdates();
 
 
             // Move to next frame

@@ -850,6 +850,17 @@ namespace tremor::gfx {
         void initializeDescriptorResources();
 
         /**
+         * @brief Create descriptor pool with specified capacity
+         * @param maxSets Maximum number of descriptor sets
+         */
+        void createDescriptorPool(size_t maxSets);
+
+        /**
+         * @brief Recreate descriptor pool with increased capacity
+         */
+        void recreateDescriptorPool();
+
+        /**
          * @brief Find suitable memory type for allocation
          * @param typeFilter Memory type filter
          * @param properties Required memory properties
