@@ -6904,7 +6904,8 @@ namespace tremor::gfx {
             if (!m_allVertices.empty()) {
                 // The shader expects float vertex data, so we need to convert Vec3Q positions to floats
                 // Calculate the size for float vertex data
-                const size_t floatsPerVertex = sizeof(MeshVertex) / sizeof(float);
+                // OverlayVertex layout: position(6) + normal(3) + texcoord(2) + color(4) = 15 floats
+                const size_t floatsPerVertex = 15;
                 std::vector<float> floatVertexData;
                 floatVertexData.reserve(m_allVertices.size() * floatsPerVertex);
                 
@@ -6918,32 +6919,40 @@ namespace tremor::gfx {
                         Logger::get().info("Vertex {} - Vec3Q: ({}, {}, {}) -> Float: ({:.6f}, {:.6f}, {:.6f})", 
                             i, vertex.position.x, vertex.position.y, vertex.position.z,
                             floatPos.x, floatPos.y, floatPos.z);
+                        Logger::get().info("  Color: ({:.3f}, {:.3f}, {:.3f}, {:.3f})",
+                            vertex.color.x, vertex.color.y, vertex.color.z, vertex.color.w);
                     }
                     
+                    // IMPORTANT: Pack data to match Taffy's OverlayVertex structure
+                    // OverlayVertex layout:
+                    // - position at offset 0 (Vec3Q = 24 bytes, stored as 6 floats)
+                    // - normal at offset 24 bytes (3 floats)
+                    // - uv at offset 36 bytes (2 floats) - UV comes BEFORE color!
+                    // - color at offset 44 bytes (4 floats)
+                    // Total: 60 bytes (15 floats)
+                    
+                    // Position as 6 floats to simulate Vec3Q (24 bytes)
                     floatVertexData.push_back(floatPos.x);
                     floatVertexData.push_back(floatPos.y);
                     floatVertexData.push_back(floatPos.z);
-                    floatVertexData.push_back(0.0f); // Padding to align to 16 bytes
+                    floatVertexData.push_back(0.0f); // Padding
+                    floatVertexData.push_back(0.0f); // Padding
+                    floatVertexData.push_back(0.0f); // Padding to make 24 bytes
                     
-                    // Normal (already float)
+                    // Normal (3 floats = 12 bytes, at offset 24)
                     floatVertexData.push_back(vertex.normal.x);
                     floatVertexData.push_back(vertex.normal.y);
                     floatVertexData.push_back(vertex.normal.z);
-                    floatVertexData.push_back(0.0f); // Padding
                     
-                    // Color (already float)
+                    // TexCoord (2 floats = 8 bytes, at offset 36) - BEFORE color!
+                    floatVertexData.push_back(vertex.texCoord.x);
+                    floatVertexData.push_back(vertex.texCoord.y);
+                    
+                    // Color (4 floats = 16 bytes, at offset 44)
                     floatVertexData.push_back(vertex.color.x);
                     floatVertexData.push_back(vertex.color.y);
                     floatVertexData.push_back(vertex.color.z);
                     floatVertexData.push_back(vertex.color.w);
-                    
-                    // TexCoord (already float)
-                    floatVertexData.push_back(vertex.texCoord.x);
-                    floatVertexData.push_back(vertex.texCoord.y);
-                    
-                    // Padding
-                    //floatVertexData.push_back(vertex.padding.x);
-                    //floatVertexData.push_back(vertex.padding.y);
                 }
                 
                 VkDeviceSize vertexSize = floatVertexData.size() * sizeof(float);

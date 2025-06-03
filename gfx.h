@@ -112,8 +112,9 @@ namespace tremor::gfx {
             max = glm::max(max, other.max);
         }
     };
+#pragma pack(push, 1)
 
-    struct alignas(16) AABBQ {
+    struct AABBQ {
         Vec3Q min;
         Vec3Q max;
 
@@ -157,6 +158,9 @@ namespace tremor::gfx {
             max.z = std::max(max.z, point.z);
         }
     };
+
+#pragma pack(pop)
+
 
     // Frustum for culling
     struct Frustum {
