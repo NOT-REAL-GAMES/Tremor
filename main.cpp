@@ -32,6 +32,8 @@
 
 
 #include "main.h"
+#include "audio/taffy_audio_processor.h"
+#include "renderer/taffy_integration.h"
 
 
 template<typename T>
@@ -53,8 +55,10 @@ public:
     char** argv;
 
     SDL_Window* window;
+    SDL_AudioDeviceID audioDevice;
 
     std::unique_ptr<tremor::gfx::RenderBackend> rb;
+    std::unique_ptr<tremor::audio::TaffyAudioProcessor> audioProcessor;
 
     Engine() {
         Logger::get().critical("Engine constructor called!");
@@ -69,7 +73,83 @@ public:
         rb = tremor::gfx::RenderBackend::create(window);
         Logger::get().critical("RenderBackend created: {}", (void*)rb.get());
 
+        // Initialize audio
+        initializeAudio();
+    }
 
+    ~Engine() {
+        if (audioDevice != 0) {
+            SDL_CloseAudioDevice(audioDevice);
+        }
+    }
+
+    void initializeAudio() {
+        Logger::get().info("🎵 Initializing audio system...");
+
+        // Create audio processor
+        audioProcessor = std::make_unique<tremor::audio::TaffyAudioProcessor>(48000);
+
+        // Set up SDL audio specification
+        SDL_AudioSpec desired, obtained;
+        SDL_zero(desired);
+        desired.freq = 48000;
+        desired.format = AUDIO_F32SYS;  // 32-bit float samples
+        desired.channels = 2;           // Stereo
+        desired.samples = 512;          // Buffer size
+        desired.callback = audioCallback;
+        desired.userdata = this;
+
+        audioDevice = SDL_OpenAudioDevice(NULL, 0, &desired, &obtained, 0);
+        if (audioDevice == 0) {
+            Logger::get().error("Failed to open audio device: {}", SDL_GetError());
+            return;
+        }
+
+        Logger::get().info("✅ Audio device opened:");
+        Logger::get().info("   Sample rate: {} Hz", obtained.freq);
+        Logger::get().info("   Channels: {}", obtained.channels);
+        Logger::get().info("   Buffer size: {} samples", obtained.samples);
+
+        // Load a test audio asset
+        loadTestAudioAsset();
+
+        // Start audio playback
+        SDL_PauseAudioDevice(audioDevice, 0);
+    }
+
+    void loadTestAudioAsset() {
+        // Try to load the sine wave audio asset
+        std::string audioPath = "assets/audio/sine_440hz.taf";
+        
+        Taffy::Asset audioAsset;
+        if (audioAsset.load_from_file_safe(audioPath)) {
+            Logger::get().info("✅ Loaded audio asset: {}", audioPath);
+            
+            // Get the audio chunk
+            auto audioData = audioAsset.get_chunk_data(Taffy::ChunkType::AUDI);
+            if (audioData) {
+                if (audioProcessor->loadAudioChunk(*audioData)) {
+                    Logger::get().info("✅ Audio chunk loaded into processor");
+                }
+            } else {
+                Logger::get().error("No AUDI chunk found in asset");
+            }
+        } else {
+            Logger::get().error("Failed to load audio asset: {}", audioPath);
+        }
+    }
+
+    static void audioCallback(void* userdata, Uint8* stream, int len) {
+        Engine* engine = static_cast<Engine*>(userdata);
+        float* outputBuffer = reinterpret_cast<float*>(stream);
+        uint32_t frameCount = len / (sizeof(float) * 2);  // 2 channels
+        
+        if (engine->audioProcessor) {
+            engine->audioProcessor->processAudio(outputBuffer, frameCount, 2);
+        } else {
+            // Silence
+            std::memset(stream, 0, len);
+        }
     }
 
     bool Loop() {

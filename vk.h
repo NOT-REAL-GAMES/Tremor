@@ -779,6 +779,9 @@ namespace tremor::gfx {
         std::unordered_map<std::string, MeshAssetGPUData> gpu_data_cache_;
         std::unordered_map<std::string, PipelineInfo> pipeline_cache_;
         std::unordered_map<std::string, bool> pipeline_rebuild_flags_;
+        
+        // Track which overlays are currently applied to which assets
+        std::unordered_map<std::string, std::string> applied_overlays_;
 
         /**
          * @brief Ensure an asset is loaded and ready for rendering

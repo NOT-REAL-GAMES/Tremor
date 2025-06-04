@@ -9,6 +9,11 @@
 #include "overlay.h"
 #include <iomanip>
 
+// Forward declaration for audio tools
+namespace tremor::taffy::tools {
+    bool createSineWaveAudioAsset(const std::string& output_path, float frequency, float duration);
+}
+
 // Helper function to copy buffer data
 void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
     VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
@@ -195,6 +200,13 @@ namespace tremor::gfx {
         }
 
         void TaffyOverlayManager::loadAssetWithOverlay(const std::string& master_path, const std::string& overlay_path) {
+            // Check if this exact overlay is already applied to this asset
+            auto overlayIt = applied_overlays_.find(master_path);
+            if (overlayIt != applied_overlays_.end() && overlayIt->second == overlay_path) {
+                Logger::get().info("Overlay {} is already applied to {}, skipping redundant load", overlay_path, master_path);
+                return;
+            }
+            
             // First ensure the master asset is loaded
             if (!ensureAssetLoaded(master_path)){
                 Logger::get().critical("Couldn't load asset: {}",master_path);
@@ -255,11 +267,17 @@ namespace tremor::gfx {
             // Mark pipeline for rebuild to use new vertex data
             invalidatePipeline(master_path);
             
+            // Track that this overlay is now applied
+            applied_overlays_[master_path] = overlay_path;
+            
             std::cout << "Successfully applied overlay " << overlay_path << " to " << master_path << std::endl;
         }
 
         void TaffyOverlayManager::reloadAsset(const std::string& asset_path) {
             Logger::get().info("Reloading asset: {}", asset_path);
+            
+            // Clear any overlay tracking since we're reloading from disk
+            applied_overlays_.erase(asset_path);
             
             // Wait for GPU to finish
             vkDeviceWaitIdle(device_);
@@ -292,7 +310,16 @@ namespace tremor::gfx {
         }
 
         void TaffyOverlayManager::clear_overlays(const std::string& master_path) {
+            if(applied_overlays_.empty()){
+                Logger::get().info("Asset {} didn't have any overlays! Skipping clear...",master_path);
+                return;
+            }
+
             Logger::get().info("Clearing overlays for: {}", master_path);
+            
+
+            // Clear the overlay tracking
+            applied_overlays_.erase(master_path);
             
             // Reload the original asset from disk
             Logger::get().info("Reloading original asset from disk: {}", master_path);
@@ -5991,13 +6018,22 @@ namespace tremor::gfx {
          * Create development overlays for testing
          */
         void VulkanBackend::createDevelopmentOverlays() {
-            using namespace tremor::taffy::tools;
-
             std::string overlay_dir = "assets/overlays";
             std::filesystem::create_directories(overlay_dir);
 
             // Create preset overlays for testing
-            std::cout << "✅ Development overlays created!" << std::endl;
+            
+            // Create audio test assets
+            std::string audio_dir = "assets/audio";
+            std::filesystem::create_directories(audio_dir);
+            
+            // Create a simple 440Hz sine wave (A4 note)
+            tremor::taffy::tools::createSineWaveAudioAsset("assets/audio/sine_440hz.taf", 440.0f, 2.0f);
+            
+            // Create a lower frequency sine wave (220Hz, A3)
+            tremor::taffy::tools::createSineWaveAudioAsset("assets/audio/sine_220hz.taf", 220.0f, 2.0f);
+            
+            std::cout << "✅ Development overlays and audio assets created!" << std::endl;
         }
 
         /**

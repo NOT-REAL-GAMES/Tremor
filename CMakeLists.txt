@@ -37,6 +37,7 @@ add_executable(Tremor
     vm_bytecode.cpp
     renderer/taffy_integration.cpp
     renderer/taffy_mesh.cpp
+    audio/taffy_audio_processor.cpp
 )
 
 # Include directories
@@ -44,6 +45,7 @@ target_include_directories(Tremor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/renderer
     ${CMAKE_CURRENT_SOURCE_DIR}/taffy
+    ${CMAKE_CURRENT_SOURCE_DIR}/audio
     ${TAFFY_INCLUDE_DIR}
     ${Vulkan_INCLUDE_DIRS}
     ${asio_SOURCE_DIR}/asio/include
