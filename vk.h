@@ -22,7 +22,7 @@
 #include "quan.h"
 #include "handle.h"
 #include "taffy.h"
-#include "taffy/tools.h"
+#include "tools.h"
 #include "renderer/taffy_mesh.h"
 #include "renderer/taffy_integration.h"
 #include "asset.h"
@@ -82,6 +82,9 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
 namespace tremor::gfx {
 
     using namespace tremor::taffy::tools;
+    
+    // Forward declarations
+    class SDFTextRenderer;
 
     class VulkanDevice {
     public:
@@ -684,7 +687,8 @@ namespace tremor::gfx {
         TaffyOverlayManager(VkDevice device, VkPhysicalDevice physicalDevice,
             VkRenderPass renderPass, VkExtent2D swapchainExtent,
             VkFormat swapchainFormat = VK_FORMAT_B8G8R8A8_SRGB,
-            VkFormat depthFormat = VK_FORMAT_D32_SFLOAT);
+            VkFormat depthFormat = VK_FORMAT_D32_SFLOAT,
+            VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT);
 
         /**
          * @brief Destructor - cleans up all Vulkan resources including pipelines
@@ -771,6 +775,7 @@ namespace tremor::gfx {
         VkExtent2D swapchain_extent_;
         VkFormat swapchain_format_;
         VkFormat depth_format_;
+        VkSampleCountFlagBits sample_count_;
         VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
         VkDescriptorSetLayout meshShaderDescSetLayout = VK_NULL_HANDLE;
 
@@ -2071,7 +2076,7 @@ namespace tremor::gfx {
     public:
         // Constructor/Destructor
         VulkanBackend();
-        ~VulkanBackend() override = default;
+        ~VulkanBackend() override;
 
         bool hot_pink_enabled = true;
         bool reload_assets_requested = false;
@@ -2150,6 +2155,7 @@ namespace tremor::gfx {
         std::unique_ptr<DynamicRenderer> dr;
         std::unique_ptr<ShaderManager> sm;
         std::unique_ptr<RenderPass> rp;
+        std::unique_ptr<SDFTextRenderer> m_textRenderer;
 
         // Camera
         Camera cam;
@@ -2243,6 +2249,13 @@ namespace tremor::gfx {
         std::unique_ptr<ImageViewResource> m_depthImageView;
         VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
 
+        // === MULTISAMPLING (MSAA) ===
+        
+        VkSampleCountFlagBits m_msaaSamples = VK_SAMPLE_COUNT_1_BIT;
+        std::unique_ptr<ImageResource> m_colorImage;
+        std::unique_ptr<DeviceMemoryResource> m_colorImageMemory;
+        std::unique_ptr<ImageViewResource> m_colorImageView;
+
         // === COMMAND BUFFERS AND SYNC ===
 
         static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
@@ -2299,6 +2312,11 @@ namespace tremor::gfx {
         bool createDepthResources();
         bool createRenderPass();
         bool createFramebuffers();
+        
+        // === MULTISAMPLING METHODS ===
+        
+        VkSampleCountFlagBits getMaxUsableSampleCount();
+        bool createColorResources();
 
         // === RESOURCE CREATION METHODS ===
 

@@ -1,0 +1,162 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+
+// Text instance data - one per string to render
+struct TextInstance {
+    vec2 position;      // Screen position
+    float scale;        // Text scale
+    uint firstGlyph;    // Index into glyph buffer
+    uint glyphCount;    // Number of glyphs
+    uint color;         // Packed RGBA color
+    uint flags;         // Rendering flags (outline, shadow, etc.)
+    float pad;          // Padding for alignment
+};
+
+// Glyph data - one per character
+struct GlyphData {
+    uint codepoint;     // Unicode codepoint
+    float x;            // X position offset
+    float y;            // Y position offset
+    float pad;          // Padding
+};
+
+// Font glyph information from the font asset
+struct FontGlyph {
+    vec4 uvRect;        // UV coordinates (x, y, width, height)
+    vec4 metrics;       // width, height, bearingX, bearingY
+    float advance;      // Horizontal advance
+    uint codepoint;     // Unicode codepoint
+    float pad[2];       // Padding
+};
+
+// Mesh shader outputs
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+layout(triangles, max_vertices = 128, max_primitives = 64) out;
+
+// Output to fragment shader
+layout(location = 0) out vec2 fragTexCoord;
+layout(location = 1) out vec4 fragColor;
+
+// Storage buffers
+layout(binding = 0, std430) readonly buffer TextInstanceBuffer {
+    TextInstance instances[];
+} textBuffer;
+
+layout(binding = 1, std430) readonly buffer GlyphDataBuffer {
+    GlyphData glyphs[];
+} glyphBuffer;
+
+layout(binding = 2, std430) readonly buffer FontGlyphBuffer {
+    FontGlyph fontGlyphs[];
+} fontBuffer;
+
+// Uniforms
+layout(binding = 3) uniform UniformBufferObject {
+    mat4 projection;
+    vec2 screenSize;
+    float time;
+    uint fontGlyphCount;
+} ubo;
+
+// Workgroup shared data
+shared vec2 sharedPositions[128];
+shared vec2 sharedUVs[128];
+shared vec4 sharedColors[128];
+
+// Find font glyph by codepoint
+uint findFontGlyph(uint codepoint) {
+    // Simple linear search for now
+    // In production, this would be a binary search or hash map
+    for (uint i = 0; i < ubo.fontGlyphCount; i++) {
+        if (fontBuffer.fontGlyphs[i].codepoint == codepoint) {
+            return i;
+        }
+    }
+    return 0; // Return default glyph
+}
+
+void main() {
+    uint workgroupID = gl_WorkGroupID.x;
+    uint localID = gl_LocalInvocationID.x;
+    
+    // Check if this workgroup handles a valid text instance
+    if (workgroupID >= textBuffer.instances.length()) {
+        return;
+    }
+    
+    TextInstance instance = textBuffer.instances[workgroupID];
+    
+    // Each thread handles one glyph
+    if (localID < instance.glyphCount) {
+        uint glyphIndex = instance.firstGlyph + localID;
+        GlyphData glyph = glyphBuffer.glyphs[glyphIndex];
+        
+        // Find font glyph info
+        uint fontGlyphIndex = findFontGlyph(glyph.codepoint);
+        FontGlyph fontGlyph = fontBuffer.fontGlyphs[fontGlyphIndex];
+        
+        // Calculate glyph position
+        vec2 glyphPos = instance.position + vec2(glyph.x, glyph.y) * instance.scale;
+        vec2 glyphSize = fontGlyph.metrics.xy * instance.scale;
+        
+        // Generate 4 vertices for this glyph (stored as 2 triangles)
+        uint vertexBase = localID * 4;
+        
+        // Top-left
+        sharedPositions[vertexBase + 0] = glyphPos + vec2(0, 0);
+        sharedUVs[vertexBase + 0] = fontGlyph.uvRect.xy;
+        
+        // Top-right
+        sharedPositions[vertexBase + 1] = glyphPos + vec2(glyphSize.x, 0);
+        sharedUVs[vertexBase + 1] = fontGlyph.uvRect.xy + vec2(fontGlyph.uvRect.z, 0);
+        
+        // Bottom-left
+        sharedPositions[vertexBase + 2] = glyphPos + vec2(0, glyphSize.y);
+        sharedUVs[vertexBase + 2] = fontGlyph.uvRect.xy + vec2(0, fontGlyph.uvRect.w);
+        
+        // Bottom-right
+        sharedPositions[vertexBase + 3] = glyphPos + vec2(glyphSize.x, glyphSize.y);
+        sharedUVs[vertexBase + 3] = fontGlyph.uvRect.xy + fontGlyph.uvRect.zw;
+        
+        // Unpack color
+        vec4 color;
+        color.r = float((instance.color >> 24) & 0xFF) / 255.0;
+        color.g = float((instance.color >> 16) & 0xFF) / 255.0;
+        color.b = float((instance.color >> 8) & 0xFF) / 255.0;
+        color.a = float(instance.color & 0xFF) / 255.0;
+        
+        sharedColors[vertexBase + 0] = color;
+        sharedColors[vertexBase + 1] = color;
+        sharedColors[vertexBase + 2] = color;
+        sharedColors[vertexBase + 3] = color;
+    }
+    
+    barrier();
+    
+    // Thread 0 outputs all triangles
+    if (localID == 0) {
+        uint totalVertices = min(instance.glyphCount * 4, 128);
+        uint totalTriangles = instance.glyphCount * 2;
+        
+        SetMeshOutputsEXT(totalVertices, totalTriangles);
+        
+        // Output vertices
+        for (uint v = 0; v < totalVertices; v++) {
+            gl_MeshVerticesEXT[v].gl_Position = ubo.projection * vec4(sharedPositions[v], 0.0, 1.0);
+            fragTexCoord = sharedUVs[v];
+            fragColor = sharedColors[v];
+        }
+        
+        // Output triangles (2 per glyph)
+        for (uint g = 0; g < instance.glyphCount; g++) {
+            uint base = g * 4;
+            uint triBase = g * 2;
+            
+            // First triangle
+            gl_PrimitiveTriangleIndicesEXT[triBase] = uvec3(base, base + 1, base + 2);
+            
+            // Second triangle
+            gl_PrimitiveTriangleIndicesEXT[triBase + 1] = uvec3(base + 1, base + 3, base + 2);
+        }
+    }
+}

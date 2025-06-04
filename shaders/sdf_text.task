@@ -1,0 +1,28 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+// Task shader payload
+struct TaskPayload {
+    uint textInstanceCount;
+};
+
+taskPayloadSharedEXT TaskPayload payload;
+
+// Text instance count from push constants
+layout(push_constant) uniform PushConstants {
+    uint instanceCount;
+} pc;
+
+void main() {
+    // Only thread 0 does the work
+    if (gl_LocalInvocationID.x == 0) {
+        // Each mesh shader workgroup handles one text instance
+        uint meshWorkgroups = min(pc.instanceCount, 65535);
+        payload.textInstanceCount = meshWorkgroups;
+        
+        // Dispatch mesh shader workgroups
+        EmitMeshTasksEXT(meshWorkgroups, 1, 1);
+    }
+}

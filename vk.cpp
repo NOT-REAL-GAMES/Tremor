@@ -4,15 +4,12 @@
 #include "vk.h"
 #include "quan.h"
 #include "renderer/taffy_integration.h"
-#include "taffy/tools.h"
+#include "renderer/sdf_text_renderer.h"
+#include "tools.h"
 #include "asset.h"
 #include "overlay.h"
+#include "taffy_font_tools.h"
 #include <iomanip>
-
-// Forward declaration for audio tools
-namespace tremor::taffy::tools {
-    bool createSineWaveAudioAsset(const std::string& output_path, float frequency, float duration);
-}
 
 // Helper function to copy buffer data
 void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
@@ -104,6 +101,11 @@ namespace tremor::gfx {
         }
     }
 
+    VulkanBackend::~VulkanBackend() {
+        // Destructor implementation - needed because of forward declaration of SDFTextRenderer
+        // The default destructor is fine, but it needs to be in the .cpp file
+    }
+
     // Helper function to create descriptor set layout for mesh shaders
     VkDescriptorSetLayout createMeshShaderDescriptorSetLayout(VkDevice device) {
         std::vector<VkDescriptorSetLayoutBinding> bindings;
@@ -145,10 +147,10 @@ namespace tremor::gfx {
     
         TaffyOverlayManager::TaffyOverlayManager(VkDevice device, VkPhysicalDevice physicalDevice,
             VkRenderPass renderPass, VkExtent2D swapchainExtent,
-            VkFormat swapchainFormat, VkFormat depthFormat)
+            VkFormat swapchainFormat, VkFormat depthFormat, VkSampleCountFlagBits sampleCount)
             : device_(device), physical_device_(physicalDevice),
             render_pass_(renderPass), swapchain_extent_(swapchainExtent),
-            swapchain_format_(swapchainFormat), depth_format_(depthFormat) {
+            swapchain_format_(swapchainFormat), depth_format_(depthFormat), sample_count_(sampleCount) {
 
             // Initialize descriptor pool and layouts for mesh shader rendering
             initializeDescriptorResources();
@@ -564,7 +566,7 @@ namespace tremor::gfx {
             VkPipelineMultisampleStateCreateInfo multisampling{};
             multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
             multisampling.sampleShadingEnable = VK_FALSE;
-            multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            multisampling.rasterizationSamples = sample_count_;
 
             // Depth testing
             VkPipelineDepthStencilStateCreateInfo depthStencil{};
@@ -5713,7 +5715,7 @@ namespace tremor::gfx {
             imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
             imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+            imageInfo.samples = m_msaaSamples;
 
             // Create the image with RAII wrapper
             m_depthImage = std::make_unique<ImageResource>(device);
@@ -5784,6 +5786,86 @@ namespace tremor::gfx {
             }
 
             throw std::runtime_error("Failed to find supported depth format");
+        }
+
+        VkSampleCountFlagBits VulkanBackend::getMaxUsableSampleCount() {
+            VkPhysicalDeviceProperties physicalDeviceProperties;
+            vkGetPhysicalDeviceProperties(physicalDevice, &physicalDeviceProperties);
+
+            VkSampleCountFlags counts = physicalDeviceProperties.limits.framebufferColorSampleCounts & 
+                                       physicalDeviceProperties.limits.framebufferDepthSampleCounts;
+            
+            // Try to use 4x MSAA for good quality without too much performance impact
+            if (counts & VK_SAMPLE_COUNT_4_BIT) { return VK_SAMPLE_COUNT_4_BIT; }
+            if (counts & VK_SAMPLE_COUNT_2_BIT) { return VK_SAMPLE_COUNT_2_BIT; }
+            return VK_SAMPLE_COUNT_1_BIT;
+        }
+
+        bool VulkanBackend::createColorResources() {
+            VkExtent2D swapChainExtent = vkSwapchain->extent();
+
+            // Create multisampled color image
+            VkImageCreateInfo imageInfo{};
+            imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            imageInfo.imageType = VK_IMAGE_TYPE_2D;
+            imageInfo.extent.width = swapChainExtent.width;
+            imageInfo.extent.height = swapChainExtent.height;
+            imageInfo.extent.depth = 1;
+            imageInfo.mipLevels = 1;
+            imageInfo.arrayLayers = 1;
+            imageInfo.format = vkSwapchain->imageFormat();
+            imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            imageInfo.usage = VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            imageInfo.samples = m_msaaSamples;
+            imageInfo.flags = 0;
+
+            m_colorImage = std::make_unique<ImageResource>(device);
+            if (vkCreateImage(device, &imageInfo, nullptr, &m_colorImage->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to create color image for MSAA");
+                return false;
+            }
+
+            // Allocate memory
+            VkMemoryRequirements memRequirements;
+            vkGetImageMemoryRequirements(device, *m_colorImage, &memRequirements);
+
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memRequirements.size;
+            allocInfo.memoryTypeIndex = res->findMemoryType(memRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+            m_colorImageMemory = std::make_unique<DeviceMemoryResource>(device);
+            if (vkAllocateMemory(device, &allocInfo, nullptr, &m_colorImageMemory->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to allocate color image memory");
+                return false;
+            }
+
+            vkBindImageMemory(device, *m_colorImage, *m_colorImageMemory, 0);
+
+            // Create image view
+            VkImageViewCreateInfo viewInfo{};
+            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewInfo.image = *m_colorImage;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = vkSwapchain->imageFormat();
+            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewInfo.subresourceRange.baseMipLevel = 0;
+            viewInfo.subresourceRange.levelCount = 1;
+            viewInfo.subresourceRange.baseArrayLayer = 0;
+            viewInfo.subresourceRange.layerCount = 1;
+
+            m_colorImageView = std::make_unique<ImageViewResource>(device);
+            if (vkCreateImageView(device, &viewInfo, nullptr, &m_colorImageView->handle()) != VK_SUCCESS) {
+                Logger::get().error("Failed to create color image view");
+                return false;
+            }
+
+            Logger::get().info("MSAA color resources created successfully ({}x MSAA)", 
+                              static_cast<uint32_t>(m_msaaSamples));
+            return true;
         }
 
 
@@ -5864,11 +5946,26 @@ namespace tremor::gfx {
 
                 // Configure color attachment
                 DynamicRenderer::ColorAttachment colorAttachment{};
-                colorAttachment.imageView = vkSwapchain.get()->imageViews()[imageIndex];
-                colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-                colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-                colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-                colorAttachment.clearValue.color = { {0.0f, 0.0f, 0.2f, 1.0f} };  // Dark blue
+                if (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT && m_colorImageView) {
+                    // Use MSAA color attachment
+                    colorAttachment.imageView = *m_colorImageView;
+                    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                    colorAttachment.clearValue.color = { {0.0f, 0.0f, 0.2f, 1.0f} };  // Dark blue
+                    
+                    // Add resolve attachment for MSAA
+                    colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+                    colorAttachment.resolveImageView = vkSwapchain.get()->imageViews()[imageIndex];
+                    colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                } else {
+                    // Non-MSAA path
+                    colorAttachment.imageView = vkSwapchain.get()->imageViews()[imageIndex];
+                    colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                    colorAttachment.clearValue.color = { {0.0f, 0.0f, 0.2f, 1.0f} };  // Dark blue
+                }
 
                 // Add to the renderingInfo
                 renderingInfo.colorAttachments.push_back(colorAttachment);
@@ -5997,6 +6094,16 @@ namespace tremor::gfx {
 			// Test the fixed triangle instead
 			m_overlayManager->renderMeshAsset("assets/fixed_triangle.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
 
+			// Render text overlay
+			if (m_textRenderer) {
+				// Create orthographic projection for UI
+				float width = static_cast<float>(vkSwapchain->extent().width);
+				float height = static_cast<float>(vkSwapchain->extent().height);
+				glm::mat4 orthoProjection = glm::orthoZO(0.0f, width, 0.0f, height, -10.0f, 1.0f);
+				
+
+				m_textRenderer->render(m_commandBuffers[currentFrame], orthoProjection);
+			}
 
         }
 
@@ -6033,7 +6140,13 @@ namespace tremor::gfx {
             // Create a lower frequency sine wave (220Hz, A3)
             tremor::taffy::tools::createSineWaveAudioAsset("assets/audio/sine_220hz.taf", 220.0f, 2.0f);
             
-            std::cout << "✅ Development overlays and audio assets created!" << std::endl;
+            // Create font test assets
+            std::string font_dir = "assets/fonts";
+            std::filesystem::create_directories(font_dir);
+            
+            // Create test SDF font using Bebas Neue
+            
+            std::cout << "✅ Development overlays, audio assets, and fonts created!" << std::endl;
         }
 
         /**
@@ -6224,8 +6337,14 @@ namespace tremor::gfx {
             createCommandPool();
             createCommandBuffers();
 
+            // Initialize MSAA
+            m_msaaSamples = getMaxUsableSampleCount();
+            Logger::get().info("Using {}x MSAA", static_cast<uint32_t>(m_msaaSamples));
 
             createDepthResources();
+            if (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT) {
+                createColorResources();
+            }
             createUniformBuffer();
             createLightBuffer();
             createMaterialBuffer();
@@ -6285,7 +6404,8 @@ namespace tremor::gfx {
                 vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,  // Use null for dynamic rendering
                 vkSwapchain->extent(),
                 vkSwapchain->imageFormat(),
-                vkDevice->depthFormat()
+                vkDevice->depthFormat(),
+                m_msaaSamples
             );
 
             m_clusteredRenderer = std::make_unique<tremor::gfx::VulkanClusteredRenderer>(
@@ -6302,8 +6422,36 @@ namespace tremor::gfx {
                 return false;
             }
 
+            // Initialize text renderer
+            m_textRenderer = std::make_unique<tremor::gfx::SDFTextRenderer>(
+                device, physicalDevice, m_commandPool->handle(), graphicsQueue);
+            if (!m_textRenderer->initialize(
+                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
+                vkSwapchain->imageFormat(),
+                m_msaaSamples)) {
+                Logger::get().error("Failed to initialize SDF text renderer");
+                // Continue anyway - text rendering is optional
+            }
+
             createDevelopmentOverlays();
             // loadTestAssetWithOverlays(); // Commented out - creating test triangle interferes with proper_triangle.taf
+
+            // Load test font
+            if (m_textRenderer) {
+                m_textRenderer->loadFont("assets/fonts/test_font.taf");
+                
+                // Add some test text
+                tremor::gfx::TextInstance testText;
+                
+                testText.position = glm::vec2(24, 24);
+                testText.color = 0xFF0050FF; // Hot Pink (RGBA)
+                testText.text = "NOT REAL GAMES";
+                testText.scale = 0.4f;
+                testText.font_spacing = 0.95f;
+                testText.flags = 0;
+
+                m_textRenderer->addText(testText);
+            }
 
             initializeOverlaySystem();
             initializeOverlayWorkflow();
