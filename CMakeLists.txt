@@ -1,6 +1,29 @@
 cmake_minimum_required(VERSION 3.16)
 project(Tremor VERSION 0.1.0 LANGUAGES C CXX)
 
+# Set C++ standard
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS ON)
+
+# Set C standard
+set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# Add custom module path for finding packages
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
+
+# Option to build shared libraries
+option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
+
+# Add Taffy as a subdirectory if it exists
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../Taffy/CMakeLists.txt")
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../Taffy ${CMAKE_CURRENT_BINARY_DIR}/Taffy)
+    set(TAFFY_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../Taffy/include)
+else()
+    message(FATAL_ERROR "Taffy library not found. Please ensure Taffy is in the parent directory.")
+endif()
+
 # Find required packages
 find_package(Vulkan QUIET)
 if(NOT Vulkan_FOUND)
@@ -20,6 +43,7 @@ if(NOT glm_FOUND)
     message(STATUS "GLM not found via find_package, using system headers")
 endif()
 
+# Fetch ASIO
 include(FetchContent)
 FetchContent_Declare(
     asio
@@ -155,5 +179,33 @@ if(COMPILE_SHADERS)
         endforeach()
     else()
         message(WARNING "glslc not found, shaders will not be compiled")
+    endif()
+endif()
+
+# Windows-specific: Copy SDL2.dll to output directory
+if(WIN32)
+    # Try to find SDL2.dll
+    get_target_property(SDL2_DLL_DIR SDL2::SDL2 INTERFACE_LINK_DIRECTORIES)
+    find_file(SDL2_DLL 
+        NAMES SDL2.dll
+        HINTS 
+            ${SDL2_DLL_DIR}
+            $ENV{SDL2_DIR}/lib/x64
+            $ENV{SDL2_PATH}/lib/x64
+            $ENV{VULKAN_SDK}/Third-Party/Bin
+            $ENV{VULKAN_SDK}/Bin
+            $ENV{VULKAN_SDK}/Bin32
+        PATH_SUFFIXES bin x64 x86
+    )
+    
+    if(SDL2_DLL)
+        add_custom_command(TARGET Tremor POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${SDL2_DLL}
+            $<TARGET_FILE_DIR:Tremor>
+        )
+        message(STATUS "SDL2.dll will be copied from: ${SDL2_DLL}")
+    else()
+        message(WARNING "SDL2.dll not found. You may need to copy it manually to the executable directory.")
     endif()
 endif()
