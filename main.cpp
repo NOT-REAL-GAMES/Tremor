@@ -22,10 +22,15 @@
 // OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
 // IN THE SOFTWARE.
 
-// This file is part of Tremor: a game engine built on a 
-// rewrite of the Quake Engine as a foundation. The original 
-// Quake Engine is licensed under the GPLv2 license. 
+// This file is part of Tremor: a game engine built on a """rewrite/
+// reconceptualization""" of the Quake Engine as a foundation. Think 
+// "Ship of Theseus", but the ship is made into a cool yacht that's 
+// got a wood veneer that kind of reminds you of the original? I'm 
+// coining that concept because I think it's funny.
 
+// The original Quake Engine is licensed under the GPLv2 license. 
+// Parts of its code have been used as inspiration for Tremor, much
+// less copied directly, for the sake of modernization and legality.
 // The Tremor project is not affiliated with or endorsed by id Software.
 // idTech 2's dependencies on Quake will be gradually phased out of the Tremor project. 
 
@@ -34,6 +39,7 @@
 #include "main.h"
 #include "audio/taffy_audio_processor.h"
 #include "renderer/taffy_integration.h"
+#include "../Taffy/include/taffy_audio_tools.h"
 #include <filesystem>
 #include <cstring>
 #include <cmath>
@@ -246,14 +252,14 @@ public:
     }
 
     void switchWaveform(int waveform) {
-        if (waveform >= 0 && waveform <= 19 && waveform != currentWaveform) {
+        if (waveform >= 0 && waveform <= 20 && waveform != currentWaveform) {
             currentWaveform = waveform;
             const char* waveform_names[] = {
                 "Sine", "Square", "Saw", "Triangle", "Noise", "Mixer Demo", "ADSR Demo", 
                 "Lowpass Filter", "Highpass Filter", "Bandpass Filter",
                 "Hard Clip Distortion", "Soft Clip Distortion", "Foldback Distortion",
                 "Bit Crush Distortion", "Overdrive Distortion", "ZX Spectrum Beeper",
-                "Imported Sample", "Kick Drum", "Hi-Hat", "Pad Loop"
+                "Imported Sample", "Kick Drum", "Hi-Hat", "Pad Loop", "Bit-Crushed Import"
             };
             Logger::get().info("🎵 Switching to {}", waveform_names[waveform]);
             
@@ -290,7 +296,8 @@ public:
             "assets/audio/imported_sample.taf",
             "assets/audio/kick_drum.taf",
             "assets/audio/hihat.taf",
-            "assets/audio/pad_loop.taf"
+            "assets/audio/pad_loop.taf",
+            "assets/audio/imported_bitcrushed.taf"
         };
         
         // Use current waveform selection
@@ -315,8 +322,8 @@ public:
                     Logger::get().info("✅ Audio chunk loaded into processor");
                     Logger::get().info("🎵 Playing waveform type {}", waveform_index);
                     
-                    // For sample-based assets (16-19), trigger the gate parameter
-                    if (waveform_index >= 16 && waveform_index <= 19) {
+                    // For sample-based assets (16-20), trigger the gate parameter
+                    if (waveform_index >= 16 && waveform_index <= 20) {
                         // Set gate parameter to 1 to trigger sample playback
                         uint64_t gateHash = Taffy::fnv1a_hash("gate");
                         audioProcessor->setParameter(gateHash, 1.0f);
@@ -419,6 +426,28 @@ public:
                             Logger::get().info("   🎚️ 4-bit quantization for maximum crunch!");
                             Logger::get().info("   🎵 Your audio will sound gloriously lo-fi!");
                         }
+                        break;
+                    case SDLK_j:
+                        // Load bit crusher distortion demo (which has the effect in the TAF)
+                        Logger::get().info("🎵 Loading bit crusher distortion demo (TAF with embedded effect)");
+                        switchWaveform(13); // Bit crusher distortion
+                        break;
+                    case SDLK_k:
+                        // Create bit-crushed version of imported sample
+                        Logger::get().info("🎵 Creating bit-crushed version of imported sample...");
+                        {
+                            // Call the function from taffy_audio_tools
+                            if (tremor::taffy::tools::createBitcrushedImportAsset("assets/audio/imported_bitcrushed.taf")) {
+                                Logger::get().info("✅ Bit-crushed TAF created! Press 'L' to play it");
+                            } else {
+                                Logger::get().error("❌ Failed to create bit-crushed TAF");
+                            }
+                        }
+                        break;
+                    case SDLK_l:
+                        // Load the bit-crushed import if it exists
+                        Logger::get().info("🎵 Loading bit-crushed imported sample...");
+                        switchWaveform(20); // Use switchWaveform to ensure proper loading
                         break;
                 }
             }

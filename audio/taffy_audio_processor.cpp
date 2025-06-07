@@ -1092,7 +1092,7 @@ namespace tremor::audio {
                     {
                         float bits = 3.0f; // Crush to 4 bits
                         float levels = std::pow(2.0f, bits);
-                        wet = std::round(driven * levels) / levels;
+                        wet = std::round(std::round(driven) * levels) / levels;
                     }
                     break;
                     
