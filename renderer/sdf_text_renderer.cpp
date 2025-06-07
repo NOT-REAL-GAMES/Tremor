@@ -934,7 +934,7 @@ namespace tremor::gfx {
         // Copy vertex data
         if (!vertices.empty()) {
             // Log first few vertices for debugging
-            if (vertices.size() >= 6) {
+            /*if (vertices.size() >= 6) {
                 Logger::get().info("First quad vertices:");
                 for (int i = 0; i < 6 && i < vertices.size(); i++) {
                     Logger::get().info("  V{}: pos({:.1f}, {:.1f}) uv({:.3f}, {:.3f}) color({:.2f}, {:.2f}, {:.2f}, {:.2f})", 
@@ -942,7 +942,7 @@ namespace tremor::gfx {
                                       vertices[i].uv.x, vertices[i].uv.y,
                                       vertices[i].color.r, vertices[i].color.g, vertices[i].color.b, vertices[i].color.a);
                 }
-            }
+            }*/
             
             void* data;
             vkMapMemory(device_, vertexBufferMemory_, 0, requiredSize, 0, &data);
@@ -952,14 +952,14 @@ namespace tremor::gfx {
     }
 
     void SDFTextRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& projection) {
-        Logger::get().info("SDFTextRenderer::render called");
-        Logger::get().info("  Text instances: {}", textInstances_.size());
-        Logger::get().info("  Current font: {}", currentFont_ ? "YES" : "NO");
-        Logger::get().info("  Pipeline: {}", pipeline_ != VK_NULL_HANDLE ? "VALID" : "NULL");
-        Logger::get().info("  Descriptor set: {}", descriptorSet_ != VK_NULL_HANDLE ? "VALID" : "NULL");
+        //Logger::get().info("SDFTextRenderer::render called");
+        //Logger::get().info("  Text instances: {}", textInstances_.size());
+        //Logger::get().info("  Current font: {}", currentFont_ ? "YES" : "NO");
+        //Logger::get().info("  Pipeline: {}", pipeline_ != VK_NULL_HANDLE ? "VALID" : "NULL");
+        //Logger::get().info("  Descriptor set: {}", descriptorSet_ != VK_NULL_HANDLE ? "VALID" : "NULL");
         
         if (textInstances_.empty() || !currentFont_ || pipeline_ == VK_NULL_HANDLE || descriptorSet_ == VK_NULL_HANDLE) {
-            Logger::get().info("Early return from render - missing resources");
+            //Logger::get().info("Early return from render - missing resources");
             return;
         }
         
@@ -968,8 +968,8 @@ namespace tremor::gfx {
         
         // Log first few vertex positions for debugging
         if (vertexBuffer_ != VK_NULL_HANDLE && textInstances_.size() > 0) {
-            Logger::get().info("First text instance position: ({}, {})", 
-                              textInstances_[0].position.x, textInstances_[0].position.y);
+            //Logger::get().info("First text instance position: ({}, {})", 
+             //                 textInstances_[0].position.x, textInstances_[0].position.y);
         }
         
         // Update uniform buffer with projection matrix
@@ -995,7 +995,7 @@ namespace tremor::gfx {
         viewport.maxDepth = 1.0f;
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
         
-        Logger::get().info("Viewport set: {}x{}", viewport.width, viewport.height);
+        //Logger::get().info("Viewport set: {}x{}", viewport.width, viewport.height);
         
         // Set scissor
         VkRect2D scissor{};
@@ -1031,7 +1031,7 @@ namespace tremor::gfx {
         // Draw
         vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
         
-        Logger::get().info("Rendered {} text instances ({} vertices)", textInstances_.size(), vertexCount);
+        //Logger::get().info("Rendered {} text instances ({} vertices)", textInstances_.size(), vertexCount);
     }
 
     glm::vec2 SDFTextRenderer::measureText(const std::string& text, float scale) {

@@ -576,8 +576,8 @@ namespace tremor::gfx {
 
         m_viewDirty = true;
 
-        Logger::get().info("lookAt: pos={},{},{}, target={},{},{}",
-            pos.x, pos.y, pos.z, target.x, target.y, target.z);
+        /*Logger::get().info("lookAt: pos={},{},{}, target={},{},{}",
+            pos.x, pos.y, pos.z, target.x, target.y, target.z);*/
     }
 
     inline void Camera::lookAt(const WorldPosition& target, const glm::vec3& up) {

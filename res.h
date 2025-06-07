@@ -284,7 +284,6 @@ template<> inline void VulkanResource<VkSampler>::destroy(VkDevice device, VkSam
 }
 
 template<> inline void VulkanResource<VkSwapchainKHR>::destroy(VkDevice device, VkSwapchainKHR handle) {
-    vkDestroySwapchainKHR(device, handle, nullptr);
 }
 
 template<> inline void VulkanResource<VkCommandPool>::destroy(VkDevice device, VkCommandPool handle) {

@@ -9,6 +9,7 @@
 #include "asset.h"
 #include "overlay.h"
 #include "taffy_font_tools.h"
+#include "taffy_audio_tools.h"
 #include <iomanip>
 
 // Helper function to copy buffer data
@@ -25,7 +26,7 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
         VkCommandBuffer commandBuffer;
         VkResult result = vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
         if (result != VK_SUCCESS) {
-            Logger::get().error("Failed to allocate transfer command buffer: {}", (int)result);
+            //Logger::get().error("Failed to allocate transfer command buffer: {}", (int)result);
             return;
         }
 
@@ -36,7 +37,7 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
 
         result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
         if (result != VK_SUCCESS) {
-            Logger::get().error("Failed to begin command buffer: {}", (int)result);
+            //Logger::get().error("Failed to begin command buffer: {}", (int)result);
             vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
             return;
         }
@@ -51,7 +52,7 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
         // End recording
         result = vkEndCommandBuffer(commandBuffer);
         if (result != VK_SUCCESS) {
-            Logger::get().error("Failed to end command buffer: {}", (int)result);
+            //Logger::get().error("Failed to end command buffer: {}", (int)result);
             vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
             return;
         }
@@ -64,7 +65,7 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
 
         result = vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
         if (result != VK_SUCCESS) {
-            Logger::get().error("Failed to submit transfer command buffer: {}", (int)result);
+            //Logger::get().error("Failed to submit transfer command buffer: {}", (int)result);
             vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
             return;
         }
@@ -72,16 +73,16 @@ void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
         // Wait for the transfer to complete
         result = vkQueueWaitIdle(queue);
         if (result != VK_SUCCESS) {
-            Logger::get().error("Failed to wait for queue idle: {}", (int)result);
+            //Logger::get().error("Failed to wait for queue idle: {}", (int)result);
         }
 
         // Free the temporary command buffer
         vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 
-        Logger::get().info("Buffer copy completed successfully: {} bytes", size);
+        //Logger::get().info("Buffer copy completed successfully: {} bytes", size);
     }
     catch (const std::exception& e) {
-        Logger::get().error("Exception during buffer copy: {}", e.what());
+        //Logger::get().error("Exception during buffer copy: {}", e.what());
     }
 }
 
@@ -91,13 +92,13 @@ namespace tremor::gfx {
     VulkanBackend::VulkanBackend() {
         static int instanceCount = 0;
         instanceCount++;
-        Logger::get().critical("VulkanBackend CONSTRUCTOR called!");
-        Logger::get().critical("  This is instance #{}", instanceCount);
-        Logger::get().critical("  VulkanBackend this pointer: {}", (void*)this);
+        //Logger::get().critical("VulkanBackend CONSTRUCTOR called!");
+        //Logger::get().critical("  This is instance #{}", instanceCount);
+        //Logger::get().critical("  VulkanBackend this pointer: {}", (void*)this);
         
         if (instanceCount > 1) {
-            Logger::get().critical("WARNING: Multiple VulkanBackend instances created!");
-            Logger::get().critical("Stack trace would be helpful here...");
+            //Logger::get().critical("WARNING: Multiple VulkanBackend instances created!");
+            //Logger::get().critical("Stack trace would be helpful here...");
         }
     }
 
@@ -205,13 +206,13 @@ namespace tremor::gfx {
             // Check if this exact overlay is already applied to this asset
             auto overlayIt = applied_overlays_.find(master_path);
             if (overlayIt != applied_overlays_.end() && overlayIt->second == overlay_path) {
-                Logger::get().info("Overlay {} is already applied to {}, skipping redundant load", overlay_path, master_path);
+                //Logger::get().info("Overlay {} is already applied to {}, skipping redundant load", overlay_path, master_path);
                 return;
             }
             
             // First ensure the master asset is loaded
             if (!ensureAssetLoaded(master_path)){
-                Logger::get().critical("Couldn't load asset: {}",master_path);
+                //Logger::get().critical("Couldn't load asset: {}",master_path);
                 return;
             }
             
@@ -232,12 +233,12 @@ namespace tremor::gfx {
                 return;
             }
             
-            Logger::get().info("Overlay applied to working copy of {}", master_path);
-            Logger::get().info("Original asset remains unchanged");
+            //Logger::get().info("Overlay applied to working copy of {}", master_path);
+            //Logger::get().info("Original asset remains unchanged");
             
             // IMPORTANT: Replace the loaded asset with the working copy so pipeline creation uses it
             loaded_assets_[master_path] = std::move(working_copy);
-            Logger::get().info("Working copy is now the active asset for {}", master_path);
+            //Logger::get().info("Working copy is now the active asset for {}", master_path);
             
             // Re-upload the modified asset to GPU
             MeshAssetGPUData gpuData = uploadTaffyAsset(*loaded_assets_[master_path]);
@@ -276,7 +277,7 @@ namespace tremor::gfx {
         }
 
         void TaffyOverlayManager::reloadAsset(const std::string& asset_path) {
-            Logger::get().info("Reloading asset: {}", asset_path);
+            //Logger::get().info("Reloading asset: {}", asset_path);
             
             // Clear any overlay tracking since we're reloading from disk
             applied_overlays_.erase(asset_path);
@@ -304,27 +305,27 @@ namespace tremor::gfx {
             
             // Reload the asset
             if (!ensureAssetLoaded(asset_path)) {
-                Logger::get().error("Failed to reload asset: {}", asset_path);
+                //Logger::get().error("Failed to reload asset: {}", asset_path);
                 return;
             }
             
-            Logger::get().info("Asset reloaded successfully");
+            //Logger::get().info("Asset reloaded successfully");
         }
 
         void TaffyOverlayManager::clear_overlays(const std::string& master_path) {
             if(applied_overlays_.empty()){
-                Logger::get().info("Asset {} didn't have any overlays! Skipping clear...",master_path);
+                //Logger::get().info("Asset {} didn't have any overlays! Skipping clear...",master_path);
                 return;
             }
 
-            Logger::get().info("Clearing overlays for: {}", master_path);
+            //Logger::get().info("Clearing overlays for: {}", master_path);
             
 
             // Clear the overlay tracking
             applied_overlays_.erase(master_path);
             
             // Reload the original asset from disk
-            Logger::get().info("Reloading original asset from disk: {}", master_path);
+            //Logger::get().info("Reloading original asset from disk: {}", master_path);
             
             // Remove current (possibly modified) asset
             auto assetIt = loaded_assets_.find(master_path);
@@ -334,14 +335,14 @@ namespace tremor::gfx {
             
             // Force reload from disk
             if (!ensureAssetLoaded(master_path)) {
-                Logger::get().error("Failed to reload original asset: {}", master_path);
+                //Logger::get().error("Failed to reload original asset: {}", master_path);
                 return;
             }
             
             // Re-upload the fresh asset to GPU
             MeshAssetGPUData gpuData = uploadTaffyAsset(*loaded_assets_[master_path]);
             if (!gpuData.vertexStorageBuffer) {
-                Logger::get().error("Failed to re-upload original asset to GPU: {}", master_path);
+                //Logger::get().error("Failed to re-upload original asset to GPU: {}", master_path);
                 return;
             }
             
@@ -364,7 +365,7 @@ namespace tremor::gfx {
             // Update the GPU data cache with the fresh upload of the original
             gpu_data_cache_[master_path] = gpuData;
             
-            Logger::get().info("Overlays cleared - original asset restored");
+            //Logger::get().info("Overlays cleared - original asset restored");
             invalidatePipeline(master_path);
 
             return;
@@ -390,7 +391,7 @@ namespace tremor::gfx {
             // Invalidate pipeline to ensure it uses the original data
             invalidatePipeline(master_path);
             
-            Logger::get().info("Overlays cleared - restored original asset");
+            //Logger::get().info("Overlays cleared - restored original asset");
             */
         }
 
@@ -412,13 +413,13 @@ namespace tremor::gfx {
         bool TaffyOverlayManager::ensureAssetLoaded(const std::string& asset_path) {
             // Check if already loaded
             if (loaded_assets_.find(asset_path) != loaded_assets_.end()) {
-                Logger::get().info("Asset already loaded: {}", asset_path);
-                Logger::get().info("  TaffyOverlayManager instance: {}", (void*)this);
+                //Logger::get().info("Asset already loaded: {}", asset_path);
+                //Logger::get().info("  TaffyOverlayManager instance: {}", (void*)this);
                 return true;
             }
             
-            Logger::get().info("Loading new asset: {}", asset_path);
-            Logger::get().info("  TaffyOverlayManager instance: {}", (void*)this);
+            //Logger::get().info("Loading new asset: {}", asset_path);
+            //Logger::get().info("  TaffyOverlayManager instance: {}", (void*)this);
 
             // Load the asset
             auto asset = std::make_unique<Taffy::Asset>();
@@ -440,10 +441,10 @@ namespace tremor::gfx {
             loaded_assets_[asset_path] = std::move(asset);
             gpu_data_cache_[asset_path] = gpuData;
             
-            Logger::get().info("Asset loaded and cached: {}", asset_path);
-            Logger::get().info("  Loaded assets count: {}", loaded_assets_.size());
-            Logger::get().info("  GPU data cache count: {}", gpu_data_cache_.size());
-            Logger::get().info("  Vertex storage buffer: {}", (void*)gpuData.vertexStorageBuffer);
+            //Logger::get().info("Asset loaded and cached: {}", asset_path);
+            //Logger::get().info("  Loaded assets count: {}", loaded_assets_.size());
+            //Logger::get().info("  GPU data cache count: {}", gpu_data_cache_.size());
+            //Logger::get().info("  Vertex storage buffer: {}", (void*)gpuData.vertexStorageBuffer);
 
             return true;
         }
@@ -452,15 +453,15 @@ namespace tremor::gfx {
             // Check if pipeline exists
             auto it = pipeline_cache_.find(asset_path);
             if (it != pipeline_cache_.end()) {
-                Logger::get().info("Reusing cached pipeline for: {}", asset_path);
-                Logger::get().info("  Cached pipeline: {}", (void*)it->second.pipeline);
-                Logger::get().info("  Cached layout: {}", (void*)it->second.layout);
-                Logger::get().info("  Pipeline cache size: {}", pipeline_cache_.size());
+                //Logger::get().info("Reusing cached pipeline for: {}", asset_path);
+                //Logger::get().info("  Cached pipeline: {}", (void*)it->second.pipeline);
+                //Logger::get().info("  Cached layout: {}", (void*)it->second.layout);
+                //Logger::get().info("  Pipeline cache size: {}", pipeline_cache_.size());
                 return &it->second;
             }
-            Logger::get().info("Creating new pipeline for: {}", asset_path);
-            Logger::get().info("  TaffyOverlayManager instance: {}", (void*)this);
-            Logger::get().info("  Pipeline cache size before: {}", pipeline_cache_.size());
+            //Logger::get().info("Creating new pipeline for: {}", asset_path);
+            //Logger::get().info("  TaffyOverlayManager instance: {}", (void*)this);
+            //Logger::get().info("  Pipeline cache size before: {}", pipeline_cache_.size());
 
             // Create new pipeline for this asset
             return createPipelineForAsset(asset_path);
@@ -604,16 +605,16 @@ namespace tremor::gfx {
             VkPipelineRenderingCreateInfo renderingInfo{};
             
             if (render_pass_ == VK_NULL_HANDLE) {
-                Logger::get().info("Creating mesh shader pipeline for dynamic rendering");
-                Logger::get().info("  Color format: {}", (int)swapchain_format_);
-                Logger::get().info("  Depth format: {}", (int)depth_format_);
+                //Logger::get().info("Creating mesh shader pipeline for dynamic rendering");
+                //Logger::get().info("  Color format: {}", (int)swapchain_format_);
+                //Logger::get().info("  Depth format: {}", (int)depth_format_);
                 renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
                 renderingInfo.colorAttachmentCount = 1;
                 renderingInfo.pColorAttachmentFormats = &swapchain_format_;
                 renderingInfo.depthAttachmentFormat = depth_format_;
                 renderingInfo.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
             } else {
-                Logger::get().info("Creating mesh shader pipeline for traditional render pass");
+                //Logger::get().info("Creating mesh shader pipeline for traditional render pass");
             }
 
             // Create pipeline
@@ -644,7 +645,7 @@ namespace tremor::gfx {
                 return VK_NULL_HANDLE;
             }
 
-            Logger::get().info("Mesh shader pipeline created successfully!");
+            //Logger::get().info("Mesh shader pipeline created successfully!");
             return pipeline;
         }
 
@@ -686,7 +687,7 @@ namespace tremor::gfx {
             }
 
             // Bind mesh shader pipeline
-            Logger::get().info("Binding mesh shader pipeline");
+            //Logger::get().info("Binding mesh shader pipeline");
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
 
             // Set viewport
@@ -697,9 +698,9 @@ namespace tremor::gfx {
             viewport.height = static_cast<float>(swapchain_extent_.height);
             viewport.minDepth = 0.0f;
             viewport.maxDepth = 1.0f;
-            Logger::get().info("Viewport: {}x{} at ({}, {})", viewport.width, viewport.height, viewport.x, viewport.y);
-            Logger::get().info("Depth range: {} to {}", viewport.minDepth, viewport.maxDepth);
-            Logger::get().info("Swapchain extent: {}x{}", swapchain_extent_.width, swapchain_extent_.height);
+            //Logger::get().info("Viewport: {}x{} at ({}, {})", viewport.width, viewport.height, viewport.x, viewport.y);
+            //Logger::get().info("Depth range: {} to {}", viewport.minDepth, viewport.maxDepth);
+            //Logger::get().info("Swapchain extent: {}x{}", swapchain_extent_.width, swapchain_extent_.height);
             vkCmdSetViewport(cmd, 0, 1, &viewport);
 
             // Set scissor
@@ -710,7 +711,7 @@ namespace tremor::gfx {
 
             // Bind descriptor set with vertex storage buffer
             if (gpuData.descriptorSet == VK_NULL_HANDLE) {
-                Logger::get().error("Descriptor set is null!");
+                //Logger::get().error("Descriptor set is null!");
                 return;
             }
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -724,17 +725,17 @@ namespace tremor::gfx {
             pushConstants.vertex_stride_floats = gpuData.vertexStrideFloats;
             pushConstants.index_offset_bytes = gpuData.indexOffset;
 
-            Logger::get().info("Push constants: vertices={}, primitives={}, stride={}",
-                pushConstants.vertex_count,
-                pushConstants.primitive_count,
-                pushConstants.vertex_stride_floats);
+            //Logger::get().info("Push constants: vertices={}, primitives={}, stride={}",
+            //    pushConstants.vertex_count,
+            //    pushConstants.primitive_count,
+            //    pushConstants.vertex_stride_floats);
 
             // Push the full structure with MVP matrix
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT,
                 0, sizeof(pushConstants), &pushConstants);
 
             // Draw with mesh shader
-            Logger::get().info("Drawing mesh shader with 1x1x1 workgroups");
+            //Logger::get().info("Drawing mesh shader with 1x1x1 workgroups");
             
             // Debug: Test transform all three vertices
             glm::vec4 vertices[3] = {
@@ -746,21 +747,21 @@ namespace tremor::gfx {
             for (int i = 0; i < 3; i++) {
                 glm::vec4 transformed = viewProj * vertices[i];
                 glm::vec3 ndc = glm::vec3(transformed) / transformed.w;
-                Logger::get().info("Vertex {} -> NDC: ({:.3f}, {:.3f}, {:.3f}) [w={:.3f}]", 
-                    i, ndc.x, ndc.y, ndc.z, transformed.w);
+                //Logger::get().info("Vertex {} -> NDC: ({:.3f}, {:.3f}, {:.3f}) [w={:.3f}]", 
+                //    i, ndc.x, ndc.y, ndc.z, transformed.w);
                 
                 // Check if vertex is inside NDC bounds
                 bool inside = (ndc.x >= -1.0f && ndc.x <= 1.0f && 
                              ndc.y >= -1.0f && ndc.y <= 1.0f && 
                              ndc.z >= 0.0f && ndc.z <= 1.0f);
                 if (!inside) {
-                    Logger::get().warning("  Vertex {} is OUTSIDE NDC bounds!", i);
+                    //Logger::get().warning("  Vertex {} is OUTSIDE NDC bounds!", i);
                 }
             }
             
             // Ensure vkCmdDrawMeshTasksEXT is available
             if (!vkCmdDrawMeshTasksEXT) {
-                Logger::get().error("vkCmdDrawMeshTasksEXT is not available! Mesh shader extension not loaded properly.");
+                //Logger::get().error("vkCmdDrawMeshTasksEXT is not available! Mesh shader extension not loaded properly.");
                 return;
             }
             
@@ -783,26 +784,26 @@ namespace tremor::gfx {
             meshPushData.overlay_flags = 0; // Overlays will be handled by shader replacement
             meshPushData.overlay_data_offset = 0;
             
-            std::cout << "🔍 Push constants debug:" << std::endl;
-            std::cout << "  vertex_count: " << meshPushData.vertex_count << std::endl;
-            std::cout << "  primitive_count: " << meshPushData.primitive_count << std::endl;
-            std::cout << "  vertex_stride_floats: " << meshPushData.vertex_stride_floats << std::endl;
-            std::cout << "  index_offset_bytes: " << meshPushData.index_offset_bytes << std::endl;
-            std::cout << "  overlay_flags: 0x" << std::hex << meshPushData.overlay_flags << std::dec << std::endl;
-            std::cout << "  overlay_data_offset: " << meshPushData.overlay_data_offset << std::endl;
-            std::cout << "  sizeof(pushConstants): " << sizeof(meshPushData) << " bytes" << std::endl;
+            //std::cout << "🔍 Push constants debug:" << std::endl;
+            //std::cout << "  vertex_count: " << meshPushData.vertex_count << std::endl;
+            //std::cout << "  primitive_count: " << meshPushData.primitive_count << std::endl;
+            //std::cout << "  vertex_stride_floats: " << meshPushData.vertex_stride_floats << std::endl;
+            //std::cout << "  index_offset_bytes: " << meshPushData.index_offset_bytes << std::endl;
+            //std::cout << "  overlay_flags: 0x" << std::hex << meshPushData.overlay_flags << std::dec << std::endl;
+            //std::cout << "  overlay_data_offset: " << meshPushData.overlay_data_offset << std::endl;
+            //std::cout << "  sizeof(pushConstants): " << sizeof(meshPushData) << " bytes" << std::endl;
             
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT,
                 0, sizeof(meshPushData), &meshPushData);
             
             // Log all state before draw
-            Logger::get().info("Mesh shader draw state:");
-            Logger::get().info("  Pipeline: {}", (void*)meshPipeline);
-            Logger::get().info("  Descriptor set: {}", (void*)gpuData.descriptorSet);
-            Logger::get().info("  Vertex count: {}", gpuData.vertexCount);
-            Logger::get().info("  Primitive count: {}", gpuData.primitiveCount);
-            Logger::get().info("  Vertex stride floats: {}", gpuData.vertexStrideFloats);
-            Logger::get().info("  Storage buffer: {}", (void*)gpuData.vertexStorageBuffer);
+            //Logger::get().info("Mesh shader draw state:");
+            //Logger::get().info("  Pipeline: {}", (void*)meshPipeline);
+            //Logger::get().info("  Descriptor set: {}", (void*)gpuData.descriptorSet);
+            //Logger::get().info("  Vertex count: {}", gpuData.vertexCount);
+            //Logger::get().info("  Primitive count: {}", gpuData.primitiveCount);
+            //Logger::get().info("  Vertex stride floats: {}", gpuData.vertexStrideFloats);
+            //Logger::get().info("  Storage buffer: {}", (void*)gpuData.vertexStorageBuffer);
             
             std::cout << "CALLING vkCmdDrawMeshTasksEXT NOW!" << std::endl;
             vkCmdDrawMeshTasksEXT(cmd, 3, 1, 1);  // 1x1x1 workgroups
@@ -862,13 +863,13 @@ namespace tremor::gfx {
                 size_t indexDataOffset = vertexDataOffset + vertexDataSize;
                 size_t totalBufferSize = vertexDataSize + indexDataSize;
 
-                std::cout << "  GeometryChunk size: " << sizeof(Taffy::GeometryChunk) << " bytes" << std::endl;
-                std::cout << "  Vertex data offset: " << vertexDataOffset << " bytes" << std::endl;
-                std::cout << "  Vertex data size: " << vertexDataSize << " bytes" << std::endl;
-                std::cout << "  Index data offset: " << indexDataOffset << " bytes" << std::endl;
-                std::cout << "  Index data size: " << indexDataSize << " bytes" << std::endl;
-                std::cout << "  Total buffer size: " << totalBufferSize << " bytes" << std::endl;
-                std::cout << "  Total chunk size: " << geomData->size() << " bytes" << std::endl;
+                //std::cout << "  GeometryChunk size: " << sizeof(Taffy::GeometryChunk) << " bytes" << std::endl;
+                //std::cout << "  Vertex data offset: " << vertexDataOffset << " bytes" << std::endl;
+                //std::cout << "  Vertex data size: " << vertexDataSize << " bytes" << std::endl;
+                //std::cout << "  Index data offset: " << indexDataOffset << " bytes" << std::endl;
+                //std::cout << "  Index data size: " << indexDataSize << " bytes" << std::endl;
+                //std::cout << "  Total buffer size: " << totalBufferSize << " bytes" << std::endl;
+                //std::cout << "  Total chunk size: " << geomData->size() << " bytes" << std::endl;
 
                 // Validate data bounds
                 if (vertexDataOffset + vertexDataSize > geomData->size()) {
@@ -883,7 +884,7 @@ namespace tremor::gfx {
                 }
 
                 const uint8_t* vertexData = geomData->data() + vertexDataOffset;
-                
+                /*
                 // Debug: print vertex data
                 if (geomHeader.vertex_count > 0) {
                     std::cout << "🔍 Vertex stride: " << geomHeader.vertex_stride << " bytes" << std::endl;
@@ -916,7 +917,7 @@ namespace tremor::gfx {
                                   
                     }
                 }
-
+                */
                 // Create buffer with STORAGE_BUFFER usage
                 VkBufferCreateInfo bufferInfo{};
                 bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -958,12 +959,12 @@ namespace tremor::gfx {
                 if (geomHeader.index_count > 0) {
                     const uint8_t* indexData = geomData->data() + indexDataOffset;
                     std::memcpy((uint8_t*)mappedData + vertexDataSize, indexData, indexDataSize);
-                    std::cout << "✅ Copied " << geomHeader.index_count << " indices to storage buffer" << std::endl;
+                    //std::cout << "✅ Copied " << geomHeader.index_count << " indices to storage buffer" << std::endl;
                 }
                 
                 vkUnmapMemory(device_, gpuData.vertexStorageMemory);
 
-                std::cout << "✅ Storage buffer created with " << totalBufferSize << " bytes" << std::endl;
+                //std::cout << "✅ Storage buffer created with " << totalBufferSize << " bytes" << std::endl;
 
                 // Allocate descriptor set
                 VkDescriptorSetAllocateInfo descAllocInfo{};
@@ -1037,15 +1038,15 @@ namespace tremor::gfx {
                 gpuData.indexOffset = vertexDataSize;
                 gpuData.indexCount = geomHeader.index_count;
 
-                std::cout << "📊 Mesh shader parameters:" << std::endl;
-                std::cout << "  Vertex count: " << gpuData.vertexCount << std::endl;
-                std::cout << "  Index count: " << geomHeader.index_count << std::endl;
-                std::cout << "  Index offset: " << gpuData.indexOffset << " bytes" << std::endl;
-                std::cout << "  Primitive count: " << gpuData.primitiveCount << std::endl;
-                std::cout << "  Vertex stride (bytes): " << geomHeader.vertex_stride << std::endl;
-                std::cout << "  Vertex stride (uint32s): " << gpuData.vertexStrideFloats << std::endl;
-                std::cout << "✅ Successfully created storage buffer: " << gpuData.vertexStorageBuffer << std::endl;
-                std::cout << "✅ Successfully allocated descriptor set: " << gpuData.descriptorSet << std::endl;
+                //std::cout << "📊 Mesh shader parameters:" << std::endl;
+                //std::cout << "  Vertex count: " << gpuData.vertexCount << std::endl;
+                //std::cout << "  Index count: " << geomHeader.index_count << std::endl;
+                //std::cout << "  Index offset: " << gpuData.indexOffset << " bytes" << std::endl;
+                //std::cout << "  Primitive count: " << gpuData.primitiveCount << std::endl;
+                //std::cout << "  Vertex stride (bytes): " << geomHeader.vertex_stride << std::endl;
+                //std::cout << "  Vertex stride (uint32s): " << gpuData.vertexStrideFloats << std::endl;
+                //std::cout << "✅ Successfully created storage buffer: " << gpuData.vertexStorageBuffer << std::endl;
+                //std::cout << "✅ Successfully allocated descriptor set: " << gpuData.descriptorSet << std::endl;
             }
             else {
                 std::cout << "📐 Using traditional vertex buffer setup..." << std::endl;
@@ -1390,12 +1391,12 @@ namespace tremor::gfx {
         // Map memory and update buffer data
         void Buffer::update(const void* data, VkDeviceSize size, VkDeviceSize offset) {
             if (!m_memory) {
-                Logger::get().error("Attempting to update buffer with invalid memory");
+                //Logger::get().error("Attempting to update buffer with invalid memory");
                 return;
             }
 
             if (size > m_size) {
-                Logger::get().error("Buffer update size ({}) exceeds buffer size ({})", size, m_size);
+                //Logger::get().error("Buffer update size ({}) exceeds buffer size ({})", size, m_size);
                 return;
             }
 
@@ -1403,7 +1404,7 @@ namespace tremor::gfx {
             VkResult result = vkMapMemory(m_device, m_memory, offset, size, 0, &mappedData);
 
             if (result != VK_SUCCESS) {
-                Logger::get().error("Failed to map buffer memory: {}", (int)result);
+                //Logger::get().error("Failed to map buffer memory: {}", (int)result);
                 return;
             }
 
@@ -1500,7 +1501,7 @@ namespace tremor::gfx {
             // Read file content
             std::ifstream file(filename);
             if (!file.is_open()) {
-                Logger::get().error("Failed to open shader file: {}", filename);
+                //Logger::get().error("Failed to open shader file: {}", filename);
                 return {};
             }
 
@@ -1587,8 +1588,8 @@ namespace tremor::gfx {
             // Create a local compiler for reflection (not stored)
             spirv_cross::CompilerGLSL compiler(spirvCode);
             spirv_cross::ShaderResources resources = compiler.get_shader_resources();
-            Logger::get().info("Shader reflection found: {} uniform buffers, {} sampled images",
-                resources.uniform_buffers.size(), resources.sampled_images.size());
+            //Logger::get().info("Shader reflection found: {} uniform buffers, {} sampled images",
+            //    resources.uniform_buffers.size(), resources.sampled_images.size());
 
             // REMOVE THIS ENTIRE SECTION - This is the first occurrence that's causing duplication
             // ----------------------------------------------------------------------------------
@@ -1686,7 +1687,7 @@ namespace tremor::gfx {
                 binding.name = resource.name;
 
                 // If you want to keep the logging, move it here
-                Logger::get().info("Resource: {} (set {}, binding {})", binding.name, binding.set, binding.binding);
+                //Logger::get().info("Resource: {} (set {}, binding {})", binding.name, binding.set, binding.binding);
 
                 m_resourceBindings.push_back(binding);
             }
@@ -1829,7 +1830,7 @@ namespace tremor::gfx {
             std::vector<VkDescriptorSetLayoutBinding> bindings;
 
             // Debug output before creating layout
-            Logger::get().info("Creating descriptor set layout for set {}", setNumber);
+            //Logger::get().info("Creating descriptor set layout for set {}", setNumber);
 
             for (const auto& binding : m_resourceBindings) {
                 if (binding.set == setNumber) {
@@ -1848,15 +1849,15 @@ namespace tremor::gfx {
                     default: typeStr = "Other"; break;
                     }
 
-                    Logger::get().info("  Adding binding {}.{}: {} (count={}, stages=0x{:X})",
-                        binding.set, binding.binding, typeStr, binding.count, binding.stageFlags);
+                    //Logger::get().info("  Adding binding {}.{}: {} (count={}, stages=0x{:X})",
+                    //    binding.set, binding.binding, typeStr, binding.count, binding.stageFlags);
 
                     bindings.push_back(layoutBinding);
                 }
             }
 
             if (bindings.empty()) {
-                Logger::get().info("No bindings found for set {}", setNumber);
+                //Logger::get().info("No bindings found for set {}", setNumber);
                 //return nullptr;  // No bindings for this set, continue anyway...
             }
 
@@ -1865,18 +1866,18 @@ namespace tremor::gfx {
             layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
             layoutInfo.pBindings = bindings.data();
 
-            Logger::get().info("Creating descriptor set layout with {} bindings", bindings.size());
+            //Logger::get().info("Creating descriptor set layout with {} bindings", bindings.size());
 
             auto layout = std::make_unique<DescriptorSetLayoutResource>(device);
 
             VkResult result = vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &layout->handle());
             if (result != VK_SUCCESS) {
-                Logger::get().error("Failed to create descriptor set layout for set {}: Error code {}",
-                    setNumber, static_cast<int>(result));
+                //Logger::get().error("Failed to create descriptor set layout for set {}: Error code {}",
+                //    setNumber, static_cast<int>(result));
                 return nullptr;
             }
 
-            Logger::get().info("Successfully created descriptor set layout for set {}", setNumber);
+            //Logger::get().info("Successfully created descriptor set layout for set {}", setNumber);
             return layout;
         }
 
@@ -1908,7 +1909,7 @@ namespace tremor::gfx {
 
                     auto emptyLayout = std::make_unique<DescriptorSetLayoutResource>(device);
                     if (vkCreateDescriptorSetLayout(device, &emptyLayoutInfo, nullptr, &emptyLayout->handle()) != VK_SUCCESS) {
-                        Logger::get().error("Failed to create empty descriptor set layout for set {}", i);
+                        //Logger::get().error("Failed to create empty descriptor set layout for set {}", i);
                         return nullptr;
                     }
 
@@ -1937,7 +1938,7 @@ namespace tremor::gfx {
 
             VkPipelineLayout pipelineLayout;
             if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
-                Logger::get().error("Failed to create pipeline layout");
+                //Logger::get().error("Failed to create pipeline layout");
                 return nullptr;
             }
 
@@ -1972,7 +1973,7 @@ namespace tremor::gfx {
 
             auto pool = std::make_unique<DescriptorPoolResource>(device);
             if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create descriptor pool");
+                //Logger::get().error("Failed to create descriptor pool");
                 return nullptr;
             }
 
@@ -2092,7 +2093,7 @@ namespace tremor::gfx {
             : m_device(device), m_type(type), m_entryPoint("main") {
             if (rawModule != VK_NULL_HANDLE) {
                 m_module = std::make_unique<ShaderModuleResource>(device, rawModule);
-                Logger::get().info("Shader module created with raw handle");
+                //Logger::get().info("Shader module created with raw handle");
                 if (m_spirvCode.size() > 0) {
                     m_reflection = std::make_unique<ShaderReflection>();
                     m_reflection->reflect(m_spirvCode, getShaderStageFlagBits());
@@ -2110,7 +2111,7 @@ namespace tremor::gfx {
             std::ifstream file(filename);
 
             if (!file.is_open()) {
-                Logger::get().error("Failed to open shader file: {}", filename);
+                //Logger::get().error("Failed to open shader file: {}", filename);
                 return nullptr;
             }
 
@@ -2129,7 +2130,7 @@ namespace tremor::gfx {
 
             VkShaderModule shaderModule = VK_NULL_HANDLE;
             if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-                Logger::get().error("Failed to create shader module from file: {}", filename);
+                //Logger::get().error("Failed to create shader module from file: {}", filename);
                 return nullptr;
             }
 
@@ -2199,7 +2200,7 @@ namespace tremor::gfx {
 
             VkShaderModule shaderModule = VK_NULL_HANDLE;
             if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-                Logger::get().error("Failed to create shader module from compiled source");
+                //Logger::get().error("Failed to create shader module from compiled source");
                 return nullptr;
             }
 
@@ -2242,7 +2243,7 @@ namespace tremor::gfx {
 
             VkShaderModule shaderModule = VK_NULL_HANDLE;
             if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-                Logger::get().error("Failed to create shader module from compiled file: {}", filename);
+                //Logger::get().error("Failed to create shader module from compiled file: {}", filename);
                 return nullptr;
             }
 
@@ -2401,8 +2402,8 @@ namespace tremor::gfx {
         , m_config(config)
         , m_totalClusters(config.xSlices* config.ySlices* config.zSlices)
     {
-        Logger::get().info("Creating VulkanClusteredRenderer with {} clusters ({}x{}x{})",
-            m_totalClusters, config.xSlices, config.ySlices, config.zSlices);
+        //Logger::get().info("Creating VulkanClusteredRenderer with {} clusters ({}x{}x{})",
+        //    m_totalClusters, config.xSlices, config.ySlices, config.zSlices);
     }
 
     VulkanClusteredRenderer::~VulkanClusteredRenderer() {
@@ -2420,12 +2421,12 @@ namespace tremor::gfx {
             cluster.objectCount = 0;
         }
 
-        Logger::get().info("Created cluster grid: {} total clusters", m_totalClusters);
+        //Logger::get().info("Created cluster grid: {} total clusters", m_totalClusters);
     }
 
     void VulkanClusteredRenderer::buildClusters(Camera* camera, Octree<RenderableObject>& octree) {
 
-        Logger::get().info("=== BYPASS MODE: FORCE RENDER ALL OBJECTS ===");
+        //Logger::get().info("=== BYPASS MODE: FORCE RENDER ALL OBJECTS ===");
 
 
 
@@ -2439,10 +2440,10 @@ namespace tremor::gfx {
 
         // Get ALL objects from octree and mark them visible
         auto allObjects = octree.getAllObjects();
-        Logger::get().info("Found {} objects in octree", allObjects.size());
+        //Logger::get().info("Found {} objects in octree", allObjects.size());
 
         if (allObjects.empty()) {
-            Logger::get().error("CRITICAL: Octree is empty!");
+            //Logger::get().error("CRITICAL: Octree is empty!");
             return;
         }
 
@@ -2451,11 +2452,11 @@ namespace tremor::gfx {
         // Copy all objects to visible list
         m_visibleObjects = allObjects;
 
-        Logger::get().info("OCTREE DEBUG: getAllObjects() returned {} objects", allObjects.size());
+        //Logger::get().info("OCTREE DEBUG: getAllObjects() returned {} objects", allObjects.size());
         for (size_t i = 0; i < std::min(size_t(25), allObjects.size()); i++) {
             const auto& obj = allObjects[i];
             glm::vec3 pos = obj.transform[3];
-            Logger::get().info("OCTREE Object {}: pos=({:.2f}, {:.2f}, {:.2f})", i, pos.x, pos.y, pos.z);
+            //Logger::get().info("OCTREE Object {}: pos=({:.2f}, {:.2f}, {:.2f})", i, pos.x, pos.y, pos.z);
         }
 
         // Force all objects into cluster 0
@@ -2476,7 +2477,7 @@ namespace tremor::gfx {
         m_clusters[0].objectCount = static_cast<uint32_t>(m_visibleObjects.size());
 
 
-        Logger::get().info("BYPASS: Forced {} objects into cluster 0", m_visibleObjects.size());
+        //Logger::get().info("BYPASS: Forced {} objects into cluster 0", m_visibleObjects.size());
 
 
 
@@ -2487,25 +2488,25 @@ namespace tremor::gfx {
         updateUniformBuffers(camera);
 
 
-        Logger::get().info("BYPASS MODE COMPLETE");
+        //Logger::get().info("BYPASS MODE COMPLETE");
         return;  // Skip all normal clustering logic
     }
     bool VulkanClusteredRenderer::initialize(Format color, Format depth) {
         m_colorFormat = &color.format;
         m_depthFormat = &depth.format;
 
-        Logger::get().info("Initializing VulkanClusteredRenderer...");
+        //Logger::get().info("Initializing VulkanClusteredRenderer...");
 
         try {
             // Create GPU buffers
             if (!createMeshBuffers()) {
-                Logger::get().error("Failed to create mesh buffers");
+                //Logger::get().error("Failed to create mesh buffers");
                 return false;
             }
 
             // Create default textures
             if (!createDefaultTextures()) {
-                Logger::get().error("Failed to create default textures");
+                //Logger::get().error("Failed to create default textures");
                 return false;
             }
 
@@ -2515,25 +2516,25 @@ namespace tremor::gfx {
             // Create default material
             //createDefaultMaterial();
 
-            Logger::get().info("VulkanClusteredRenderer initialized successfully");
+            //Logger::get().info("VulkanClusteredRenderer initialized successfully");
             return true;
         }
         catch (const std::exception& e) {
-            Logger::get().error("Exception during VulkanClusteredRenderer initialization: {}", e.what());
+            //Logger::get().error("Exception during VulkanClusteredRenderer initialization: {}", e.what());
             return false;
         }
     }
 
     void VulkanClusteredRenderer::shutdown() {
         // RAII will handle cleanup
-        Logger::get().info("VulkanClusteredRenderer shutdown complete");
+        //Logger::get().info("VulkanClusteredRenderer shutdown complete");
     }
 
     uint32_t VulkanClusteredRenderer::loadMesh(const std::vector<MeshVertex>& vertices,
         const std::vector<uint32_t>& indices,
         const std::string& name) {
         if (vertices.empty()) {
-            Logger::get().warning("Attempting to load empty mesh");
+            //Logger::get().warning("Attempting to load empty mesh");
             return UINT32_MAX;
         }
 
@@ -2541,7 +2542,7 @@ namespace tremor::gfx {
         if (!name.empty()) {
             auto it = m_meshNameToID.find(name);
             if (it != m_meshNameToID.end()) {
-                Logger::get().info("Mesh '{}' already loaded, returning existing ID {}", name, it->second);
+                //Logger::get().info("Mesh '{}' already loaded, returning existing ID {}", name, it->second);
                 return it->second;
             }
         }
@@ -2577,8 +2578,8 @@ namespace tremor::gfx {
         // Update GPU buffers
         updateMeshBuffers();
 
-        Logger::get().info("Loaded mesh '{}' with ID {}: {} vertices, {} indices",
-            name.empty() ? "unnamed" : name, meshID, vertices.size(), indices.size());
+        //Logger::get().info("Loaded mesh '{}' with ID {}: {} vertices, {} indices",
+        //    name.empty() ? "unnamed" : name, meshID, vertices.size(), indices.size());
 
         return meshID;
     }
@@ -2589,7 +2590,7 @@ namespace tremor::gfx {
 
         updateMaterialBuffer();
 
-        Logger::get().info("Created material with ID {}", materialID);
+        //Logger::get().info("Created material with ID {}", materialID);
         return materialID;
     }
 
@@ -2608,11 +2609,11 @@ namespace tremor::gfx {
                 m_lightBuffer->update(m_lights.data(), lightBufferSize);
             }
             else {
-                Logger::get().warning("Light buffer too small for {} lights", m_lights.size());
+                //Logger::get().warning("Light buffer too small for {} lights", m_lights.size());
             }
         }
 
-        Logger::get().info("Updated {} lights", m_lights.size());
+        //Logger::get().info("Updated {} lights", m_lights.size());
     }
 
     void VulkanClusteredRenderer::render(VkCommandBuffer cmdBuffer, Camera* camera) {
@@ -2620,21 +2621,21 @@ namespace tremor::gfx {
 
         updateUniformBuffers(camera);
 
-        Logger::get().info("C++ EnhancedClusterUBO size: {}", sizeof(EnhancedClusterUBO));
-        Logger::get().info("C++ time offset: {}", offsetof(EnhancedClusterUBO, time));
+        //Logger::get().info("C++ EnhancedClusterUBO size: {}", sizeof(EnhancedClusterUBO));
+        //Logger::get().info("C++ time offset: {}", offsetof(EnhancedClusterUBO, time));
 
 
-        Logger::get().info("=== CLUSTERED RENDERER DEBUG START ===");
-        Logger::get().info("Pipeline valid: {}", m_pipeline ? "YES" : "NO");
-        Logger::get().info("Pipeline layout valid: {}", m_pipelineLayout ? "YES" : "NO");
-        Logger::get().info("Descriptor set valid: {}", m_descriptorSet ? "YES" : "NO");
+        //Logger::get().info("=== CLUSTERED RENDERER DEBUG START ===");
+        //Logger::get().info("Pipeline valid: {}", m_pipeline ? "YES" : "NO");
+        //Logger::get().info("Pipeline layout valid: {}", m_pipelineLayout ? "YES" : "NO");
+        //Logger::get().info("Descriptor set valid: {}", m_descriptorSet ? "YES" : "NO");
 
-        Logger::get().info("Data summary:");
-        Logger::get().info("  Visible objects: {}", m_visibleObjects.size());
-        Logger::get().info("  Cluster object indices: {}", m_clusterObjectIndices.size());
-        Logger::get().info("  Cluster light indices: {}", m_clusterLightIndices.size());
-        Logger::get().info("  Total clusters: {}", m_totalClusters);
-        Logger::get().info("  Lights: {}", m_lights.size());
+        //Logger::get().info("Data summary:");
+        //Logger::get().info("  Visible objects: {}", m_visibleObjects.size());
+        //Logger::get().info("  Cluster object indices: {}", m_clusterObjectIndices.size());
+        //Logger::get().info("  Cluster light indices: {}", m_clusterLightIndices.size());
+        //Logger::get().info("  Total clusters: {}", m_totalClusters);
+        //Logger::get().info("  Lights: {}", m_lights.size());
 
         // Count non-empty clusters
         uint32_t clustersWithObjects = 0;
@@ -2643,35 +2644,35 @@ namespace tremor::gfx {
             if (cluster.objectCount > 0) clustersWithObjects++;
             if (cluster.lightCount > 0) clustersWithLights++;
         }
-        Logger::get().info("  Clusters with objects: {}", clustersWithObjects);
-        Logger::get().info("  Clusters with lights: {}", clustersWithLights);
+        //Logger::get().info("  Clusters with objects: {}", clustersWithObjects);
+        //Logger::get().info("  Clusters with lights: {}", clustersWithLights);
 
         if (m_visibleObjects.empty()) {
-            Logger::get().error("CRITICAL: No visible objects to render!");
+            //Logger::get().error("CRITICAL: No visible objects to render!");
             return;
         }
 
         if (m_clusterObjectIndices.empty()) {
-            Logger::get().error("CRITICAL: No cluster object indices!");
+            //Logger::get().error("CRITICAL: No cluster object indices!");
             return;
         }
 
         if (!m_pipeline) {
-            Logger::get().error("Pipeline is NULL!");
+            //Logger::get().error("Pipeline is NULL!");
             return;
         }
 
         if (!m_pipelineLayout) {
-            Logger::get().error("Pipeline layout is NULL!");
+            //Logger::get().error("Pipeline layout is NULL!");
             return;
         }
 
         if (!m_descriptorSet) {
-            Logger::get().error("Descriptor set is NULL!");
+            //Logger::get().error("Descriptor set is NULL!");
             return;
         }
 
-        Logger::get().info("All pipeline resources valid");
+        //Logger::get().info("All pipeline resources valid");
 
         // Memory barriers for buffer updates
         std::vector<VkBufferMemoryBarrier> barriers;
@@ -2713,15 +2714,15 @@ namespace tremor::gfx {
             (m_debugPipeline ? m_debugPipeline->handle() : m_pipeline->handle()) :
             (m_wireframeMode && m_wireframePipeline ? m_wireframePipeline->handle() : m_pipeline->handle());
 
-        Logger::get().info("Using pipeline: {} | (bind {})",
-            m_wireframeMode ? "Wireframe" : (m_debugClusters ? "Debug" : "Normal"), (void*)currentPipeline);
+        //Logger::get().info("Using pipeline: {} | (bind {})",
+        //    m_wireframeMode ? "Wireframe" : (m_debugClusters ? "Debug" : "Normal"), (void*)currentPipeline);
 
         if (currentPipeline) {
             vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
-            Logger::get().info("Pipeline bound successfully");
+            //Logger::get().info("Pipeline bound successfully");
         }
         else {
-            Logger::get().error("Failed to bind pipeline!");
+            //Logger::get().error("Failed to bind pipeline!");
             return;
         }
 
@@ -2737,17 +2738,17 @@ namespace tremor::gfx {
                 &m_descriptorSet->handle(),
                 0, nullptr
             );
-            Logger::get().info("Descriptor sets bound successfully");
+            //Logger::get().info("Descriptor sets bound successfully");
         }
         else {
-            Logger::get().error("No descriptor set to bind!");
+            //Logger::get().error("No descriptor set to bind!");
             return;
         }
 
         // Set viewport and scissor
         VkExtent2D extent = camera->extent;
 
-        Logger::get().info("EXTENT: ({}, {})", extent.width, extent.height);
+        //Logger::get().info("EXTENT: ({}, {})", extent.width, extent.height);
 
         VkViewport viewport{};
         viewport.x = 0.0f;
@@ -2767,7 +2768,7 @@ namespace tremor::gfx {
         uint32_t taskGroupX = (m_totalClusters + 31) / 32;
         taskGroupX = std::max(taskGroupX, 1u);
 
-        Logger::get().info("Dispatching {} task groups", taskGroupX);
+        //Logger::get().info("Dispatching {} task groups", taskGroupX);
 
         // Dispatch mesh shaders
         vkCmdDrawMeshTasksEXT(cmdBuffer, taskGroupX, 1, 1);
@@ -2844,11 +2845,11 @@ namespace tremor::gfx {
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
-            Logger::get().info("Created all mesh buffers successfully");
+            //Logger::get().info("Created all mesh buffers successfully");
             return true;
         }
         catch (const std::exception& e) {
-            Logger::get().error("Failed to create mesh buffers: {}", e.what());
+            //Logger::get().error("Failed to create mesh buffers: {}", e.what());
             return false;
         }
     }
@@ -2856,7 +2857,7 @@ namespace tremor::gfx {
     // Fixed createDefaultTextures method for VulkanClusteredRenderer
     bool VulkanClusteredRenderer::createDefaultTextures() {
         try {
-            Logger::get().info("Creating default textures for VulkanClusteredRenderer...");
+            //Logger::get().info("Creating default textures for VulkanClusteredRenderer...");
 
             // Create a simple 4x4 white texture for debugging
             const uint32_t size = 4;
@@ -2871,7 +2872,7 @@ namespace tremor::gfx {
                 whitePixels[i * 4 + 3] = 255; // A
             }
 
-            Logger::get().info("Creating staging buffer for texture data...");
+            //Logger::get().info("Creating staging buffer for texture data...");
 
             // Create staging buffer
             VkDeviceSize imageSize = whitePixels.size();
@@ -2884,7 +2885,7 @@ namespace tremor::gfx {
 
             // Upload data to staging buffer
             stagingBuffer->update(whitePixels.data(), imageSize);
-            Logger::get().info("Uploaded {} bytes to staging buffer", imageSize);
+            //Logger::get().info("Uploaded {} bytes to staging buffer", imageSize);
 
             // Create albedo texture image
             VkImageCreateInfo imageInfo{};
@@ -2903,7 +2904,7 @@ namespace tremor::gfx {
             // Create albedo image
             m_defaultAlbedoTexture = std::make_unique<ImageResource>(m_device);
             if (vkCreateImage(m_device, &imageInfo, nullptr, &m_defaultAlbedoTexture->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create default albedo image");
+                //Logger::get().error("Failed to create default albedo image");
                 return false;
             }
 
@@ -2921,7 +2922,7 @@ namespace tremor::gfx {
 
             VkDeviceMemory albedoMemory;
             if (vkAllocateMemory(m_device, &allocInfo, nullptr, &albedoMemory) != VK_SUCCESS) {
-                Logger::get().error("Failed to allocate albedo memory");
+                //Logger::get().error("Failed to allocate albedo memory");
                 return false;
             }
 
@@ -2930,7 +2931,7 @@ namespace tremor::gfx {
             // Create normal texture (same process)
             m_defaultNormalTexture = std::make_unique<ImageResource>(m_device);
             if (vkCreateImage(m_device, &imageInfo, nullptr, &m_defaultNormalTexture->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create default normal image");
+                //Logger::get().error("Failed to create default normal image");
                 return false;
             }
 
@@ -2944,13 +2945,13 @@ namespace tremor::gfx {
 
             VkDeviceMemory normalMemory;
             if (vkAllocateMemory(m_device, &allocInfo, nullptr, &normalMemory) != VK_SUCCESS) {
-                Logger::get().error("Failed to allocate normal memory");
+                //Logger::get().error("Failed to allocate normal memory");
                 return false;
             }
 
             vkBindImageMemory(m_device, m_defaultNormalTexture->handle(), normalMemory, 0);
 
-            Logger::get().info("Transitioning image layouts and copying data...");
+            //Logger::get().info("Transitioning image layouts and copying data...");
 
             // Transition image layouts and copy data
             VkCommandBufferAllocateInfo cmdAllocInfo{};
@@ -3061,7 +3062,7 @@ namespace tremor::gfx {
             // Free command buffer
             vkFreeCommandBuffers(m_device, m_commandPool, 1, &commandBuffer);
 
-            Logger::get().info("Creating image views...");
+            //Logger::get().info("Creating image views...");
 
             // Create image views
             VkImageViewCreateInfo viewInfo{};
@@ -3078,7 +3079,7 @@ namespace tremor::gfx {
             viewInfo.image = m_defaultAlbedoTexture->handle();
             m_defaultAlbedoView = std::make_unique<ImageViewResource>(m_device);
             if (vkCreateImageView(m_device, &viewInfo, nullptr, &m_defaultAlbedoView->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create albedo image view");
+                //Logger::get().error("Failed to create albedo image view");
                 return false;
             }
 
@@ -3086,11 +3087,11 @@ namespace tremor::gfx {
             viewInfo.image = m_defaultNormalTexture->handle();
             m_defaultNormalView = std::make_unique<ImageViewResource>(m_device);
             if (vkCreateImageView(m_device, &viewInfo, nullptr, &m_defaultNormalView->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create normal image view");
+                //Logger::get().error("Failed to create normal image view");
                 return false;
             }
 
-            Logger::get().info("Creating sampler...");
+            //Logger::get().info("Creating sampler...");
 
             // Create sampler
             VkSamplerCreateInfo samplerInfo{};
@@ -3112,19 +3113,19 @@ namespace tremor::gfx {
 
             m_defaultSampler = std::make_unique<SamplerResource>(m_device);
             if (vkCreateSampler(m_device, &samplerInfo, nullptr, &m_defaultSampler->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create default sampler");
+                //Logger::get().error("Failed to create default sampler");
                 return false;
             }
 
-            Logger::get().info("Default textures created successfully!");
-            Logger::get().info("  Albedo texture: {}x{} white", size, size);
-            Logger::get().info("  Normal texture: {}x{} white", size, size);
-            Logger::get().info("  Sampler: NEAREST filtering");
+            //Logger::get().info("Default textures created successfully!");
+            //Logger::get().info("  Albedo texture: {}x{} white", size, size);
+            //Logger::get().info("  Normal texture: {}x{} white", size, size);
+            //Logger::get().info("  Sampler: NEAREST filtering");
 
             return true;
         }
         catch (const std::exception& e) {
-            Logger::get().error("Exception in createDefaultTextures: {}", e.what());
+            //Logger::get().error("Exception in createDefaultTextures: {}", e.what());
             return false;
         }
     }
@@ -3246,7 +3247,7 @@ namespace tremor::gfx {
             for (auto& [filename, shader] : m_shaders) {
                 auto currentTimestamp = getFileTimestamp(filename);
                 if (currentTimestamp > m_shaderFileTimestamps[filename]) {
-                    Logger::get().info("Shader file changed, reloading: {}", filename);
+                    //Logger::get().info("Shader file changed, reloading: {}", filename);
 
                     // Get current options
                     bool isSpirv = filename.ends_with(".spv");
@@ -3284,7 +3285,7 @@ namespace tremor::gfx {
                 return std::filesystem::last_write_time(filename);
             }
             catch (const std::exception& e) {
-                Logger::get().error("Failed to get file timestamp: {}", e.what());
+                //Logger::get().error("Failed to get file timestamp: {}", e.what());
                 return std::filesystem::file_time_type();
             }
         }
@@ -3292,7 +3293,7 @@ namespace tremor::gfx {
         // Notify systems about shader reloads
         void ShaderManager::notifyShaderReloaded(const std::string& filename, std::shared_ptr<ShaderModule> shader) {
             // You would implement this to notify pipeline cache or other systems
-            Logger::get().info("Shader reloaded: {}", filename);
+            //Logger::get().info("Shader reloaded: {}", filename);
         }
 
 
@@ -3437,7 +3438,7 @@ namespace tremor::gfx {
             std::vector<std::unique_ptr<DescriptorSetLayoutResource>> layouts;
             std::vector<VkDescriptorSetLayout> rawLayouts;
 
-            Logger::get().info("Creating descriptor sets for {} sets", maxSet + 1);
+            //Logger::get().info("Creating descriptor sets for {} sets", maxSet + 1);
 
             for (uint32_t i = 0; i <= maxSet; i++) {
                 auto layout = m_reflection.createDescriptorSetLayout(m_device, i);
@@ -3447,7 +3448,7 @@ namespace tremor::gfx {
                 }
                 else {
                     // Create an empty layout for this set
-                    Logger::get().info("Creating empty descriptor set layout for set {}", i);
+                    //Logger::get().info("Creating empty descriptor set layout for set {}", i);
 
                     VkDescriptorSetLayoutCreateInfo emptyLayoutInfo{};
                     emptyLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -3455,7 +3456,7 @@ namespace tremor::gfx {
 
                     auto emptyLayout = std::make_unique<DescriptorSetLayoutResource>(m_device);
                     if (vkCreateDescriptorSetLayout(m_device, &emptyLayoutInfo, nullptr, &emptyLayout->handle()) != VK_SUCCESS) {
-                        Logger::get().error("Failed to create empty descriptor set layout for set {}", i);
+                        //Logger::get().error("Failed to create empty descriptor set layout for set {}", i);
                         continue;
                     }
 
@@ -3477,7 +3478,7 @@ namespace tremor::gfx {
 
             std::vector<VkDescriptorSet> descriptorSets(rawLayouts.size());
             if (vkAllocateDescriptorSets(m_device, &allocInfo, descriptorSets.data()) != VK_SUCCESS) {
-                Logger::get().error("Failed to allocate descriptor sets");
+                //Logger::get().error("Failed to allocate descriptor sets");
                 return result;
             }
 
@@ -3719,7 +3720,7 @@ namespace tremor::gfx {
         createSwapChain(createInfo);
         createImageViews();
 
-        Logger::get().info("Swap chain recreated: {}x{}", m_extent.width, m_extent.height);
+        //Logger::get().info("Swap chain recreated: {}x{}", m_extent.width, m_extent.height);
 
     }
 
@@ -4390,15 +4391,15 @@ namespace tremor::gfx {
         }
 
         // Log basic device info
-        Logger::get().info("Selected GPU: {} ({})", m_deviceProperties.deviceName, vendorName);
-        Logger::get().info("Driver version: {}.{}.{}",
-            VK_VERSION_MAJOR(m_deviceProperties.driverVersion),
-            VK_VERSION_MINOR(m_deviceProperties.driverVersion),
-            VK_VERSION_PATCH(m_deviceProperties.driverVersion));
+        //Logger::get().info("Selected GPU: {} ({})", m_deviceProperties.deviceName, vendorName);
+        //Logger::get().info("Driver version: {}.{}.{}",
+        //    VK_VERSION_MAJOR(m_deviceProperties.driverVersion),
+        //    VK_VERSION_MINOR(m_deviceProperties.driverVersion),
+        //    VK_VERSION_PATCH(m_deviceProperties.driverVersion));
 
         // Log color and depth formats
-        Logger::get().info("Color format: {}", m_colorFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ?
-            "A2B10G10R10 (10-bit)" : "R8G8B8A8 (8-bit)");
+        //Logger::get().info("Color format: {}", m_colorFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ?
+        //    "A2B10G10R10 (10-bit)" : "R8G8B8A8 (8-bit)");
 
         std::string depthFormatStr;
         switch (m_depthFormat) {
@@ -4407,16 +4408,16 @@ namespace tremor::gfx {
         case VK_FORMAT_D16_UNORM_S8_UINT: depthFormatStr = "D16_S8 (16-bit)"; break;
         default: depthFormatStr = "Unknown";
         }
-        Logger::get().info("Depth format: {}", depthFormatStr);
+        //Logger::get().info("Depth format: {}", depthFormatStr);
 
         // Log capabilities
-        Logger::get().info("Device capabilities:");
-        Logger::get().info("  - Ray Query: {}", m_capabilities.rayQuery ? "Yes" : "No");
-        Logger::get().info("  - Mesh Shaders: {}", m_capabilities.meshShaders ? "Yes" : "No");
-        Logger::get().info("  - Bresenham Line Rasterization: {}", m_capabilities.bresenhamLineRasterization ? "Yes" : "No");
-        Logger::get().info("  - Sparse Binding (MegaTextures): {}", m_capabilities.sparseBinding ? "Yes" : "No");
-        Logger::get().info("  - Dynamic Rendering: {}", m_capabilities.dynamicRendering ? "Yes" : "No");
-        Logger::get().info("  - Buffer Device Address: {}", m_capabilities.bufferDeviceAddress ? "Yes" : "No");
+        //Logger::get().info("Device capabilities:");
+        //Logger::get().info("  - Ray Query: {}", m_capabilities.rayQuery ? "Yes" : "No");
+        //Logger::get().info("  - Mesh Shaders: {}", m_capabilities.meshShaders ? "Yes" : "No");
+        //Logger::get().info("  - Bresenham Line Rasterization: {}", m_capabilities.bresenhamLineRasterization ? "Yes" : "No");
+        //Logger::get().info("  - Sparse Binding (MegaTextures): {}", m_capabilities.sparseBinding ? "Yes" : "No");
+        //Logger::get().info("  - Dynamic Rendering: {}", m_capabilities.dynamicRendering ? "Yes" : "No");
+        //Logger::get().info("  - Buffer Device Address: {}", m_capabilities.bufferDeviceAddress ? "Yes" : "No");
     }
 
     std::optional<uint32_t> VulkanDevice::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const {
@@ -4510,7 +4511,7 @@ namespace tremor::gfx {
             }
 
             if (result != VK_SUCCESS) {
-                Logger::get().error("Failed to allocate descriptor set: {}", static_cast<int>(result));
+                //Logger::get().error("Failed to allocate descriptor set: {}", static_cast<int>(result));
                 return VK_NULL_HANDLE;
             }
 
@@ -4805,7 +4806,7 @@ namespace tremor::gfx {
 
                 VkDescriptorSetLayout layout;
                 if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &layout) != VK_SUCCESS) {
-                    Logger::get().error("Failed to create descriptor set layout for set {}", set);
+                    //Logger::get().error("Failed to create descriptor set layout for set {}", set);
                     return false;
                 }
 
@@ -4826,8 +4827,8 @@ namespace tremor::gfx {
             std::vector<uint32_t> setIndices;  // Keep track of which set each layout corresponds to
 
             for (const auto& [set, layout] : m_setLayouts) {
-                Logger::get().info("Set {}: layout = {}", set,
-                    layout != VK_NULL_HANDLE ? "VALID" : "NULL");
+                //Logger::get().info("Set {}: layout = {}", set,
+                //    layout != VK_NULL_HANDLE ? "VALID" : "NULL");
                 if (layout != VK_NULL_HANDLE) {  // Ensure layout is valid
                     rawLayouts.push_back(layout);
                     setIndices.push_back(set);
@@ -4843,7 +4844,7 @@ namespace tremor::gfx {
 
             std::vector<VkDescriptorSet> rawSets(rawLayouts.size());
             if (vkAllocateDescriptorSets(m_device, &allocInfo, rawSets.data()) != VK_SUCCESS) {
-                Logger::get().error("Failed to allocate descriptor sets");
+                //Logger::get().error("Failed to allocate descriptor sets");
                 return false;
             }
 
@@ -4874,17 +4875,17 @@ namespace tremor::gfx {
                     bufferInfo = it->second;
                 }
                 else {
-                    Logger::get().warning("UBO {} not registered, skipping", ubo.name);
+                    //Logger::get().warning("UBO {} not registered, skipping", ubo.name);
                     continue;
                 }
 
                 if (!bufferInfo.buffer) {
-                    Logger::get().warning("Buffer for UBO {} is null, skipping", ubo.name);
+                    //Logger::get().warning("Buffer for UBO {} is null, skipping", ubo.name);
                     continue;
                 }
 
                 if (ubo.set >= m_descriptorSets.size()) {
-                    Logger::get().error("UBO references set {} which doesn't exist", ubo.set);
+                    //Logger::get().error("UBO references set {} which doesn't exist", ubo.set);
                     continue;
                 }
 
@@ -4907,7 +4908,7 @@ namespace tremor::gfx {
                 write.pBufferInfo = nullptr; // Will set later
 
                 descriptorWritesWithIndices.push_back({ write, bufferInfoIndex });
-                Logger::get().info("Set up UBO: {} with size {} bytes", ubo.name, bufferInfo.size);
+                //Logger::get().info("Set up UBO: {} with size {} bytes", ubo.name, bufferInfo.size);
             }
 
             // Process resources (textures, etc.)
@@ -4925,21 +4926,21 @@ namespace tremor::gfx {
                         // Use default texture
                         if (m_defaultImageView && m_defaultSampler) {
                             textureInfo = { m_defaultImageView, m_defaultSampler };
-                            Logger::get().info("Using default texture for {}", resource.name);
+                            //Logger::get().info("Using default texture for {}", resource.name);
                         }
                         else {
-                            Logger::get().warning("Texture {} not registered and no default texture, skipping", resource.name);
+                            //Logger::get().warning("Texture {} not registered and no default texture, skipping", resource.name);
                             continue;
                         }
                     }
 
                     if (!textureInfo.imageView || !textureInfo.sampler) {
-                        Logger::get().warning("Image view or sampler for texture {} is null, skipping", resource.name);
+                        //Logger::get().warning("Image view or sampler for texture {} is null, skipping", resource.name);
                         continue;
                     }
 
                     if (resource.set >= m_descriptorSets.size()) {
-                        Logger::get().error("Resource references set {} which doesn't exist", resource.set);
+                        //Logger::get().error("Resource references set {} which doesn't exist", resource.set);
                         continue;
                     }
 
@@ -4962,7 +4963,7 @@ namespace tremor::gfx {
                     write.pImageInfo = nullptr; // Will set later
 
                     descriptorWritesWithIndices.push_back({ write, imageInfoIndex });
-                    Logger::get().info("Set up texture: {}", resource.name);
+                    //Logger::get().info("Set up texture: {}", resource.name);
                 }
                 // Add support for other descriptor types here as needed
             }
@@ -4986,7 +4987,7 @@ namespace tremor::gfx {
             if (!descriptorWrites.empty()) {
                 vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(descriptorWrites.size()),
                     descriptorWrites.data(), 0, nullptr);
-                Logger::get().info("Updated {} descriptor writes", descriptorWrites.size());
+                //Logger::get().info("Updated {} descriptor writes", descriptorWrites.size());
             }
 
             return true;
@@ -5020,7 +5021,7 @@ namespace tremor::gfx {
     }
 
         void VulkanBackend::createEnhancedScene() {
-            Logger::get().info("=== CREATING ENHANCED SCENE (FIXED) ===");
+            //Logger::get().info("=== CREATING ENHANCED SCENE (FIXED) ===");
 
             // CLEAR any existing octree
             AABBQ worldBounds{
@@ -5029,7 +5030,7 @@ namespace tremor::gfx {
             };
             m_sceneOctree = Octree<RenderableObject>(worldBounds);
 
-            Logger::get().info("Creating exactly 25 objects...");
+            //Logger::get().info("Creating exactly 25 objects...");
 
             // Create exactly 25 objects - no more, no less
             for (int i = 0; i < 25; i++) {
@@ -5049,39 +5050,39 @@ namespace tremor::gfx {
                 obj.prevTransform = obj.transform;
 
                 glm::mat4& transform = obj.transform;
-                Logger::get().info("Object {}: matrix row 0=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
-                    i, transform[0][0], transform[0][1], transform[0][2], transform[0][3]);
-                Logger::get().info("Object {}: matrix row 1=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
-                    i, transform[1][0], transform[1][1], transform[1][2], transform[1][3]);
-                Logger::get().info("Object {}: matrix row 2=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
-                    i, transform[2][0], transform[2][1], transform[2][2], transform[2][3]);
-                Logger::get().info("Object {}: matrix row 3=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
-                    i, transform[3][0], transform[3][1], transform[3][2], transform[3][3]);
+                //Logger::get().info("Object {}: matrix row 0=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
+                //    i, transform[0][0], transform[0][1], transform[0][2], transform[0][3]);
+                //Logger::get().info("Object {}: matrix row 1=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
+                //    i, transform[1][0], transform[1][1], transform[1][2], transform[1][3]);
+                //Logger::get().info("Object {}: matrix row 2=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
+                //    i, transform[2][0], transform[2][1], transform[2][2], transform[2][3]);
+                //Logger::get().info("Object {}: matrix row 3=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
+                //    i, transform[3][0], transform[3][1], transform[3][2], transform[3][3]);
 
                 // Calculate bounds
                 AABBF localBounds{ glm::vec3(-0.5f), glm::vec3(0.5f) };
                 AABBF worldBounds = transformAABB(obj.transform, localBounds);
                 obj.bounds = AABBQ::fromFloat(worldBounds);
 
-                Logger::get().info("Creating object {}: pos=({:.1f},{:.1f},{:.1f})", i, x, y, z);
+                //Logger::get().info("Creating object {}: pos=({:.1f},{:.1f},{:.1f})", i, x, y, z);
 
                 // Insert ONCE into octree
                 try {
                     m_sceneOctree.insert(obj, obj.bounds);
-                    Logger::get().info("  Inserted object {} successfully", i);
+                    //Logger::get().info("  Inserted object {} successfully", i);
                 }
                 catch (const std::exception& e) {
-                    Logger::get().error("  Failed to insert object {}: {}", i, e.what());
+                    //Logger::get().error("  Failed to insert object {}: {}", i, e.what());
                 }
             }
 
             // Verify exactly 25 objects
             auto allOctreeObjects = m_sceneOctree.getAllObjects();
-            Logger::get().info("VERIFICATION: Expected 25 objects, octree has {}", allOctreeObjects.size());
+            //Logger::get().info("VERIFICATION: Expected 25 objects, octree has {}", allOctreeObjects.size());
 
             if (allOctreeObjects.size() != 25) {
-                Logger::get().error("CRITICAL: Object count mismatch! Expected 25, got {}",
-                    allOctreeObjects.size());
+                //Logger::get().error("CRITICAL: Object count mismatch! Expected 25, got {}",
+                //    allOctreeObjects.size());
 
                 // Log all objects to find duplicates
                 std::map<uint32_t, int> instanceCounts;
@@ -5091,8 +5092,8 @@ namespace tremor::gfx {
 
                 for (const auto& [instanceID, count] : instanceCounts) {
                     if (count > 1) {
-                        Logger::get().error("  Instance {} appears {} times (DUPLICATE!)",
-                            instanceID, count);
+                        //Logger::get().error("  Instance {} appears {} times (DUPLICATE!)",
+                        //    instanceID, count);
                     }
                 }
             }
@@ -5109,7 +5110,7 @@ namespace tremor::gfx {
             lights.push_back(mainLight);
 
             m_clusteredRenderer->updateLights(lights);
-            Logger::get().info("Scene creation complete");
+            //Logger::get().info("Scene creation complete");
         }
 
 
@@ -5128,7 +5129,7 @@ namespace tremor::gfx {
         }
 
         void VulkanBackend::createTaffyMeshes() {
-            Logger::get().info("=== LOADING TAFFY ASSETS ===");
+            //Logger::get().info("=== LOADING TAFFY ASSETS ===");
 
 
             // Try to load some Taffy assets
@@ -5139,14 +5140,14 @@ namespace tremor::gfx {
             std::cout << "asset_paths.size(): " << asset_paths.size() << std::endl;
             
             for (size_t i = 0; i < asset_paths.size(); ++i) {
-                Logger::get().info("asset_paths[ {} ]: {}", i, asset_paths[i]);
+                //Logger::get().info("asset_paths[ {} ]: {}", i, asset_paths[i]);
             }
 
             if (asset_paths.empty()) {
                 std::cout << "ERROR: asset_paths is empty!" << std::endl;
             }
             else {
-                Logger::get().info("About to start loading loop...");
+                //Logger::get().info("About to start loading loop...");
             }
             
             for (const auto& path : asset_paths) {
@@ -5154,10 +5155,10 @@ namespace tremor::gfx {
                 auto loaded_asset = taffy_loader_->load_asset(path);
                 if (loaded_asset) {
                     loaded_assets_.push_back(std::move(loaded_asset));
-                    Logger::get().info("Successfully loaded Taffy asset: {}", path);
+                    //Logger::get().info("Successfully loaded Taffy asset: {}", path);
                 }
                 else {
-                    Logger::get().warning("Failed to load Taffy asset: {}", path);
+                    //Logger::get().warning("Failed to load Taffy asset: {}", path);
 
                     // Fallback to creating a simple mesh manually
                     if (path.find("cube") != std::string::npos) {
@@ -5167,15 +5168,15 @@ namespace tremor::gfx {
 
             // If no assets loaded, create fallback content
             if (loaded_assets_.empty()) {
-                Logger::get().info("No Taffy assets loaded, creating fallback content");
+                //Logger::get().info("No Taffy assets loaded, creating fallback content");
             }
             else {
-                Logger::get().info("Loaded {} Taffy assets", loaded_assets_.size());
+                //Logger::get().info("Loaded {} Taffy assets", loaded_assets_.size());
             }
         }
 
         void VulkanBackend::createTaffyScene() {
-            Logger::get().info("=== CREATING TAFFY-BASED SCENE ===");
+            //Logger::get().info("=== CREATING TAFFY-BASED SCENE ===");
 
             // Clear existing octree
             AABBQ worldBounds{
@@ -5185,7 +5186,7 @@ namespace tremor::gfx {
             m_sceneOctree = Octree<RenderableObject>(worldBounds);
 
             if (loaded_assets_.empty()) {
-                Logger::get().error("No loaded assets to create scene from");
+                //Logger::get().error("No loaded assets to create scene from");
                 return;
             }
 
@@ -5222,16 +5223,16 @@ namespace tremor::gfx {
                     AABBF worldBounds = transformAABB(obj.transform, localBounds);
                     obj.bounds = AABBQ::fromFloat(worldBounds);
 
-                    Logger::get().info("Creating Taffy object {}: pos=({:.1f},{:.1f},{:.1f})",
-                        object_count, pos_x, pos_y, pos_z);
+                    //Logger::get().info("Creating Taffy object {}: pos=({:.1f},{:.1f},{:.1f})",
+                    //    object_count, pos_x, pos_y, pos_z);
 
                     // Insert into octree
                     try {
                         m_sceneOctree.insert(obj, obj.bounds);
-                        Logger::get().info("  Inserted object {} successfully", object_count);
+                        //Logger::get().info("  Inserted object {} successfully", object_count);
                     }
                     catch (const std::exception& e) {
-                        Logger::get().error("  Failed to insert object {}: {}", object_count, e.what());
+                        //Logger::get().error("  Failed to insert object {}: {}", object_count, e.what());
                     }
 
                     object_count++;
@@ -5264,7 +5265,7 @@ namespace tremor::gfx {
             auto fragShader = ShaderModule::compileFromFile(device, "shaders/diag.frag");
 
             if (!taskShader || !meshShader || !fragShader) {
-                Logger::get().error("Failed to compile mesh shaders");
+                //Logger::get().error("Failed to compile mesh shaders");
                 return false;
             }
 
@@ -5274,12 +5275,12 @@ namespace tremor::gfx {
 
             VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
             if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
-                Logger::get().error("Failed to create pipeline layout");
+                //Logger::get().error("Failed to create pipeline layout");
                 return false;
             }
 
             m_meshShaderPipelineLayout = std::make_unique<PipelineLayoutResource>(device, pipelineLayout);
-            Logger::get().info("Created mesh shader pipeline layout");
+            //Logger::get().info("Created mesh shader pipeline layout");
 
             // Create shader stages
             std::vector<VkPipelineShaderStageCreateInfo> shaderStages = {
@@ -5355,12 +5356,12 @@ namespace tremor::gfx {
                 device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
 
             if (result != VK_SUCCESS) {
-                Logger::get().error("Failed to create mesh shader pipeline: {}", (int)result);
+                //Logger::get().error("Failed to create mesh shader pipeline: {}", (int)result);
                 return false;
             }
 
             m_meshShaderPipeline = std::make_unique<PipelineResource>(device, pipeline);
-            Logger::get().info("Created mesh shader pipeline successfully");
+            //Logger::get().info("Created mesh shader pipeline successfully");
 
             return true;
         }
@@ -5387,8 +5388,8 @@ namespace tremor::gfx {
             if (++frameCount % 60 == 0) { // Every 60 frames
                 glm::vec3 pos = cam.getLocalPosition();
                 glm::vec3 forward = cam.getForward();
-                Logger::get().info("Camera: pos=({:.1f},{:.1f},{:.1f}), forward=({:.2f},{:.2f},{:.2f})",
-                    pos.x, pos.y, pos.z, forward.x, forward.y, forward.z);
+                //Logger::get().info("Camera: pos=({:.1f},{:.1f},{:.1f}), forward=({:.2f},{:.2f},{:.2f})",
+                //    pos.x, pos.y, pos.z, forward.x, forward.y, forward.z);
             }
 
 
@@ -5418,7 +5419,7 @@ namespace tremor::gfx {
             light.shininess = 32.0f;                       // Moderately focused highlights
 
             m_lightBuffer->update(&light, sizeof(light));
-            Logger::get().info("Light buffer created successfully");
+            //Logger::get().info("Light buffer created successfully");
             return true;
         }
 
@@ -5437,7 +5438,7 @@ namespace tremor::gfx {
             light.shininess = 32.0f;                       // Moderately focused highlights
 
             m_lightBuffer->update(&light, sizeof(light));
-            Logger::get().info("Light buffer created successfully");
+            //Logger::get().info("Light buffer created successfully");
             return true;
 
         }
@@ -5474,7 +5475,7 @@ namespace tremor::gfx {
             material.hasOcclusionMap = 0;
 
             m_materialBuffer->update(&material, sizeof(material));
-            Logger::get().info("Material buffer created successfully");
+            //Logger::get().info("Material buffer created successfully");
             return true;
         }
 
@@ -5492,13 +5493,13 @@ namespace tremor::gfx {
             // Create the command pool
             VkCommandPool commandPool = VK_NULL_HANDLE;
             if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
-                Logger::get().error("Failed to create command pool");
+                //Logger::get().error("Failed to create command pool");
                 return false;
             }
 
             // Store in RAII wrapper
             m_commandPool = std::make_unique<CommandPoolResource>(device, commandPool);
-            Logger::get().info("Command pool created successfully");
+            //Logger::get().info("Command pool created successfully");
 
             return true;
         }
@@ -5506,7 +5507,7 @@ namespace tremor::gfx {
         bool VulkanBackend::createCommandBuffers() {
             // Make sure we have a command pool
             if (!m_commandPool || !*m_commandPool) {
-                Logger::get().error("Cannot create command buffers without a valid command pool");
+                //Logger::get().error("Cannot create command buffers without a valid command pool");
                 return false;
             }
 
@@ -5521,11 +5522,11 @@ namespace tremor::gfx {
             allocInfo.commandBufferCount = static_cast<uint32_t>(m_commandBuffers.size());
 
             if (vkAllocateCommandBuffers(device, &allocInfo, m_commandBuffers.data()) != VK_SUCCESS) {
-                Logger::get().error("Failed to allocate command buffers");
+                //Logger::get().error("Failed to allocate command buffers");
                 return false;
             }
 
-            Logger::get().info("Command buffers created successfully: {}", m_commandBuffers.size());
+            //Logger::get().info("Command buffers created successfully: {}", m_commandBuffers.size());
             return true;
         }
 
@@ -5547,7 +5548,7 @@ namespace tremor::gfx {
                 // Create image available semaphore
                 VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
                 if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS) {
-                    Logger::get().error("Failed to create image available semaphore for frame {}", i);
+                    //Logger::get().error("Failed to create image available semaphore for frame {}", i);
                     return false;
                 }
                 m_imageAvailableSemaphores[i] = SemaphoreResource(device, imageAvailableSemaphore);
@@ -5555,7 +5556,7 @@ namespace tremor::gfx {
                 // Create render finished semaphore
                 VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
                 if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS) {
-                    Logger::get().error("Failed to create render finished semaphore for frame {}", i);
+                    //Logger::get().error("Failed to create render finished semaphore for frame {}", i);
                     return false;
                 }
                 m_renderFinishedSemaphores[i] = SemaphoreResource(device, renderFinishedSemaphore);
@@ -5563,13 +5564,13 @@ namespace tremor::gfx {
                 // Create in-flight fence
                 VkFence inFlightFence = VK_NULL_HANDLE;
                 if (vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) {
-                    Logger::get().error("Failed to create in-flight fence for frame {}", i);
+                    //Logger::get().error("Failed to create in-flight fence for frame {}", i);
                     return false;
                 }
                 m_inFlightFences[i] = FenceResource(device, inFlightFence);
             }
 
-            Logger::get().info("Synchronization objects created successfully");
+            //Logger::get().info("Synchronization objects created successfully");
             return true;
         }
 
@@ -5601,12 +5602,12 @@ namespace tremor::gfx {
                     m_framebuffers[i] = std::make_unique<Framebuffer>(device, framebufferInfo);
                 }
                 catch (const std::exception& e) {
-                    Logger::get().error("Failed to create framebuffer {}: {}", i, e.what());
+                    //Logger::get().error("Failed to create framebuffer {}: {}", i, e.what());
                     return false;
                 }
             }
 
-            Logger::get().info("Created {} framebuffers", m_framebuffers.size());
+            //Logger::get().info("Created {} framebuffers", m_framebuffers.size());
             return true;
         }
 
@@ -5684,10 +5685,10 @@ namespace tremor::gfx {
             // Create the render pass
             try {
                 rp = std::make_unique<RenderPass>(device, renderPassInfo);
-                Logger::get().info("Render pass created successfully");
+                //Logger::get().info("Render pass created successfully");
             }
             catch (const std::exception& e) {
-                Logger::get().error("Failed to create render pass: {}", e.what());
+                //Logger::get().error("Failed to create render pass: {}", e.what());
                 throw; // Rethrow to be caught by initialize
             }
             return true;
@@ -5720,7 +5721,7 @@ namespace tremor::gfx {
             // Create the image with RAII wrapper
             m_depthImage = std::make_unique<ImageResource>(device);
             if (vkCreateImage(device, &imageInfo, nullptr, &m_depthImage->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create depth image");
+                //Logger::get().error("Failed to create depth image");
                 return false;
             }
 
@@ -5736,7 +5737,7 @@ namespace tremor::gfx {
 
             m_depthImageMemory = std::make_unique<DeviceMemoryResource>(device);
             if (vkAllocateMemory(device, &allocInfo, nullptr, &m_depthImageMemory->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to allocate depth image memory");
+                //Logger::get().error("Failed to allocate depth image memory");
                 return false;
             }
 
@@ -5756,11 +5757,11 @@ namespace tremor::gfx {
 
             m_depthImageView = std::make_unique<ImageViewResource>(device);
             if (vkCreateImageView(device, &viewInfo, nullptr, &m_depthImageView->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create depth image view");
+                //Logger::get().error("Failed to create depth image view");
                 return false;
             }
 
-            Logger::get().info("Depth resources created successfully");
+            //Logger::get().info("Depth resources created successfully");
             return true;
         }
 
@@ -5823,7 +5824,7 @@ namespace tremor::gfx {
 
             m_colorImage = std::make_unique<ImageResource>(device);
             if (vkCreateImage(device, &imageInfo, nullptr, &m_colorImage->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create color image for MSAA");
+                //Logger::get().error("Failed to create color image for MSAA");
                 return false;
             }
 
@@ -5839,7 +5840,7 @@ namespace tremor::gfx {
 
             m_colorImageMemory = std::make_unique<DeviceMemoryResource>(device);
             if (vkAllocateMemory(device, &allocInfo, nullptr, &m_colorImageMemory->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to allocate color image memory");
+                //Logger::get().error("Failed to allocate color image memory");
                 return false;
             }
 
@@ -5859,12 +5860,12 @@ namespace tremor::gfx {
 
             m_colorImageView = std::make_unique<ImageViewResource>(device);
             if (vkCreateImageView(device, &viewInfo, nullptr, &m_colorImageView->handle()) != VK_SUCCESS) {
-                Logger::get().error("Failed to create color image view");
+                //Logger::get().error("Failed to create color image view");
                 return false;
             }
 
-            Logger::get().info("MSAA color resources created successfully ({}x MSAA)", 
-                              static_cast<uint32_t>(m_msaaSamples));
+            //Logger::get().info("MSAA color resources created successfully ({}x MSAA)", 
+            //                  static_cast<uint32_t>(m_msaaSamples));
             return true;
         }
 
@@ -5884,8 +5885,8 @@ namespace tremor::gfx {
             // Add camera debug info
             glm::vec3 camPos = cam.getLocalPosition();
             glm::vec3 camForward = cam.getForward();
-            Logger::get().info("Camera pos: ({:.2f}, {:.2f}, {:.2f}), forward: ({:.2f}, {:.2f}, {:.2f})",
-                camPos.x, camPos.y, camPos.z, camForward.x, camForward.y, camForward.z);
+            //Logger::get().info("Camera pos: ({:.2f}, {:.2f}, {:.2f}), forward: ({:.2f}, {:.2f}, {:.2f})",
+            //    camPos.x, camPos.y, camPos.z, camForward.x, camForward.y, camForward.z);
 
             m_clusteredRenderer->setCamera(&cam);
             m_clusteredRenderer->buildClusters(&cam, (m_sceneOctree));
@@ -5896,7 +5897,7 @@ namespace tremor::gfx {
             }
 
             if (!vkSwapchain || !vkSwapchain.get()) {
-                Logger::get().error("Swapchain is null in beginFrame()");
+                //Logger::get().error("Swapchain is null in beginFrame()");
                 return;
             }
 
@@ -6034,32 +6035,32 @@ namespace tremor::gfx {
 			{
 				glm::vec3 camPos = cam.getLocalPosition();
 				glm::vec3 camForward = cam.getForward();
-				Logger::get().info("Camera position: ({:.2f}, {:.2f}, {:.2f})", camPos.x, camPos.y, camPos.z);
-				Logger::get().info("Camera forward: ({:.2f}, {:.2f}, {:.2f})", camForward.x, camForward.y, camForward.z);
+				/*Logger::get().info("Camera position: ({:.2f}, {:.2f}, {:.2f})", camPos.x, camPos.y, camPos.z);
+				//Logger::get().info("Camera forward: ({:.2f}, {:.2f}, {:.2f})", camForward.x, camForward.y, camForward.z);*/
 				
 				// Force camera update
 				cam.update(0.0f);
 				
 				glm::mat4 mvp = cam.getViewProjectionMatrix();
-				Logger::get().info("View-Projection Matrix:");
+				/*Logger::get().info("View-Projection Matrix:");
 				for (int i = 0; i < 4; i++) {
 					Logger::get().info("  [{:.3f}, {:.3f}, {:.3f}, {:.3f}]", 
 						mvp[i][0], mvp[i][1], mvp[i][2], mvp[i][3]);
-				}
+				}*/
 				
 				// Also check view and projection separately
 				glm::mat4 view = cam.getViewMatrix();
 				glm::mat4 proj = cam.getProjectionMatrix();
-				Logger::get().info("View Matrix [3]: ({:.3f}, {:.3f}, {:.3f})", view[3][0], view[3][1], view[3][2]);
-				Logger::get().info("Projection Matrix [0][0]: {:.3f}, [1][1]: {:.3f}", proj[0][0], proj[1][1]);
+				/*Logger::get().info("View Matrix [3]: ({:.3f}, {:.3f}, {:.3f})", view[3][0], view[3][1], view[3][2]);
+				//Logger::get().info("Projection Matrix [0][0]: {:.3f}, [1][1]: {:.3f}", proj[0][0], proj[1][1]);*/
 			}
 			
 			// TEST: Check rendering state
 			{
-				Logger::get().info("=== RENDER STATE CHECK ===");
-				Logger::get().info("Using dynamic rendering: {}", dr ? "YES" : "NO");
-				Logger::get().info("Command buffer: {}", (void*)m_commandBuffers[currentFrame]);
-				Logger::get().info("Current swapchain extent: {}x{}", vkSwapchain.get()->extent().width, vkSwapchain.get()->extent().height);
+				//Logger::get().info("=== RENDER STATE CHECK ===");
+				//Logger::get().info("Using dynamic rendering: {}", dr ? "YES" : "NO");
+				//Logger::get().info("Command buffer: {}", (void*)m_commandBuffers[currentFrame]);
+				//Logger::get().info("Current swapchain extent: {}x{}", vkSwapchain.get()->extent().width, vkSwapchain.get()->extent().height);
 			}
 			
             hot_pink_enabled = std::chrono::steady_clock::now().time_since_epoch().count() % 1000000000 > 500000000;
@@ -6073,21 +6074,21 @@ namespace tremor::gfx {
 
             // Check if asset reload was requested (could be set by keyboard input)
             if (reload_assets_requested) {
-                Logger::get().info("Reloading assets...");
+                //Logger::get().info("Reloading assets...");
                 m_overlayManager->reloadAsset("assets/fixed_triangle.taf");
                 reload_assets_requested = false;
-                Logger::get().info("Assets reloaded!");
+                //Logger::get().info("Assets reloaded!");
             }
 
             m_overlayManager->checkForPipelineUpdates();
 
 
-			Logger::get().critical("About to call renderMeshAsset");
-			Logger::get().critical("  m_overlayManager pointer: {}", (void*)m_overlayManager.get());
-			Logger::get().critical("  VulkanBackend instance: {}", (void*)this);
+			//Logger::get().critical("About to call renderMeshAsset");
+			//Logger::get().critical("  m_overlayManager pointer: {}", (void*)m_overlayManager.get());
+			//Logger::get().critical("  VulkanBackend instance: {}", (void*)this);
 			
 			if (!m_overlayManager) {
-				Logger::get().error("m_overlayManager is null!");
+				//Logger::get().error("m_overlayManager is null!");
 				return;
 			}
 			
@@ -6225,10 +6226,10 @@ namespace tremor::gfx {
             // End command buffer recording
             VkResult endResult = vkEndCommandBuffer(m_commandBuffers[currentFrame]);
             if (endResult != VK_SUCCESS) {
-                Logger::get().error("Failed to end command buffer: {}", static_cast<int>(endResult));
+                //Logger::get().error("Failed to end command buffer: {}", static_cast<int>(endResult));
                 return;
             }
-            Logger::get().info("Command buffer ended successfully");
+            //Logger::get().info("Command buffer ended successfully");
 
             // Submit command buffer
             VkSubmitInfo submitInfo{};
@@ -6248,24 +6249,24 @@ namespace tremor::gfx {
 
             VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo, m_inFlightFences[currentFrame].handle());
             if (submitResult != VK_SUCCESS) {
-                Logger::get().error("Failed to submit command buffer: {}", static_cast<int>(submitResult));
+                //Logger::get().error("Failed to submit command buffer: {}", static_cast<int>(submitResult));
                 return;
             }
-            Logger::get().info("Command buffer submitted successfully");
+            //Logger::get().info("Command buffer submitted successfully");
 
             // Present the image
             VkResult presentResult = vkSwapchain.get()->present(m_currentImageIndex, m_renderFinishedSemaphores[currentFrame]);
 
-            Logger::get().info("Present result: {}", static_cast<int>(presentResult));
+            //Logger::get().info("Present result: {}", static_cast<int>(presentResult));
 
             if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
-                Logger::get().info("Recreating swapchain");
+                //Logger::get().info("Recreating swapchain");
                 int width, height;
                 SDL_GetWindowSize(w, &width, &height);
                 vkSwapchain.get()->recreate(width, height);
             }
             else if (presentResult != VK_SUCCESS) {
-                Logger::get().error("Failed to present: {}", static_cast<int>(presentResult));
+                //Logger::get().error("Failed to present: {}", static_cast<int>(presentResult));
                 return;
             }
 
@@ -6311,19 +6312,19 @@ namespace tremor::gfx {
             // Add to octree
             //m_sceneOctree.insert(cubeObject, quantizedBounds);
 
-            Logger::get().info("Cube added to octree as renderable object");
+            //Logger::get().info("Cube added to octree as renderable object");
         }
 
 
         bool VulkanBackend::initialize(SDL_Window* window) {
-            Logger::get().critical("VulkanBackend::initialize called!");
-            Logger::get().critical("  VulkanBackend instance: {}", (void*)this);
+            //Logger::get().critical("VulkanBackend::initialize called!");
+            //Logger::get().critical("  VulkanBackend instance: {}", (void*)this);
             
             static int initCount = 0;
-            Logger::get().critical("  Initialize call count: {}", ++initCount);
+            //Logger::get().critical("  Initialize call count: {}", ++initCount);
             
             if (initCount > 1) {
-                Logger::get().critical("WARNING: VulkanBackend::initialize called multiple times!");
+                //Logger::get().critical("WARNING: VulkanBackend::initialize called multiple times!");
             }
 
             ShaderReflection combinedReflection;
@@ -6339,7 +6340,7 @@ namespace tremor::gfx {
 
             // Initialize MSAA
             m_msaaSamples = getMaxUsableSampleCount();
-            Logger::get().info("Using {}x MSAA", static_cast<uint32_t>(m_msaaSamples));
+            //Logger::get().info("Using {}x MSAA", static_cast<uint32_t>(m_msaaSamples));
 
             createDepthResources();
             if (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT) {
@@ -6356,7 +6357,7 @@ namespace tremor::gfx {
 
             if (vkDevice.get()->capabilities().dynamicRendering) {
                 dr = std::make_unique<DynamicRenderer>();
-                Logger::get().info("Dynamic renderer created.");
+                //Logger::get().info("Dynamic renderer created.");
             }
             else {
                 createRenderPass();
@@ -6418,7 +6419,7 @@ namespace tremor::gfx {
             );
 
             if (!m_clusteredRenderer->initialize((Format)vkDevice.get()->colorFormat(), (Format)vkDevice.get()->depthFormat())) {
-                Logger::get().error("Failed to initialize enhanced clustered renderer");
+                //Logger::get().error("Failed to initialize enhanced clustered renderer");
                 return false;
             }
 
@@ -6429,7 +6430,7 @@ namespace tremor::gfx {
                 vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
                 vkSwapchain->imageFormat(),
                 m_msaaSamples)) {
-                Logger::get().error("Failed to initialize SDF text renderer");
+                //Logger::get().error("Failed to initialize SDF text renderer");
                 // Continue anyway - text rendering is optional
             }
 
@@ -6530,14 +6531,14 @@ namespace tremor::gfx {
             // Get SDL Vulkan extensions
             unsigned int sdlExtensionCount = 0;
             if (!SDL_Vulkan_GetInstanceExtensions(w, &sdlExtensionCount, nullptr)) {
-                Logger::get().error("SDL_Vulkan_GetInstanceExtensions failed: {}", SDL_GetError());
+                //Logger::get().error("SDL_Vulkan_GetInstanceExtensions failed: {}", SDL_GetError());
                 return false;
             }
 
             // Allocate space for extensions (SDL + additional ones)
             auto instanceExtensions = tremor::mem::ScopedAlloc<const char*>(sdlExtensionCount + 5);
             if (!SDL_Vulkan_GetInstanceExtensions(w, &sdlExtensionCount, instanceExtensions.get())) {
-                Logger::get().error("SDL_Vulkan_GetInstanceExtensions failed: {}", SDL_GetError());
+                //Logger::get().error("SDL_Vulkan_GetInstanceExtensions failed: {}", SDL_GetError());
                 return false;
             }
 
@@ -6548,7 +6549,7 @@ namespace tremor::gfx {
             uint32_t availableExtensionCount = 0;
             err = vkEnumerateInstanceExtensionProperties(nullptr, &availableExtensionCount, nullptr);
             if (err != VK_SUCCESS) {
-                Logger::get().error("Failed to query instance extension count");
+                //Logger::get().error("Failed to query instance extension count");
                 return false;
             }
 
@@ -6561,7 +6562,7 @@ namespace tremor::gfx {
 
                 err = vkEnumerateInstanceExtensionProperties(nullptr, &availableExtensionCount, extensionProps.get());
                 if (err != VK_SUCCESS) {
-                    Logger::get().error("Failed to enumerate instance extensions");
+                    //Logger::get().error("Failed to enumerate instance extensions");
                     return false;
                 }
 
@@ -6604,9 +6605,9 @@ namespace tremor::gfx {
             vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
 
             // Print available layers
-            Logger::get().info("Available Vulkan layers:");
+            //Logger::get().info("Available Vulkan layers:");
             for (const auto& layer : availableLayers) {
-                Logger::get().info("  {}", layer.layerName);
+                //Logger::get().info("  {}", layer.layerName);
 
                 // Check if it's the validation layer
                 if (strcmp("VK_LAYER_KHRONOS_validation", layer.layerName) == 0) {
@@ -6615,11 +6616,11 @@ namespace tremor::gfx {
             }
 
             if (!enableValidation) {
-                Logger::get().warning("Validation layer not found. Continuing without validation.");
-                Logger::get().warning("To enable validation, use vkconfig from the Vulkan SDK.");
+                //Logger::get().warning("Validation layer not found. Continuing without validation.");
+                //Logger::get().warning("To enable validation, use vkconfig from the Vulkan SDK.");
             }
             else {
-                Logger::get().info("Validation layer found and enabled.");
+                //Logger::get().info("Validation layer found and enabled.");
             }
 #else
             enableValidation = false;
@@ -6669,7 +6670,7 @@ namespace tremor::gfx {
             VkInstance inst;
             err = vkCreateInstance(&createInfo, nullptr, &inst);
             if (err != VK_SUCCESS) {
-                Logger::get().error("Failed to create Vulkan instance: {}", (int)err);
+                //Logger::get().error("Failed to create Vulkan instance: {}", (int)err);
                 return false;
             }
 
@@ -6677,7 +6678,7 @@ namespace tremor::gfx {
 
             volkLoadInstance(instance);
 
-            Logger::get().info("Vulkan instance created successfully");
+            //Logger::get().info("Vulkan instance created successfully");
 
             // Load instance-level functions
             volkLoadInstance(instance);
@@ -6693,20 +6694,20 @@ namespace tremor::gfx {
                 );
 
                 if (err != VK_SUCCESS) {
-                    Logger::get().error("Failed to set up debug messenger: {}", (int)err);
+                    //Logger::get().error("Failed to set up debug messenger: {}", (int)err);
                     // Continue anyway, this is not fatal
                 }
             }
 #endif
             VkSurfaceKHR surf;
             if (!SDL_Vulkan_CreateSurface(w, instance, &surf)) {
-                Logger::get().error("Failed to create Vulkan surface : {}", (int)err);
+                //Logger::get().error("Failed to create Vulkan surface : {}", (int)err);
                 return false;
             }
 
             surface = SurfaceResource(instance, surf);
 
-            Logger::get().info("Vulkan surface created successfully");
+            //Logger::get().info("Vulkan surface created successfully");
 
             return true;
         }
@@ -6798,7 +6799,7 @@ namespace tremor::gfx {
                 bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
                 if (vkCreateBuffer(device, &bufferInfo, nullptr, &stagingBuffer) != VK_SUCCESS) {
-                    Logger::get().error("Failed to create staging buffer for texture");
+                    //Logger::get().error("Failed to create staging buffer for texture");
                     return false;
                 }
 
@@ -6817,7 +6818,7 @@ namespace tremor::gfx {
 
                 if (vkAllocateMemory(device, &allocInfo, nullptr, &stagingBufferMemory) != VK_SUCCESS) {
                     vkDestroyBuffer(device, stagingBuffer, nullptr);
-                    Logger::get().error("Failed to allocate staging buffer memory");
+                    //Logger::get().error("Failed to allocate staging buffer memory");
                     return false;
                 }
 
@@ -6849,7 +6850,7 @@ namespace tremor::gfx {
                 // Create image
                 m_textureImage = std::make_unique<ImageResource>(device);
                 if (vkCreateImage(device, &imageInfo, nullptr, &m_textureImage->handle()) != VK_SUCCESS) {
-                    Logger::get().error("Failed to create texture image");
+                    //Logger::get().error("Failed to create texture image");
                     return false;
                 }
 
@@ -6864,7 +6865,7 @@ namespace tremor::gfx {
 
                 m_textureImageMemory = std::make_unique<DeviceMemoryResource>(device);
                 if (vkAllocateMemory(device, &allocInfo, nullptr, &m_textureImageMemory->handle()) != VK_SUCCESS) {
-                    Logger::get().error("Failed to allocate texture image memory");
+                    //Logger::get().error("Failed to allocate texture image memory");
                     return false;
                 }
 
@@ -6951,7 +6952,7 @@ namespace tremor::gfx {
 
                 m_missingTextureImageView = std::make_unique<ImageViewResource>(device);
                 if (vkCreateImageView(device, &viewInfo, nullptr, &m_missingTextureImageView->handle()) != VK_SUCCESS) {
-                    Logger::get().error("Failed to create texture image view");
+                    //Logger::get().error("Failed to create texture image view");
                     return false;
                 }
 
@@ -6976,7 +6977,7 @@ namespace tremor::gfx {
 
                 m_textureSampler = std::make_unique<SamplerResource>(device);
                 if (vkCreateSampler(device, &samplerInfo, nullptr, &m_textureSampler->handle()) != VK_SUCCESS) {
-                    Logger::get().error("Failed to create texture sampler");
+                    //Logger::get().error("Failed to create texture sampler");
                     return false;
                 }
 
@@ -6984,11 +6985,11 @@ namespace tremor::gfx {
                 vkDestroyBuffer(device, stagingBuffer, nullptr);
                 vkFreeMemory(device, stagingBufferMemory, nullptr);
 
-                Logger::get().info("Texture created successfully");
+                //Logger::get().info("Texture created successfully");
                 return true;
             }
             catch (const std::exception& e) {
-                Logger::get().error("Exception in createTestTexture: {}", e.what());
+                //Logger::get().error("Exception in createTestTexture: {}", e.what());
                 return false;
             }
         }
@@ -7016,7 +7017,7 @@ namespace tremor::gfx {
         void VulkanBackend::endSingleTimeCommands(VkCommandBuffer commandBuffer) {
             vkEndCommandBuffer(commandBuffer);
 
-            Logger::get().info("Ending command buffer...");
+            //Logger::get().info("Ending command buffer...");
 
             VkSubmitInfo submitInfo{};
             submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -7024,10 +7025,10 @@ namespace tremor::gfx {
             submitInfo.pCommandBuffers = &commandBuffer;
 
             VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-            Logger::get().info("Queue submit result: {}", static_cast<int>(submitResult));
+            //Logger::get().info("Queue submit result: {}", static_cast<int>(submitResult));
 
             VkResult waitResult = vkQueueWaitIdle(graphicsQueue);
-            Logger::get().info("Queue wait result: {}", static_cast<int>(waitResult));
+            //Logger::get().info("Queue wait result: {}", static_cast<int>(waitResult));
 
             vkFreeCommandBuffers(device, *m_commandPool, 1, &commandBuffer);
         }
@@ -7054,7 +7055,7 @@ namespace tremor::gfx {
             for (uint32_t i = 0; i <= maxSetNumber; i++) {
                 m_descriptorSetLayouts[i] = combinedReflection.createDescriptorSetLayout(device, i);
                 if (!m_descriptorSetLayouts[i]) {
-                    Logger::get().error("Failed to create descriptor set layout for set {}", i);
+                    //Logger::get().error("Failed to create descriptor set layout for set {}", i);
                     return false;
                 }
             }
@@ -7062,14 +7063,14 @@ namespace tremor::gfx {
             // Create pipeline layout using all descriptor set layouts
             m_pipelineLayout = combinedReflection.createPipelineLayout(device);
             if (!m_pipelineLayout) {
-                Logger::get().error("Failed to create pipeline layout");
+                //Logger::get().error("Failed to create pipeline layout");
                 return false;
             }
 
             // Create descriptor pool sized appropriately based on reflection
             m_descriptorPool = combinedReflection.createDescriptorPool(device);
             if (!m_descriptorPool) {
-                Logger::get().error("Failed to create descriptor pool");
+                //Logger::get().error("Failed to create descriptor pool");
                 return false;
             }
 
@@ -7078,7 +7079,7 @@ namespace tremor::gfx {
 
     void VulkanClusteredRenderer::updateMeshBuffers() {
         if (!m_vertexBuffer || !m_meshIndexBuffer || !m_meshInfoBuffer) {
-            Logger::get().error("Mesh buffers not initialized");
+            //Logger::get().error("Mesh buffers not initialized");
             return;
         }
 
@@ -7099,11 +7100,11 @@ namespace tremor::gfx {
                     
                     // Debug output for first few vertices
                     if (i < 3) {
-                        Logger::get().info("Vertex {} - Vec3Q: ({}, {}, {}) -> Float: ({:.6f}, {:.6f}, {:.6f})", 
-                            i, vertex.position.x, vertex.position.y, vertex.position.z,
-                            floatPos.x, floatPos.y, floatPos.z);
-                        Logger::get().info("  Color: ({:.3f}, {:.3f}, {:.3f}, {:.3f})",
-                            vertex.color.x, vertex.color.y, vertex.color.z, vertex.color.w);
+                        //Logger::get().info("Vertex {} - Vec3Q: ({}, {}, {}) -> Float: ({:.6f}, {:.6f}, {:.6f})", 
+                        //    i, vertex.position.x, vertex.position.y, vertex.position.z,
+                        //    floatPos.x, floatPos.y, floatPos.z);
+                        //Logger::get().info("  Color: ({:.3f}, {:.3f}, {:.3f}, {:.3f})",
+                        //    vertex.color.x, vertex.color.y, vertex.color.z, vertex.color.w);
                     }
                     
                     // IMPORTANT: Pack data to match Taffy's OverlayVertex structure
@@ -7141,12 +7142,12 @@ namespace tremor::gfx {
                 VkDeviceSize vertexSize = floatVertexData.size() * sizeof(float);
                 if (vertexSize <= m_vertexBuffer->getSize()) {
                     m_vertexBuffer->update(floatVertexData.data(), vertexSize);
-                    Logger::get().info("Updated vertex buffer with {} floats ({} vertices)", 
-                        floatVertexData.size(), m_allVertices.size());
+                    //Logger::get().info("Updated vertex buffer with {} floats ({} vertices)", 
+                    //    floatVertexData.size(), m_allVertices.size());
                 }
                 else {
-                    Logger::get().warning("Vertex buffer too small: need {}, have {}",
-                        vertexSize, m_vertexBuffer->getSize());
+                    //Logger::get().warning("Vertex buffer too small: need {}, have {}",
+                    //    vertexSize, m_vertexBuffer->getSize());
                 }
             }
 
@@ -7157,8 +7158,8 @@ namespace tremor::gfx {
                     m_meshIndexBuffer->update(m_allIndices.data(), indexSize);
                 }
                 else {
-                    Logger::get().warning("Mesh index buffer too small: need {}, have {}",
-                        indexSize, m_meshIndexBuffer->getSize());
+                    //Logger::get().warning("Mesh index buffer too small: need {}, have {}",
+                    //    indexSize, m_meshIndexBuffer->getSize());
                 }
             }
 
@@ -7169,22 +7170,22 @@ namespace tremor::gfx {
                     m_meshInfoBuffer->update(m_meshInfos.data(), meshInfoSize);
                 }
                 else {
-                    Logger::get().warning("Mesh info buffer too small: need {}, have {}",
-                        meshInfoSize, m_meshInfoBuffer->getSize());
+                    //Logger::get().warning("Mesh info buffer too small: need {}, have {}",
+                    //    meshInfoSize, m_meshInfoBuffer->getSize());
                 }
             }
 
-            Logger::get().info("Updated mesh buffers: {} vertices, {} indices, {} meshes",
-                m_allVertices.size(), m_allIndices.size(), m_meshInfos.size());
+            //Logger::get().info("Updated mesh buffers: {} vertices, {} indices, {} meshes",
+            //    m_allVertices.size(), m_allIndices.size(), m_meshInfos.size());
         }
         catch (const std::exception& e) {
-            Logger::get().error("Exception in updateMeshBuffers: {}", e.what());
+            //Logger::get().error("Exception in updateMeshBuffers: {}", e.what());
         }
     }
 
     void VulkanClusteredRenderer::updateMaterialBuffer() {
         if (!m_materialBuffer) {
-            Logger::get().error("Material buffer not initialized");
+            //Logger::get().error("Material buffer not initialized");
             return;
         }
 
@@ -7193,16 +7194,16 @@ namespace tremor::gfx {
                 VkDeviceSize materialSize = m_materials.size() * sizeof(PBRMaterial);
                 if (materialSize <= m_materialBuffer->getSize()) {
                     m_materialBuffer->update(m_materials.data(), materialSize);
-                    Logger::get().info("Updated material buffer with {} materials", m_materials.size());
+                    //Logger::get().info("Updated material buffer with {} materials", m_materials.size());
                 }
                 else {
-                    Logger::get().warning("Material buffer too small: need {}, have {}",
-                        materialSize, m_materialBuffer->getSize());
+                    //Logger::get().warning("Material buffer too small: need {}, have {}",
+                    //    materialSize, m_materialBuffer->getSize());
                 }
             }
         }
         catch (const std::exception& e) {
-            Logger::get().error("Exception in updateMaterialBuffer: {}", e.what());
+            //Logger::get().error("Exception in updateMaterialBuffer: {}", e.what());
         }
     }
 
@@ -7210,7 +7211,7 @@ namespace tremor::gfx {
 
     void VulkanClusteredRenderer::updateUniformBuffers(Camera* camera) {
         if (!camera || !m_uniformBuffer) {
-            Logger::get().error("Camera or uniform buffer is null");
+            //Logger::get().error("Camera or uniform buffer is null");
             return;
         }
 
@@ -7260,23 +7261,23 @@ namespace tremor::gfx {
             glm::mat4 view = camera->getViewMatrix();
             glm::mat4 proj = camera->getProjectionMatrix();
 
-            Logger::get().info("Camera Debug:");
-            Logger::get().info("  Position: ({:.2f}, {:.2f}, {:.2f})", camPos.x, camPos.y, camPos.z);
-            Logger::get().info("  Forward: ({:.2f}, {:.2f}, {:.2f})", camForward.x, camForward.y, camForward.z);
-            Logger::get().info("  View[3]: ({:.2f}, {:.2f}, {:.2f})", view[3][0], view[3][1], view[3][2]);
+            //Logger::get().info("Camera Debug:");
+            //Logger::get().info("  Position: ({:.2f}, {:.2f}, {:.2f})", camPos.x, camPos.y, camPos.z);
+            //Logger::get().info("  Forward: ({:.2f}, {:.2f}, {:.2f})", camForward.x, camForward.y, camForward.z);
+            //Logger::get().info("  View[3]: ({:.2f}, {:.2f}, {:.2f})", view[3][0], view[3][1], view[3][2]);
 
             // Test a specific object position
             glm::vec3 objPos(0.0f, 0.0f, 0.0f); // Center object
             glm::vec4 screenPos = proj * view * glm::vec4(objPos, 1.0f);
-            Logger::get().info("  Object at origin projects to: ({:.2f}, {:.2f}, {:.2f}, {:.2f})",
-                screenPos.x, screenPos.y, screenPos.z, screenPos.w);
+            //Logger::get().info("  Object at origin projects to: ({:.2f}, {:.2f}, {:.2f}, {:.2f})",
+            //    screenPos.x, screenPos.y, screenPos.z, screenPos.w);
 
             size_t requiredSize = sizeof(RenderableObject) * ubo.numObjects;
             size_t actualSize = m_objectBuffer->getSize();
-            Logger::get().info("Required: {} bytes, Actual: {} bytes", requiredSize, actualSize);
+            //Logger::get().info("Required: {} bytes, Actual: {} bytes", requiredSize, actualSize);
         }
         catch (const std::exception& e) {
-            Logger::get().error("Exception in updateUniformBuffers: {}", e.what());
+            //Logger::get().error("Exception in updateUniformBuffers: {}", e.what());
         }
     }
 
