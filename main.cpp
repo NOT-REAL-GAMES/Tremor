@@ -61,9 +61,21 @@ public:
     SDL_AudioDeviceID audioDevice;
     int currentWaveform = 17;  // Start with imported sample
     int gateResetCounter = 0;  // Counter to reset gate after triggering
+    bool bitCrushEnabled = false;  // Enable bit crusher effect
 
     std::unique_ptr<tremor::gfx::RenderBackend> rb;
     std::unique_ptr<tremor::audio::TaffyAudioProcessor> audioProcessor;
+    
+    // Simple bit crusher effect
+    float applyBitCrush(float sample, float bits = 3.0f) {
+        if (!bitCrushEnabled) return sample;
+        
+        // Reduce bit depth
+        float levels = std::pow(2.0f, bits);
+        float scaled = sample * 0.5f + 0.5f;  // Convert from [-1,1] to [0,1]
+        float quantized = std::round(scaled * levels) / levels;
+        return quantized * 2.0f - 1.0f;  // Convert back to [-1,1]
+    }
     
     static void audioCallback(void* userdata, Uint8* stream, int len) {
         Engine* engine = static_cast<Engine*>(userdata);
@@ -77,6 +89,13 @@ public:
         
         if (engine->audioProcessor) {
             engine->audioProcessor->processAudio(outputBuffer, frameCount, 2);
+            
+            // Apply bit crusher effect if enabled
+            if (engine->bitCrushEnabled) {
+                for (uint32_t i = 0; i < frameCount * 2; ++i) {
+                    outputBuffer[i] = engine->applyBitCrush(outputBuffer[i]);
+                }
+            }
             
             // Handle gate reset for sample triggering
             if (engine->gateResetCounter > 0) {
@@ -208,8 +227,9 @@ public:
         Logger::get().info("   6-7: Mixer/ADSR demos");
         Logger::get().info("   8-0: Filters (Low/High/Band-pass)");
         Logger::get().info("   Q-Y: Distortion effects");
-        Logger::get().info("   U: Imported sample");
+        Logger::get().info("   U: Imported sample (Toggle bit crusher with B)");
         Logger::get().info("   I-P: Drum samples (Kick, Hi-hat, Pad loop)");
+        Logger::get().info("   B: Toggle bit crusher effect");
 
         // Load a test audio asset
         loadTestAudioAsset();
@@ -378,6 +398,7 @@ public:
                         switchWaveform(15); // ZX Spectrum beeper
                         break;
                     case SDLK_u:
+                        Logger::get().info("🎵 Playing imported sample{}", bitCrushEnabled ? " (bit-crushed)" : "");
                         switchWaveform(16); // Imported sample
                         break;
                     case SDLK_i:
@@ -389,6 +410,15 @@ public:
                         break;
                     case SDLK_p:
                         switchWaveform(19); // Pad loop
+                        break;
+                    case SDLK_b:
+                        // Toggle bit crusher effect
+                        bitCrushEnabled = !bitCrushEnabled;
+                        Logger::get().info("💥 Bit crusher effect {}", bitCrushEnabled ? "ENABLED" : "DISABLED");
+                        if (bitCrushEnabled) {
+                            Logger::get().info("   🎚️ 4-bit quantization for maximum crunch!");
+                            Logger::get().info("   🎵 Your audio will sound gloriously lo-fi!");
+                        }
                         break;
                 }
             }
