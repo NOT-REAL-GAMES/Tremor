@@ -12,6 +12,14 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Add custom module path for finding packages
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
+message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
+
+# Check for Vulkan SDK
+if(DEFINED ENV{VULKAN_SDK})
+    message(STATUS "VULKAN_SDK found at: $ENV{VULKAN_SDK}")
+else()
+    message(STATUS "VULKAN_SDK environment variable not set")
+endif()
 
 # Option to build shared libraries
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
@@ -34,7 +42,63 @@ if(NOT Vulkan_FOUND)
     message(FATAL_ERROR "Vulkan not found! Please install libvulkan-dev (Ubuntu/Debian) or vulkan-devel (Fedora)")
 endif()
 
-find_package(SDL2 REQUIRED)
+# Find SDL2
+set(SDL2_FOUND FALSE)
+if(WIN32 AND DEFINED ENV{VULKAN_SDK})
+    set(VULKAN_SDK_PATH $ENV{VULKAN_SDK})
+    
+    # Look for SDL2 in Vulkan SDK Third-Party folder
+    find_path(SDL2_INCLUDE_DIR
+        NAMES SDL.h
+        PATHS 
+            ${VULKAN_SDK_PATH}/Include
+            ${VULKAN_SDK_PATH}/Include/SDL2
+        NO_DEFAULT_PATH
+    )
+    
+    find_library(SDL2_LIBRARY
+        NAMES SDL2
+        PATHS
+            ${VULKAN_SDK_PATH}/Bin
+            ${VULKAN_SDK_PATH}/Lib
+        NO_DEFAULT_PATH
+    )
+    
+    find_library(SDL2MAIN_LIBRARY
+        NAMES SDL2main
+        PATHS
+            ${VULKAN_SDK_PATH}/Bin
+            ${VULKAN_SDK_PATH}/Lib
+        NO_DEFAULT_PATH
+    )
+    
+    if(SDL2_INCLUDE_DIR AND SDL2_LIBRARY)
+        set(SDL2_FOUND TRUE)
+        set(SDL2_INCLUDE_DIRS ${SDL2_INCLUDE_DIR})
+        set(SDL2_LIBRARIES ${SDL2_LIBRARY})
+        if(SDL2MAIN_LIBRARY)
+            list(APPEND SDL2_LIBRARIES ${SDL2MAIN_LIBRARY})
+        endif()
+        message(STATUS "Found SDL2 in Vulkan SDK: ${VULKAN_SDK_PATH}")
+        message(STATUS "  Include: ${SDL2_INCLUDE_DIRS}")
+        message(STATUS "  Libraries: ${SDL2_LIBRARIES}")
+        
+        # Create imported target for modern CMake
+        add_library(SDL2::SDL2 INTERFACE IMPORTED)
+        set_target_properties(SDL2::SDL2 PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIRS}"
+            INTERFACE_LINK_LIBRARIES "${SDL2_LIBRARIES}"
+        )
+    endif()
+else()
+    # On non-Windows platforms, use standard find_package
+    find_package(SDL2 REQUIRED)
+endif()
+
+if(NOT SDL2_FOUND)
+    message(FATAL_ERROR "SDL2 not found! On Windows, ensure VULKAN_SDK environment variable is set. On Linux, install libsdl2-dev.")
+endif()
+
 find_package(Threads REQUIRED)
 
 # Find optional packages
@@ -73,6 +137,7 @@ target_include_directories(Tremor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/audio
     ${TAFFY_INCLUDE_DIR}
     ${Vulkan_INCLUDE_DIRS}
+    ${SDL2_INCLUDE_DIRS}
     ${asio_SOURCE_DIR}/asio/include
 )
 
