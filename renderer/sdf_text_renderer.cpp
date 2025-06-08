@@ -1,5 +1,4 @@
 #include "sdf_text_renderer.h"
-#include "taffy.h"
 #include "asset.h"
 #include <iostream>
 #include <cstring>

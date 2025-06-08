@@ -10,6 +10,8 @@
 
 namespace tremor::audio {
 
+    float M_PI = 3.14159f;
+
     TaffyAudioProcessor::TaffyAudioProcessor(uint32_t sample_rate)
         : sample_rate_(sample_rate), current_time_(0.0f), sample_count_(0) {
     }
@@ -358,7 +360,10 @@ namespace tremor::audio {
         }
     }
 
-    void TaffyAudioProcessor::processNode(NodeState& node, uint32_t frameCount) {
+    void TaffyAudioProcessor::processNode(NodeState& node, uint32_t frameCount) {               
+        
+        static bool samplerLogged = false;
+
         switch (node.node.type) {
             case Taffy::AudioChunk::NodeType::Oscillator:
                 processOscillator(node, frameCount);
@@ -382,7 +387,6 @@ namespace tremor::audio {
                 processDistortion(node, frameCount);
                 break;
             case Taffy::AudioChunk::NodeType::Sampler:
-                static bool samplerLogged = false;
                 if (!samplerLogged) {
                     std::cout << "🎵 SAMPLER NODE FOUND AND PROCESSING!" << std::endl;
                     samplerLogged = true;
@@ -390,6 +394,7 @@ namespace tremor::audio {
                 processSampler(node, frameCount);
                 break;
             default:
+
                 // Clear output for unsupported nodes
                 std::memset(node.outputBuffer.data(), 0, frameCount * sizeof(float));
                 break;
