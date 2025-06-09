@@ -5879,7 +5879,7 @@ namespace tremor::gfx {
             updateUniformBuffer();
             updateLight();
 
-            cam.setPosition({sin(std::chrono::steady_clock::now().time_since_epoch().count()/100000000.0f)*5,0.0,cos(std::chrono::steady_clock::now().time_since_epoch().count()/100000000.0f)*5});
+            cam.setPosition({sin(std::chrono::steady_clock::now().time_since_epoch().count()/1000000000.0f)*5,0.0,cos(std::chrono::steady_clock::now().time_since_epoch().count()/1000000000.0f)*5});
             cam.lookAt({0.0f,0.0f,0.0f});
 
             // Add camera debug info

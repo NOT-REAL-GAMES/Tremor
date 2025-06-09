@@ -23,6 +23,10 @@ namespace tremor::audio {
          * @return true if loaded successfully
          */
         bool loadAudioChunk(const std::vector<uint8_t>& audioData);
+        bool loadFromData(const uint8_t* data, size_t size) {
+            std::vector<uint8_t> buffer(data, data + size);
+            return loadAudioChunk(buffer);
+        }
 
         /**
          * Process audio and fill output buffer
@@ -159,6 +163,46 @@ namespace tremor::audio {
         void processFilter(NodeState& node, uint32_t frameCount);
         void processDistortion(NodeState& node, uint32_t frameCount);
         void processSampler(NodeState& node, uint32_t frameCount);
+        void processStreamingSampler(NodeState& node, uint32_t frameCount);
+        
+    private:
+        // Streaming support
+        struct StreamingAudioInfo {
+            std::string filePath;
+            uint64_t dataOffset;
+            uint32_t totalSamples;
+            uint32_t chunkSize;
+            uint32_t sampleRate;
+            uint32_t channelCount;
+            uint32_t bitDepth;
+            uint32_t format;
+            
+            // Runtime state
+            std::ifstream* fileStream = nullptr;
+            std::vector<float> chunkBuffer;
+            std::vector<float> nextChunkBuffer;  // Pre-loaded next chunk
+            uint32_t currentChunk = 0;
+            uint32_t bufferPosition = 0;
+            bool nextChunkReady = false;
+            bool needsPreload = true;
+        };
+        
+        std::vector<StreamingAudioInfo> streamingAudios_;
+        
+        void preloadStreamingChunk(StreamingAudioInfo& stream, uint32_t chunkIndex);
+        
+    public:
+        // Set the TAF file path for streaming audio (needed for file access)
+        void setStreamingAudioFilePath(const std::string& filePath) {
+            for (auto& stream : streamingAudios_) {
+                stream.filePath = filePath;
+                // Pre-load the first chunk to avoid hitch on first play
+                if (stream.needsPreload) {
+                    preloadStreamingChunk(stream, 0);
+                    stream.needsPreload = false;
+                }
+            }
+        }
     };
 
 } // namespace tremor::audio

@@ -7,10 +7,15 @@
 #include <unordered_set>
 #include <functional>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 
 namespace tremor::audio {
 
+#ifndef M_PI
     float M_PI = 3.14159f;
+#endif
 
     TaffyAudioProcessor::TaffyAudioProcessor(uint32_t sample_rate)
         : sample_rate_(sample_rate), current_time_(0.0f), sample_count_(0) {
@@ -42,10 +47,28 @@ namespace tremor::audio {
         ptr += sizeof(Taffy::AudioChunk);
 
         std::cout << "🎵 Loading audio chunk:" << std::endl;
+        std::cout << "   Audio data size: " << audioData.size() << " bytes" << std::endl;
         std::cout << "   Nodes: " << header_.node_count << std::endl;
         std::cout << "   Connections: " << header_.connection_count << std::endl;
         std::cout << "   Parameters: " << header_.parameter_count << std::endl;
+        std::cout << "   Samples: " << header_.sample_count << std::endl;
+        std::cout << "   Streaming audios: " << header_.streaming_count << std::endl;
         std::cout << "   Sample rate: " << header_.sample_rate << " Hz" << std::endl;
+        std::cout << "   Header size: " << sizeof(Taffy::AudioChunk) << " bytes" << std::endl;
+        
+        // Debug first few bytes of header
+        std::cout << "   First 16 bytes of header: ";
+        for (int i = 0; i < 16 && i < audioData.size(); ++i) {
+            std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)audioData[i] << " ";
+        }
+        std::cout << std::dec << std::endl;
+        
+        // Debug: Show raw header bytes
+        std::cout << "   Raw header bytes (first 32): ";
+        for (size_t i = 0; i < std::min(size_t(32), audioData.size()); ++i) {
+            std::cout << std::hex << static_cast<int>(audioData[i]) << " ";
+        }
+        std::cout << std::dec << std::endl;
 
         // Read nodes
         for (uint32_t i = 0; i < header_.node_count; ++i) {
@@ -58,7 +81,21 @@ namespace tremor::audio {
             state.outputBuffer.resize(1024);  // Pre-allocate buffer
             nodes_[node.id] = state;
 
+            const char* nodeTypeName = "Unknown";
+            switch (node.type) {
+                case Taffy::AudioChunk::NodeType::Oscillator: nodeTypeName = "Oscillator"; break;
+                case Taffy::AudioChunk::NodeType::Amplifier: nodeTypeName = "Amplifier"; break;
+                case Taffy::AudioChunk::NodeType::Parameter: nodeTypeName = "Parameter"; break;
+                case Taffy::AudioChunk::NodeType::Mixer: nodeTypeName = "Mixer"; break;
+                case Taffy::AudioChunk::NodeType::Envelope: nodeTypeName = "Envelope"; break;
+                case Taffy::AudioChunk::NodeType::Filter: nodeTypeName = "Filter"; break;
+                case Taffy::AudioChunk::NodeType::Distortion: nodeTypeName = "Distortion"; break;
+                case Taffy::AudioChunk::NodeType::Sampler: nodeTypeName = "Sampler"; break;
+                case Taffy::AudioChunk::NodeType::StreamingSampler: nodeTypeName = "StreamingSampler"; break;
+            }
+
             std::cout << "   Node " << node.id << ": type=" << static_cast<uint32_t>(node.type) 
+                      << " (" << nodeTypeName << ")"
                       << ", inputs=" << node.input_count << ", outputs=" << node.output_count 
                       << ", param_offset=" << node.param_offset << ", param_count=" << node.param_count << std::endl;
         }
@@ -208,8 +245,50 @@ namespace tremor::audio {
                 std::cout << std::dec << std::endl;
             }
         }
+        
+        // Read streaming audio info
+        std::cout << "🎵 Reading " << header_.streaming_count << " streaming audio entries..." << std::endl;
+        std::cout << "   Current ptr offset: " << (ptr - audioData.data()) << " bytes from start" << std::endl;
+        std::cout << "   Total chunk size: " << audioData.size() << " bytes" << std::endl;
+        std::cout << "   Expected streaming info at offset: " << (ptr - audioData.data()) << std::endl;
+        for (uint32_t i = 0; i < header_.streaming_count; ++i) {
+            // Check if we have enough data
+            if (ptr + sizeof(Taffy::AudioChunk::StreamingAudio) > audioData.data() + audioData.size()) {
+                std::cerr << "❌ Not enough data for streaming audio " << i << std::endl;
+                break;
+            }
+            
+            Taffy::AudioChunk::StreamingAudio streamInfo;
+            std::memcpy(&streamInfo, ptr, sizeof(streamInfo));
+            ptr += sizeof(streamInfo);
+            
+            StreamingAudioInfo stream;
+            stream.dataOffset = streamInfo.data_offset;
+            stream.totalSamples = streamInfo.total_samples;
+            stream.chunkSize = streamInfo.chunk_size;
+            stream.sampleRate = streamInfo.sample_rate;
+            stream.channelCount = streamInfo.channel_count;
+            stream.bitDepth = streamInfo.bit_depth;
+            stream.format = streamInfo.format;
+            
+            // Note: We don't have the file path here, it needs to be set when loading from TAF
+            // For now, we'll store the TAF file path which contains the audio data
+            stream.filePath = ""; // Will be set by the loader
+            stream.needsPreload = true;
+            
+            streamingAudios_.push_back(stream);
+            
+            std::cout << "   Streaming Audio " << i << ": hash=0x" << std::hex << streamInfo.name_hash << std::dec
+                      << ", " << streamInfo.total_samples << " samples, " << streamInfo.channel_count << " channels, "
+                      << streamInfo.bit_depth << "-bit" << std::endl;
+            std::cout << "   Sample rate: " << streamInfo.sample_rate << " Hz" << std::endl;
+            std::cout << "   Chunk size: " << streamInfo.chunk_size << " samples" << std::endl;
+            std::cout << "   Total chunks: " << streamInfo.chunk_count << std::endl;
+            std::cout << "   Data offset in TAF: " << streamInfo.data_offset << std::endl;
+        }
 
         std::cout << "✅ Audio chunk loaded successfully!" << std::endl;
+        std::cout << "   Total streaming audios loaded: " << streamingAudios_.size() << std::endl;
         return true;
     }
 
@@ -266,11 +345,20 @@ namespace tremor::audio {
         if (debugCount < 3) {
             std::cout << "🔍 Looking for output node among " << nodes_.size() << " nodes:" << std::endl;
             for (const auto& [nodeId, nodeState] : nodes_) {
+                const char* nodeTypeName = "Unknown";
+                switch (nodeState.node.type) {
+                    case Taffy::AudioChunk::NodeType::Oscillator: nodeTypeName = "Oscillator"; break;
+                    case Taffy::AudioChunk::NodeType::Amplifier: nodeTypeName = "Amplifier"; break;
+                    case Taffy::AudioChunk::NodeType::Parameter: nodeTypeName = "Parameter"; break;
+                    case Taffy::AudioChunk::NodeType::Mixer: nodeTypeName = "Mixer"; break;
+                    case Taffy::AudioChunk::NodeType::Envelope: nodeTypeName = "Envelope"; break;
+                    case Taffy::AudioChunk::NodeType::Filter: nodeTypeName = "Filter"; break;
+                    case Taffy::AudioChunk::NodeType::Distortion: nodeTypeName = "Distortion"; break;
+                    case Taffy::AudioChunk::NodeType::Sampler: nodeTypeName = "Sampler"; break;
+                    case Taffy::AudioChunk::NodeType::StreamingSampler: nodeTypeName = "StreamingSampler"; break;
+                }
                 std::cout << "   Node " << nodeId << ": type=" << static_cast<int>(nodeState.node.type) 
-                          << " (" << (nodeState.node.type == Taffy::AudioChunk::NodeType::Amplifier ? "Amplifier" : 
-                                     nodeState.node.type == Taffy::AudioChunk::NodeType::Sampler ? "Sampler" :
-                                     nodeState.node.type == Taffy::AudioChunk::NodeType::Parameter ? "Parameter" : "Other")
-                          << ")" << std::endl;
+                          << " (" << nodeTypeName << ")" << std::endl;
             }
             debugCount++;
         }
@@ -393,6 +481,17 @@ namespace tremor::audio {
                 }
                 processSampler(node, frameCount);
                 break;
+            case Taffy::AudioChunk::NodeType::StreamingSampler:
+                static bool streamingDebugPrinted = false;
+                if (!streamingDebugPrinted) {
+                    std::cout << "🎵 STREAMING SAMPLER NODE FOUND AND PROCESSING!" << std::endl;
+                    std::cout << "   Node ID: " << node.node.id << std::endl;
+                    std::cout << "   Input count: " << node.node.input_count << std::endl;
+                    std::cout << "   Output count: " << node.node.output_count << std::endl;
+                    streamingDebugPrinted = true;
+                }
+                processStreamingSampler(node, frameCount);
+                break;
             default:
 
                 // Clear output for unsupported nodes
@@ -421,6 +520,22 @@ namespace tremor::audio {
             return it->second.currentValue;
         }
         return 0.0f;
+    }
+    
+    float TaffyAudioProcessor::getNodeParameterValue(const NodeState& node, uint64_t paramHash) {
+        // Look for parameter in node's parameter range
+        if (node.node.param_count > 0 && node.node.param_offset < parameterList_.size()) {
+            for (uint32_t i = 0; i < node.node.param_count; ++i) {
+                uint32_t paramIdx = node.node.param_offset + i;
+                if (paramIdx < parameterList_.size()) {
+                    if (parameterList_[paramIdx].param.name_hash == paramHash) {
+                        return parameterList_[paramIdx].currentValue;
+                    }
+                }
+            }
+        }
+        // Fall back to global parameter
+        return getParameterValue(paramHash);
     }
 
     void TaffyAudioProcessor::processOscillator(NodeState& node, uint32_t frameCount) {
@@ -1420,6 +1535,216 @@ namespace tremor::audio {
         if (node.isPlaying && sampleDebugFrame < 10) {
             sampleDebugFrame++;
         }
+    }
+    
+    void TaffyAudioProcessor::processStreamingSampler(NodeState& node, uint32_t frameCount) {
+        static bool debugPrinted = false;
+        
+        // Get parameters
+        uint32_t streamIndex = static_cast<uint32_t>(getNodeParameterValue(node, Taffy::fnv1a_hash("stream_index")));
+        float pitch = getNodeParameterValue(node, Taffy::fnv1a_hash("pitch"));
+        float startPos = getNodeParameterValue(node, Taffy::fnv1a_hash("start_position"));
+        
+        if (!debugPrinted) {
+            std::cout << "🎵 StreamingSampler: streamIndex=" << streamIndex 
+                      << ", pitch=" << pitch << ", startPos=" << startPos << std::endl;
+            std::cout << "   Available streams: " << streamingAudios_.size() << std::endl;
+            debugPrinted = true;
+        }
+        
+        if (pitch == 0.0f) pitch = 1.0f; // Default pitch
+        
+        // Check if we have this streaming audio loaded
+        if (streamIndex >= streamingAudios_.size()) {
+            if (!debugPrinted) {
+                std::cout << "❌ No streaming audio at index " << streamIndex << std::endl;
+            }
+            std::memset(node.outputBuffer.data(), 0, frameCount * sizeof(float));
+            return;
+        }
+        
+        auto& stream = streamingAudios_[streamIndex];
+        
+        // Ensure file stream is open
+        if (!stream.fileStream || !stream.fileStream->is_open()) {
+            if (stream.fileStream) delete stream.fileStream;
+            std::cout << "🔄 Opening streaming audio file: " << stream.filePath << std::endl;
+            stream.fileStream = new std::ifstream(stream.filePath, std::ios::binary);
+            if (!stream.fileStream->is_open()) {
+                std::cerr << "❌ Failed to open streaming audio file: " << stream.filePath << std::endl;
+                std::cerr << "   Does file exist? " << std::filesystem::exists(stream.filePath) << std::endl;
+                std::memset(node.outputBuffer.data(), 0, frameCount * sizeof(float));
+                return;
+            }
+            std::cout << "✅ File opened successfully!" << std::endl;
+        }
+        
+        // Process each frame
+        for (uint32_t i = 0; i < frameCount; ++i) {
+            // Get trigger input
+            float trigger = 0.0f;
+            for (const auto& conn : connections_) {
+                if (conn.destNode == node.node.id && conn.destInput == 0) {
+                    auto srcIt = nodes_.find(conn.sourceNode);
+                    if (srcIt != nodes_.end()) {
+                        trigger = srcIt->second.outputBuffer[i] * conn.strength;
+                        
+                        // Debug trigger values
+                        static int triggerDebugCount = 0;
+                        if (trigger != 0.0f && triggerDebugCount < 10) {
+                            std::cout << "🎯 Trigger value: " << trigger << " from node " << conn.sourceNode << std::endl;
+                            triggerDebugCount++;
+                        }
+                        break;
+                    }
+                }
+            }
+            
+            // Start/stop playback on trigger
+            if (trigger > 0.5f && node.lastTrigger <= 0.5f) {
+                std::cout << "🎵 StreamingSampler TRIGGERED! trigger=" << trigger << std::endl;
+                std::cout << "   File path: " << stream.filePath << std::endl;
+                std::cout << "   Total samples: " << stream.totalSamples << std::endl;
+                std::cout << "   Sample rate: " << stream.sampleRate << " Hz" << std::endl;
+                std::cout << "   Chunk size: " << stream.chunkSize << " samples" << std::endl;
+                
+                node.isPlaying = true;
+                node.samplePosition = startPos * stream.totalSamples;
+                stream.currentChunk = static_cast<uint32_t>(node.samplePosition / stream.chunkSize);
+                stream.bufferPosition = static_cast<uint32_t>(node.samplePosition) % stream.chunkSize;
+                
+                // Use pre-loaded chunk if available, otherwise load synchronously (which causes a hitch)
+                if (stream.nextChunkReady && stream.currentChunk == 0) {
+                    // Use pre-loaded first chunk
+                    stream.chunkBuffer = std::move(stream.nextChunkBuffer);
+                    stream.nextChunkReady = false;
+                    std::cout << "✅ Using pre-loaded first chunk!" << std::endl;
+                } else {
+                    // Load the chunk containing our start position (causes hitch)
+                    std::cout << "⚠️  Loading chunk synchronously (may cause hitch)" << std::endl;
+                    preloadStreamingChunk(stream, stream.currentChunk);
+                    stream.chunkBuffer = std::move(stream.nextChunkBuffer);
+                    stream.nextChunkReady = false;
+                }
+            }
+            node.lastTrigger = trigger;
+            
+            // Generate output
+            if (node.isPlaying) {
+                // Apply sample rate conversion for pitch
+                float sampleRateRatio = static_cast<float>(sample_rate_) / static_cast<float>(stream.sampleRate);
+                float playbackRate = pitch * sampleRateRatio;
+                
+                // Get current sample with linear interpolation
+                uint32_t pos = stream.bufferPosition;
+                float frac = node.samplePosition - std::floor(node.samplePosition);
+                
+                float sample = 0.0f;
+                if (pos < stream.chunkBuffer.size() / stream.channelCount - 1) {
+                    // Mix channels to mono and interpolate
+                    float s1 = 0.0f, s2 = 0.0f;
+                    for (uint32_t ch = 0; ch < stream.channelCount; ++ch) {
+                        s1 += stream.chunkBuffer[pos * stream.channelCount + ch];
+                        s2 += stream.chunkBuffer[(pos + 1) * stream.channelCount + ch];
+                    }
+                    s1 /= stream.channelCount;
+                    s2 /= stream.channelCount;
+                    sample = s1 * (1.0f - frac) + s2 * frac;
+                }
+                
+                node.outputBuffer[i] = sample;
+                
+                // Debug output
+                static int outputDebugCounter = 0;
+                if (outputDebugCounter < 100 && sample != 0.0f) {
+                    std::cout << "🔊 StreamingSampler output[" << i << "] = " << sample << std::endl;
+                    outputDebugCounter++;
+                }
+                
+                // Advance position
+                node.samplePosition += playbackRate;
+                stream.bufferPosition = static_cast<uint32_t>(node.samplePosition) % stream.chunkSize;
+                
+                // Check if we need to load next chunk
+                uint32_t newChunk = static_cast<uint32_t>(node.samplePosition / stream.chunkSize);
+                if (newChunk != stream.currentChunk && newChunk < (stream.totalSamples + stream.chunkSize - 1) / stream.chunkSize) {
+                    stream.currentChunk = newChunk;
+                    
+                    // Load next chunk
+                    uint64_t chunkOffset = stream.dataOffset + (stream.currentChunk * stream.chunkSize * stream.channelCount * (stream.bitDepth / 8));
+                    stream.fileStream->seekg(chunkOffset);
+                    
+                    // Read chunk data (same as above)
+                    if (stream.format == 1) {
+                        stream.fileStream->read(reinterpret_cast<char*>(stream.chunkBuffer.data()), 
+                                              stream.chunkSize * stream.channelCount * sizeof(float));
+                    } else {
+                        if (stream.bitDepth == 16) {
+                            std::vector<int16_t> pcmBuffer(stream.chunkSize * stream.channelCount);
+                            stream.fileStream->read(reinterpret_cast<char*>(pcmBuffer.data()), 
+                                                  pcmBuffer.size() * sizeof(int16_t));
+                            for (size_t j = 0; j < pcmBuffer.size(); ++j) {
+                                stream.chunkBuffer[j] = pcmBuffer[j] / 32768.0f;
+                            }
+                        }
+                    }
+                }
+                
+                // Stop if we've reached the end
+                if (node.samplePosition >= stream.totalSamples) {
+                    node.isPlaying = false;
+                    node.samplePosition = 0.0f;
+                }
+            } else {
+                node.outputBuffer[i] = 0.0f;
+            }
+        }
+    }
+
+    void TaffyAudioProcessor::preloadStreamingChunk(StreamingAudioInfo& stream, uint32_t chunkIndex) {
+        // Ensure file stream is open
+        if (!stream.fileStream || !stream.fileStream->is_open()) {
+            if (stream.fileStream) delete stream.fileStream;
+            stream.fileStream = new std::ifstream(stream.filePath, std::ios::binary);
+            if (!stream.fileStream->is_open()) {
+                std::cerr << "❌ Failed to open streaming audio file for preload: " << stream.filePath << std::endl;
+                return;
+            }
+        }
+        
+        // Calculate chunk offset
+        uint64_t chunkOffset = stream.dataOffset + (chunkIndex * stream.chunkSize * stream.channelCount * (stream.bitDepth / 8));
+        stream.fileStream->seekg(chunkOffset);
+        
+        // Resize buffer if needed
+        stream.nextChunkBuffer.resize(stream.chunkSize * stream.channelCount);
+        
+        // Read chunk data
+        if (stream.format == 1) { // Float format
+            stream.fileStream->read(reinterpret_cast<char*>(stream.nextChunkBuffer.data()), 
+                                  stream.chunkSize * stream.channelCount * sizeof(float));
+        } else { // PCM format
+            if (stream.bitDepth == 16) {
+                std::vector<int16_t> pcmBuffer(stream.chunkSize * stream.channelCount);
+                stream.fileStream->read(reinterpret_cast<char*>(pcmBuffer.data()), 
+                                      pcmBuffer.size() * sizeof(int16_t));
+                // Convert to float
+                for (size_t j = 0; j < pcmBuffer.size(); ++j) {
+                    stream.nextChunkBuffer[j] = pcmBuffer[j] / 32768.0f;
+                }
+            } else if (stream.bitDepth == 24) {
+                std::vector<uint8_t> pcmBuffer(stream.chunkSize * stream.channelCount * 3);
+                stream.fileStream->read(reinterpret_cast<char*>(pcmBuffer.data()), pcmBuffer.size());
+                // Convert 24-bit to float
+                for (size_t j = 0; j < stream.chunkSize * stream.channelCount; ++j) {
+                    int32_t sample = (pcmBuffer[j*3] << 8) | (pcmBuffer[j*3+1] << 16) | (pcmBuffer[j*3+2] << 24);
+                    stream.nextChunkBuffer[j] = sample / 2147483648.0f;
+                }
+            }
+        }
+        
+        stream.nextChunkReady = true;
+        std::cout << "📦 Pre-loaded chunk " << chunkIndex << " for streaming audio" << std::endl;
     }
 
 } // namespace tremor::audio
