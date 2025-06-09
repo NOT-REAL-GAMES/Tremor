@@ -160,6 +160,9 @@ namespace tremor::audio {
         std::unordered_map<uint64_t, ParameterInfo> parameters_;  // Global parameters by hash
         std::vector<ParameterInfo> parameterList_;               // All parameters in order
         std::vector<SampleData> samples_;                         // Loaded samples
+        
+        // Mutex to protect the audio graph during loading/processing
+        mutable std::mutex graphMutex_;
 
         // Processing helpers
         void processNode(NodeState& node, uint32_t frameCount);
@@ -222,6 +225,7 @@ namespace tremor::audio {
         };
         
         std::vector<StreamingAudioInfo> streamingAudios_;
+        mutable std::mutex streamingAudiosMutex_;  // Protect the vector itself
         
         void preloadStreamingChunk(StreamingAudioInfo& stream, uint32_t chunkIndex);
         void preloadStreamingChunkAsync(StreamingAudioInfo& stream, uint32_t chunkIndex);
@@ -243,12 +247,38 @@ namespace tremor::audio {
     public:
         // Set the TAF file path for streaming audio (needed for file access)
         void setStreamingAudioFilePath(const std::string& filePath) {
-            for (auto& stream : streamingAudios_) {
-                stream.filePath = filePath;
-                // Pre-load the first chunk to avoid hitch on first play
-                if (stream.needsPreload) {
-                    preloadStreamingChunk(stream, 0);
-                    stream.needsPreload = false;
+            // Wait for any pending loads to complete
+            {
+                std::lock_guard<std::mutex> lock(loaderMutex_);
+                while (!loadQueue_.empty()) {
+                    loadQueue_.pop();
+                }
+            }
+            
+            {
+                std::lock_guard<std::mutex> vecLock(streamingAudiosMutex_);
+                for (auto& stream : streamingAudios_) {
+                    std::lock_guard<std::mutex> lock(stream.bufferMutex);
+                    
+                    // Close existing file stream if open
+                    if (stream.fileStream && stream.fileStream->is_open()) {
+                        stream.fileStream->close();
+                    }
+                    stream.fileStream.reset();
+                    
+                    // Reset state
+                    stream.filePath = filePath;
+                    stream.currentChunk = 0;
+                    stream.bufferPosition = 0;
+                    stream.nextChunkReady = false;
+                    stream.isLoadingNext = false;
+                    
+                    // Clear buffers to force reallocation with correct size
+                    stream.chunkBuffer.clear();
+                    stream.nextChunkBuffer.clear();
+                    
+                    // Mark for pre-load (will do it after releasing locks)
+                    stream.needsPreload = true;
                 }
             }
         }

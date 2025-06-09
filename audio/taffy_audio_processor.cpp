@@ -32,32 +32,99 @@ namespace tremor::audio {
         }
         
         // Clean up streaming file handles
-        for (auto& stream : streamingAudios_) {
-            stream.fileStream.reset();
+        {
+            std::lock_guard<std::mutex> lock(streamingAudiosMutex_);
+            for (auto& stream : streamingAudios_) {
+                std::lock_guard<std::mutex> streamLock(stream.bufferMutex);
+                if (stream.fileStream) {
+                    stream.fileStream.reset();
+                }
+            }
         }
     }
 
     bool TaffyAudioProcessor::loadAudioChunk(const std::vector<uint8_t>& audioData) {
+        // Lock the graph mutex for the entire loading process
+        std::lock_guard<std::mutex> lock(graphMutex_);
+        
         if (audioData.size() < sizeof(Taffy::AudioChunk)) {
             std::cerr << "❌ Audio chunk data too small!" << std::endl;
             return false;
         }
 
+        // Stop background loader during load to prevent race conditions
+        {
+            std::lock_guard<std::mutex> lock(loaderMutex_);
+            // Clear the load queue
+            while (!loadQueue_.empty()) {
+                loadQueue_.pop();
+            }
+        }
+        
+        // Close any open file streams and clear streaming data
+        {
+            std::lock_guard<std::mutex> lock(streamingAudiosMutex_);
+            for (auto& stream : streamingAudios_) {
+                std::lock_guard<std::mutex> streamLock(stream.bufferMutex);
+                if (stream.fileStream && stream.fileStream->is_open()) {
+                    stream.fileStream->close();
+                }
+                stream.fileStream.reset();
+            }
+            streamingAudios_.clear();
+        }
+
         // Clear existing data
-        nodes_.clear();
-        connections_.clear();
-        parameters_.clear();
-        parameterList_.clear();
-        samples_.clear();
+        try {
+            nodes_.clear();
+            connections_.clear();
+            parameters_.clear();
+            parameterList_.clear();
+            samples_.clear();
+        } catch (const std::exception& e) {
+            std::cerr << "❌ Exception while clearing data: " << e.what() << std::endl;
+            return false;
+        }
         
         // Reset time when loading new audio chunk
         current_time_ = 0.0f;
         sample_count_ = 0;
+        
+        // Clear existing data structures to prevent memory corruption
+        nodes_.clear();
+        connections_.clear();
+        parameters_.clear();
+        samples_.clear();
+        
+        // Clear streaming audios with proper mutex protection
+        {
+            std::lock_guard<std::mutex> lock(streamingAudiosMutex_);
+            streamingAudios_.clear();
+        }
+
+        // Validate data size
+        if (audioData.size() < sizeof(Taffy::AudioChunk)) {
+            std::cerr << "❌ Audio data too small for header: " << audioData.size() << " bytes" << std::endl;
+            return false;
+        }
 
         // Read header
         const uint8_t* ptr = audioData.data();
         std::memcpy(&header_, ptr, sizeof(Taffy::AudioChunk));
         ptr += sizeof(Taffy::AudioChunk);
+        
+        // Validate header values
+        if (header_.node_count > 1000 || header_.connection_count > 10000 || 
+            header_.parameter_count > 10000 || header_.sample_count > 1000 ||
+            header_.streaming_count > 100) {
+            std::cerr << "❌ Invalid header values detected:" << std::endl;
+            std::cerr << "   Nodes: " << header_.node_count << std::endl;
+            std::cerr << "   Connections: " << header_.connection_count << std::endl;
+            std::cerr << "   Parameters: " << header_.parameter_count << std::endl;
+            std::cerr << "   Samples: " << header_.sample_count << std::endl;
+            std::cerr << "   Streaming: " << header_.streaming_count << std::endl;
+            return false;
+        }
 
         std::cout << "🎵 Loading audio chunk:" << std::endl;
         std::cout << "   Audio data size: " << audioData.size() << " bytes" << std::endl;
@@ -85,14 +152,32 @@ namespace tremor::audio {
 
         // Read nodes
         for (uint32_t i = 0; i < header_.node_count; ++i) {
+            // Bounds check
+            if (ptr + sizeof(Taffy::AudioChunk::Node) > audioData.data() + audioData.size()) {
+                std::cerr << "❌ Not enough data for node " << i << std::endl;
+                return false;
+            }
+            
             Taffy::AudioChunk::Node node;
             std::memcpy(&node, ptr, sizeof(node));
             ptr += sizeof(node);
+            
+            // Validate node ID
+            if (node.id > 1000) { // Sanity check
+                std::cerr << "❌ Invalid node ID: " << node.id << std::endl;
+                return false;
+            }
 
-            NodeState state;
+            // Create NodeState directly in map to avoid copy
+            NodeState& state = nodes_[node.id];
             state.node = node;
-            state.outputBuffer.resize(1024);  // Pre-allocate buffer
-            nodes_[node.id] = state;
+            
+            try {
+                state.outputBuffer.resize(1024, 0.0f);  // Pre-allocate buffer with zeros
+            } catch (const std::exception& e) {
+                std::cerr << "❌ Failed to allocate output buffer for node " << node.id << ": " << e.what() << std::endl;
+                return false;
+            }
 
             const char* nodeTypeName = "Unknown";
             switch (node.type) {
@@ -284,12 +369,43 @@ namespace tremor::audio {
             stream.bitDepth = streamInfo.bit_depth;
             stream.format = streamInfo.format;
             
+            // Validate loaded parameters BEFORE using them
+            if (stream.channelCount == 0 || stream.channelCount > 8) {
+                std::cerr << "⚠️  Invalid channel count: " << stream.channelCount << ", defaulting to 2" << std::endl;
+                stream.channelCount = 2;
+            }
+            if (stream.chunkSize == 0 || stream.chunkSize > 1000000) {
+                std::cerr << "⚠️  Invalid chunk size: " << stream.chunkSize << ", defaulting to 48000" << std::endl;
+                stream.chunkSize = 48000;
+            }
+            if (stream.sampleRate == 0) {
+                std::cerr << "⚠️  Invalid sample rate: " << stream.sampleRate << ", defaulting to 48000" << std::endl;
+                stream.sampleRate = 48000;
+            }
+            if (stream.bitDepth != 16 && stream.bitDepth != 24 && stream.bitDepth != 32) {
+                std::cerr << "⚠️  Invalid bit depth: " << stream.bitDepth << ", defaulting to 16" << std::endl;
+                stream.bitDepth = 16;
+            }
+            
+            // Pre-allocate buffers with validated sizes
+            size_t bufferSize = stream.chunkSize * stream.channelCount;
+            try {
+                stream.chunkBuffer.resize(bufferSize, 0.0f);
+                stream.nextChunkBuffer.resize(bufferSize, 0.0f);
+            } catch (const std::exception& e) {
+                std::cerr << "❌ Failed to allocate streaming buffers: " << e.what() << std::endl;
+                continue;
+            }
+            
             // Note: We don't have the file path here, it needs to be set when loading from TAF
             // For now, we'll store the TAF file path which contains the audio data
             stream.filePath = ""; // Will be set by the loader
             stream.needsPreload = true;
             
-            streamingAudios_.push_back(stream);
+            {
+                std::lock_guard<std::mutex> lock(streamingAudiosMutex_);
+                streamingAudios_.push_back(stream);
+            }
             
             std::cout << "   Streaming Audio " << i << ": hash=0x" << std::hex << streamInfo.name_hash << std::dec
                       << ", " << streamInfo.total_samples << " samples, " << streamInfo.channel_count << " channels, "
@@ -322,6 +438,9 @@ namespace tremor::audio {
     }
 
     void TaffyAudioProcessor::processAudio(float* outputBuffer, uint32_t frameCount, uint32_t channelCount) {
+        // Lock the graph mutex during processing
+        std::lock_guard<std::mutex> lock(graphMutex_);
+        
         // Clear output buffer
         std::memset(outputBuffer, 0, frameCount * channelCount * sizeof(float));
 
@@ -478,6 +597,10 @@ namespace tremor::audio {
     }
 
     void TaffyAudioProcessor::processNode(NodeState& node, uint32_t frameCount) {               
+        // Ensure output buffer is properly sized
+        if (node.outputBuffer.size() < frameCount) {
+            node.outputBuffer.resize(frameCount);
+        }
         
         static bool samplerLogged = false;
 
@@ -536,7 +659,9 @@ namespace tremor::audio {
                 auto srcIt = nodes_.find(conn.sourceNode);
                 if (srcIt != nodes_.end() && conn.sourceOutput == 0) {
                     // Return the last value from the source node's output
-                    return srcIt->second.outputBuffer[0] * conn.strength;
+                    if (!srcIt->second.outputBuffer.empty()) {
+                        return srcIt->second.outputBuffer[0] * conn.strength;
+                    }
                 }
             }
         }
@@ -686,7 +811,10 @@ namespace tremor::audio {
                 if (conn.destNode == node.node.id && conn.destInput == 0) {
                     auto srcIt = nodes_.find(conn.sourceNode);
                     if (srcIt != nodes_.end()) {
-                        audioInput += srcIt->second.outputBuffer[i] * conn.strength;
+                        // Bounds check before accessing outputBuffer
+                        if (i < srcIt->second.outputBuffer.size()) {
+                            audioInput += srcIt->second.outputBuffer[i] * conn.strength;
+                        }
                     }
                 }
             }
@@ -697,8 +825,11 @@ namespace tremor::audio {
                 if (conn.destNode == node.node.id && conn.destInput == 1) {
                     auto srcIt = nodes_.find(conn.sourceNode);
                     if (srcIt != nodes_.end()) {
-                        modulation = srcIt->second.outputBuffer[i] * conn.strength;
-                        break; // Only use first modulation input
+                        // Bounds check before accessing outputBuffer
+                        if (i < srcIt->second.outputBuffer.size()) {
+                            modulation = srcIt->second.outputBuffer[i] * conn.strength;
+                            break; // Only use first modulation input
+                        }
                     }
                 }
             }
@@ -716,7 +847,7 @@ namespace tremor::audio {
                 for (const auto& conn : connections_) {
                     if (conn.destNode == node.node.id && conn.destInput == 0) {
                         auto srcIt = nodes_.find(conn.sourceNode);
-                        if (srcIt != nodes_.end()) {
+                        if (srcIt != nodes_.end() && i < srcIt->second.outputBuffer.size()) {
                             audioInput += srcIt->second.outputBuffer[i] * conn.strength;
                         }
                     }
@@ -1569,6 +1700,11 @@ namespace tremor::audio {
     void TaffyAudioProcessor::processStreamingSampler(NodeState& node, uint32_t frameCount) {
         static bool debugPrinted = false;
         
+        // Defensive: ensure output buffer is properly sized
+        if (node.outputBuffer.size() < frameCount) {
+            node.outputBuffer.resize(frameCount);
+        }
+        
         // Get parameters
         uint32_t streamIndex = static_cast<uint32_t>(getNodeParameterValue(node, Taffy::fnv1a_hash("stream_index")));
         float pitch = getNodeParameterValue(node, Taffy::fnv1a_hash("pitch"));
@@ -1584,15 +1720,39 @@ namespace tremor::audio {
         if (pitch == 0.0f) pitch = 1.0f; // Default pitch
         
         // Check if we have this streaming audio loaded
-        if (streamIndex >= streamingAudios_.size()) {
-            if (!debugPrinted) {
-                std::cout << "❌ No streaming audio at index " << streamIndex << std::endl;
+        StreamingAudioInfo* streamPtr = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(streamingAudiosMutex_);
+            if (streamIndex >= streamingAudios_.size()) {
+                if (!debugPrinted) {
+                    std::cout << "❌ No streaming audio at index " << streamIndex << std::endl;
+                }
+                // Ensure buffer is sized before memset
+                if (node.outputBuffer.size() < frameCount) {
+                    node.outputBuffer.resize(frameCount);
+                }
+                std::memset(node.outputBuffer.data(), 0, frameCount * sizeof(float));
+                return;
+            }
+            streamPtr = &streamingAudios_[streamIndex];
+        }
+        
+        if (!streamPtr) {
+            // Ensure buffer is sized before memset
+            if (node.outputBuffer.size() < frameCount) {
+                node.outputBuffer.resize(frameCount);
             }
             std::memset(node.outputBuffer.data(), 0, frameCount * sizeof(float));
             return;
         }
         
-        auto& stream = streamingAudios_[streamIndex];
+        auto& stream = *streamPtr;
+        
+        // Quick check if file path is valid
+        if (stream.filePath.empty()) {
+            std::memset(node.outputBuffer.data(), 0, frameCount * sizeof(float));
+            return;
+        }
         
         // Ensure file stream is open
         if (!stream.fileStream || !stream.fileStream->is_open()) {
@@ -1616,20 +1776,31 @@ namespace tremor::audio {
                     stream.fileStream->seekg(12); // Skip RIFF header
                     
                     // Search for data chunk
-                    while (!stream.fileStream->eof()) {
+                    const int maxChunks = 50; // Prevent infinite loop
+                    int chunkCount = 0;
+                    while (!stream.fileStream->eof() && chunkCount < maxChunks) {
                         stream.fileStream->read(buffer, 4);
+                        if (stream.fileStream->gcount() < 4) break;
+                        
                         if (std::strncmp(buffer, "data", 4) == 0) {
                             uint32_t dataSize;
                             stream.fileStream->read(reinterpret_cast<char*>(&dataSize), 4);
-                            stream.dataOffset = stream.fileStream->tellg();
-                            std::cout << "📍 Found WAV data chunk at offset: " << stream.dataOffset << std::endl;
+                            if (stream.fileStream->gcount() == 4) {
+                                stream.dataOffset = stream.fileStream->tellg();
+                                std::cout << "📍 Found WAV data chunk at offset: " << stream.dataOffset << std::endl;
+                            }
                             break;
                         } else {
                             // Skip this chunk
                             uint32_t chunkSize;
                             stream.fileStream->read(reinterpret_cast<char*>(&chunkSize), 4);
-                            stream.fileStream->seekg(chunkSize, std::ios::cur);
+                            if (stream.fileStream->gcount() == 4 && chunkSize < 100000000) { // Sanity check
+                                stream.fileStream->seekg(chunkSize, std::ios::cur);
+                            } else {
+                                break;
+                            }
                         }
+                        chunkCount++;
                     }
                 }
             }
@@ -1643,7 +1814,13 @@ namespace tremor::audio {
                 if (conn.destNode == node.node.id && conn.destInput == 0) {
                     auto srcIt = nodes_.find(conn.sourceNode);
                     if (srcIt != nodes_.end()) {
-                        trigger = srcIt->second.outputBuffer[i] * conn.strength;
+                        // Bounds check before accessing source buffer
+                        if (i < srcIt->second.outputBuffer.size()) {
+                            trigger = srcIt->second.outputBuffer[i] * conn.strength;
+                        } else {
+                            std::cerr << "❌ Source buffer too small in StreamingSampler trigger: index=" << i 
+                                      << ", size=" << srcIt->second.outputBuffer.size() << std::endl;
+                        }
                         
                         // Debug trigger values
                         static int triggerDebugCount = 0;
@@ -1670,20 +1847,29 @@ namespace tremor::audio {
                 stream.bufferPosition = static_cast<uint32_t>(node.samplePosition) % stream.chunkSize;
                 
                 // Use pre-loaded chunk if available
+                bool needsSyncLoad = false;
                 {
                     std::lock_guard<std::mutex> lock(stream.bufferMutex);
                     if (stream.nextChunkReady && stream.nextChunkIndex == stream.currentChunk) {
                         // Use pre-loaded chunk
                         stream.chunkBuffer = std::move(stream.nextChunkBuffer);
+                        stream.nextChunkBuffer.clear();
                         stream.nextChunkReady = false;
                         std::cout << "✅ Using pre-loaded chunk " << stream.currentChunk << std::endl;
                     } else {
-                        // Need to load synchronously (causes hitch)
-                        std::cout << "⚠️  Loading chunk " << stream.currentChunk << " synchronously (may cause hitch)" << std::endl;
-                        preloadStreamingChunk(stream, stream.currentChunk);
-                        stream.chunkBuffer = std::move(stream.nextChunkBuffer);
-                        stream.nextChunkReady = false;
+                        needsSyncLoad = true;
                     }
+                }
+                
+                if (needsSyncLoad) {
+                    // Need to load synchronously (causes hitch)
+                    std::cout << "⚠️  Loading chunk " << stream.currentChunk << " synchronously (may cause hitch)" << std::endl;
+                    preloadStreamingChunk(stream, stream.currentChunk);
+                    
+                    std::lock_guard<std::mutex> lock(stream.bufferMutex);
+                    stream.chunkBuffer = std::move(stream.nextChunkBuffer);
+                    stream.nextChunkBuffer.clear();
+                    stream.nextChunkReady = false;
                 }
                 
                 // Pre-load next chunk in background
@@ -1696,7 +1882,8 @@ namespace tremor::audio {
             // Generate output
             if (node.isPlaying) {
                 // Apply sample rate conversion for pitch
-                float sampleRateRatio = static_cast<float>(sample_rate_) / static_cast<float>(stream.sampleRate);
+                float sampleRateRatio = (stream.sampleRate > 0) ? 
+                    static_cast<float>(sample_rate_) / static_cast<float>(stream.sampleRate) : 1.0f;
                 float playbackRate = pitch * sampleRateRatio;
                 
                 // Get current sample with linear interpolation
@@ -1704,19 +1891,47 @@ namespace tremor::audio {
                 float frac = node.samplePosition - std::floor(node.samplePosition);
                 
                 float sample = 0.0f;
-                if (pos < stream.chunkBuffer.size() / stream.channelCount - 1) {
-                    // Mix channels to mono and interpolate
-                    float s1 = 0.0f, s2 = 0.0f;
-                    for (uint32_t ch = 0; ch < stream.channelCount; ++ch) {
-                        s1 += stream.chunkBuffer[pos * stream.channelCount + ch];
-                        s2 += stream.chunkBuffer[(pos + 1) * stream.channelCount + ch];
+                
+                // Lock buffer while reading
+                {
+                    std::lock_guard<std::mutex> lock(stream.bufferMutex);
+                    
+                    // Bounds check
+                    if (!stream.chunkBuffer.empty() && stream.channelCount > 0) {
+                        uint32_t maxPos = stream.chunkBuffer.size() / stream.channelCount;
+                        if (pos < maxPos - 1) {
+                            // Mix channels to mono and interpolate
+                            float s1 = 0.0f, s2 = 0.0f;
+                            for (uint32_t ch = 0; ch < stream.channelCount; ++ch) {
+                                uint32_t idx1 = pos * stream.channelCount + ch;
+                                uint32_t idx2 = (pos + 1) * stream.channelCount + ch;
+                                if (idx1 < stream.chunkBuffer.size() && idx2 < stream.chunkBuffer.size()) {
+                                    s1 += stream.chunkBuffer[idx1];
+                                    s2 += stream.chunkBuffer[idx2];
+                                }
+                            }
+                            s1 /= stream.channelCount;
+                            s2 /= stream.channelCount;
+                            sample = s1 * (1.0f - frac) + s2 * frac;
+                        }
                     }
-                    s1 /= stream.channelCount;
-                    s2 /= stream.channelCount;
-                    sample = s1 * (1.0f - frac) + s2 * frac;
                 }
                 
-                node.outputBuffer[i] = sample;
+                // Bounds check before writing to output buffer
+                if (i >= node.outputBuffer.size()) {
+                    std::cerr << "❌ StreamingSampler output buffer overrun! index=" << i 
+                              << ", buffer size=" << node.outputBuffer.size() 
+                              << ", frameCount=" << frameCount << std::endl;
+                    // Resize the buffer to prevent crash
+                    node.outputBuffer.resize(frameCount, 0.0f);
+                }
+                
+                if (i < node.outputBuffer.size()) {
+                    node.outputBuffer[i] = sample;
+                } else {
+                    std::cerr << "❌ Still can't write to output buffer after resize!" << std::endl;
+                    break;
+                }
                 
                 // Debug output
                 static int outputDebugCounter = 0;
@@ -1741,6 +1956,7 @@ namespace tremor::audio {
                         if (stream.nextChunkReady && stream.nextChunkIndex == stream.currentChunk) {
                             // Use pre-loaded chunk (seamless transition)
                             stream.chunkBuffer = std::move(stream.nextChunkBuffer);
+                            stream.nextChunkBuffer.clear(); // Ensure it's cleared
                             stream.nextChunkReady = false;
                             std::cout << "✅ Seamless transition to chunk " << stream.currentChunk << std::endl;
                             useAsync = true;
@@ -1773,6 +1989,9 @@ namespace tremor::audio {
     }
 
     void TaffyAudioProcessor::preloadStreamingChunk(StreamingAudioInfo& stream, uint32_t chunkIndex) {
+        // Lock the stream's buffer mutex to ensure thread safety
+        std::lock_guard<std::mutex> lock(stream.bufferMutex);
+        
         // Ensure file stream is open
         if (!stream.fileStream || !stream.fileStream->is_open()) {
             stream.fileStream.reset();
@@ -1791,20 +2010,31 @@ namespace tremor::audio {
                     stream.fileStream->seekg(12); // Skip RIFF header
                     
                     // Search for data chunk
-                    while (!stream.fileStream->eof()) {
+                    const int maxChunks = 50; // Prevent infinite loop
+                    int chunkCount = 0;
+                    while (!stream.fileStream->eof() && chunkCount < maxChunks) {
                         stream.fileStream->read(buffer, 4);
+                        if (stream.fileStream->gcount() < 4) break;
+                        
                         if (std::strncmp(buffer, "data", 4) == 0) {
                             uint32_t dataSize;
                             stream.fileStream->read(reinterpret_cast<char*>(&dataSize), 4);
-                            stream.dataOffset = stream.fileStream->tellg();
-                            std::cout << "📍 Found WAV data chunk at offset: " << stream.dataOffset << std::endl;
+                            if (stream.fileStream->gcount() == 4) {
+                                stream.dataOffset = stream.fileStream->tellg();
+                                std::cout << "📍 Found WAV data chunk at offset: " << stream.dataOffset << std::endl;
+                            }
                             break;
                         } else {
                             // Skip this chunk
                             uint32_t chunkSize;
                             stream.fileStream->read(reinterpret_cast<char*>(&chunkSize), 4);
-                            stream.fileStream->seekg(chunkSize, std::ios::cur);
+                            if (stream.fileStream->gcount() == 4 && chunkSize < 100000000) { // Sanity check
+                                stream.fileStream->seekg(chunkSize, std::ios::cur);
+                            } else {
+                                break;
+                            }
                         }
+                        chunkCount++;
                     }
                 }
             }
@@ -1814,27 +2044,126 @@ namespace tremor::audio {
         uint64_t chunkOffset = stream.dataOffset + (chunkIndex * stream.chunkSize * stream.channelCount * (stream.bitDepth / 8));
         stream.fileStream->seekg(chunkOffset);
         
+        // Validate parameters before resizing
+        if (stream.chunkSize == 0 || stream.channelCount == 0 || stream.chunkSize > 1000000) {
+            std::cerr << "❌ Invalid chunk parameters: chunkSize=" << stream.chunkSize 
+                      << ", channelCount=" << stream.channelCount << std::endl;
+            return;
+        }
+        
         // Resize buffer if needed
-        stream.nextChunkBuffer.resize(stream.chunkSize * stream.channelCount);
+        size_t requiredSize = stream.chunkSize * stream.channelCount;
+        
+        // Additional safety check
+        if (requiredSize == 0 || requiredSize > 10000000) { // 10MB max for a single chunk
+            std::cerr << "❌ Invalid buffer size requested: " << requiredSize << std::endl;
+            return;
+        }
+        
+        try {
+            stream.nextChunkBuffer.resize(requiredSize);
+        } catch (const std::exception& e) {
+            std::cerr << "❌ Failed to resize buffer to " << requiredSize << ": " << e.what() << std::endl;
+            return;
+        }
+        
+        // Double-check the resize worked
+        if (stream.nextChunkBuffer.size() != requiredSize) {
+            std::cerr << "❌ Buffer resize failed silently! Expected " << requiredSize 
+                      << " but got " << stream.nextChunkBuffer.size() << std::endl;
+            return;
+        }
         
         // Read chunk data
         if (stream.format == 1) { // Float format
             stream.fileStream->read(reinterpret_cast<char*>(stream.nextChunkBuffer.data()), 
                                   stream.chunkSize * stream.channelCount * sizeof(float));
+            
+            // Check how much we actually read
+            size_t bytesRead = stream.fileStream->gcount();
+            if (bytesRead == 0) {
+                std::cerr << "❌ Failed to read float data from file" << std::endl;
+                return;
+            }
         } else { // PCM format
             if (stream.bitDepth == 16) {
                 std::vector<int16_t> pcmBuffer(stream.chunkSize * stream.channelCount);
                 stream.fileStream->read(reinterpret_cast<char*>(pcmBuffer.data()), 
                                       pcmBuffer.size() * sizeof(int16_t));
-                // Convert to float
-                for (size_t j = 0; j < pcmBuffer.size(); ++j) {
-                    stream.nextChunkBuffer[j] = pcmBuffer[j] / 32768.0f;
+                
+                // Check how much we actually read
+                size_t bytesRead = stream.fileStream->gcount();
+                size_t samplesRead = bytesRead / sizeof(int16_t);
+                
+                if (samplesRead == 0) {
+                    std::cerr << "❌ Failed to read PCM data from file" << std::endl;
+                    return;
+                }
+                
+                // Convert to float - ensure buffer sizes match and we don't exceed what we read
+                size_t sampleCount = std::min(samplesRead, pcmBuffer.size());
+                sampleCount = std::min(sampleCount, stream.nextChunkBuffer.size());
+                
+                // Debug output (commented out for release)
+                // if (sampleCount > 0) {
+                //     std::cout << "📊 Converting " << sampleCount << " samples to float" << std::endl;
+                //     std::cout << "   pcmBuffer size: " << pcmBuffer.size() << std::endl;
+                //     std::cout << "   nextChunkBuffer size: " << stream.nextChunkBuffer.size() << std::endl;
+                //     std::cout << "   samplesRead: " << samplesRead << std::endl;
+                // }
+                
+                // Extra safety: validate both buffers exist and have data
+                if (pcmBuffer.empty() || stream.nextChunkBuffer.empty()) {
+                    std::cerr << "❌ Empty buffer detected! pcmBuffer.empty()=" << pcmBuffer.empty() 
+                              << ", nextChunkBuffer.empty()=" << stream.nextChunkBuffer.empty() << std::endl;
+                    return;
+                }
+                
+                // Validate pointers before accessing
+                if (pcmBuffer.data() == nullptr || stream.nextChunkBuffer.data() == nullptr) {
+                    std::cerr << "❌ Null buffer data pointer detected!" << std::endl;
+                    return;
+                }
+                
+                // Extra safety: ensure we never exceed either buffer
+                for (size_t j = 0; j < sampleCount; ++j) {
+                    if (j >= pcmBuffer.size()) {
+                        std::cerr << "❌ PCM buffer overrun at index " << j << " (size=" << pcmBuffer.size() << ")" << std::endl;
+                        break;
+                    }
+                    if (j >= stream.nextChunkBuffer.size()) {
+                        std::cerr << "❌ Next chunk buffer overrun at index " << j << " (size=" << stream.nextChunkBuffer.size() << ")" << std::endl;
+                        break;
+                    }
+                    
+                    // Use safer array access with at() to get bounds checking
+                    try {
+                        stream.nextChunkBuffer.at(j) = pcmBuffer.at(j) / 32768.0f;
+                    } catch (const std::out_of_range& e) {
+                        std::cerr << "❌ Buffer access out of range at index " << j << ": " << e.what() << std::endl;
+                        break;
+                    }
                 }
             } else if (stream.bitDepth == 24) {
                 std::vector<uint8_t> pcmBuffer(stream.chunkSize * stream.channelCount * 3);
                 stream.fileStream->read(reinterpret_cast<char*>(pcmBuffer.data()), pcmBuffer.size());
-                // Convert 24-bit to float
-                for (size_t j = 0; j < stream.chunkSize * stream.channelCount; ++j) {
+                
+                // Check how much we actually read
+                size_t bytesRead = stream.fileStream->gcount();
+                size_t samplesRead = bytesRead / 3;  // 3 bytes per sample
+                
+                if (samplesRead == 0) {
+                    std::cerr << "❌ Failed to read 24-bit PCM data from file" << std::endl;
+                    return;
+                }
+                
+                // Convert 24-bit to float - ensure we don't exceed buffer size or what we read
+                size_t sampleCount = std::min(samplesRead, static_cast<size_t>(stream.chunkSize * stream.channelCount));
+                sampleCount = std::min(sampleCount, stream.nextChunkBuffer.size());
+                for (size_t j = 0; j < sampleCount; ++j) {
+                    // Bounds check for pcmBuffer access
+                    if (j * 3 + 2 >= bytesRead) break;
+                    
                     int32_t sample = (pcmBuffer[j*3] << 8) | (pcmBuffer[j*3+1] << 16) | (pcmBuffer[j*3+2] << 24);
                     stream.nextChunkBuffer[j] = sample / 2147483648.0f;
                 }
@@ -1862,9 +2191,30 @@ namespace tremor::audio {
                 loadQueue_.pop();
             }
             
+            // Validate stream pointer and state
+            if (!request.stream || request.stream->filePath.empty()) {
+                continue;
+            }
+            
+            // Double-check the stream is still valid (not deallocated)
+            bool streamValid = false;
+            {
+                std::lock_guard<std::mutex> lock(streamingAudiosMutex_);
+                for (auto& s : streamingAudios_) {
+                    if (&s == request.stream) {
+                        streamValid = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (!streamValid) {
+                std::cout << "⚠️ Stream pointer no longer valid, skipping load" << std::endl;
+                continue;
+            }
+            
             // Load the chunk
-            if (request.stream && !request.stream->isLoadingNext) {
-                request.stream->isLoadingNext = true;
+            if (!request.stream->isLoadingNext.exchange(true)) {
                 
                 std::cout << "🔄 Background loading chunk " << request.chunkIndex << std::endl;
                 
@@ -1910,8 +2260,25 @@ namespace tremor::audio {
                     (request.chunkIndex * request.stream->chunkSize * request.stream->channelCount * (request.stream->bitDepth / 8));
                 request.stream->fileStream->seekg(chunkOffset);
                 
+                // Validate parameters before allocating
+                if (request.stream->chunkSize == 0 || request.stream->channelCount == 0 || 
+                    request.stream->chunkSize > 1000000) {
+                    std::cerr << "❌ Invalid chunk parameters in background loader: chunkSize=" 
+                              << request.stream->chunkSize << ", channelCount=" 
+                              << request.stream->channelCount << std::endl;
+                    request.stream->isLoadingNext = false;
+                    continue;
+                }
+                
                 // Allocate temporary buffer
-                std::vector<float> tempBuffer(request.stream->chunkSize * request.stream->channelCount);
+                std::vector<float> tempBuffer;
+                try {
+                    tempBuffer.resize(request.stream->chunkSize * request.stream->channelCount);
+                } catch (const std::exception& e) {
+                    std::cerr << "❌ Failed to allocate buffer in background loader: " << e.what() << std::endl;
+                    request.stream->isLoadingNext = false;
+                    continue;
+                }
                 
                 // Read chunk data
                 if (request.stream->format == 1) { // Float format
@@ -1922,8 +2289,9 @@ namespace tremor::audio {
                         std::vector<int16_t> pcmBuffer(request.stream->chunkSize * request.stream->channelCount);
                         request.stream->fileStream->read(reinterpret_cast<char*>(pcmBuffer.data()), 
                                               pcmBuffer.size() * sizeof(int16_t));
-                        // Convert to float
-                        for (size_t j = 0; j < pcmBuffer.size(); ++j) {
+                        // Convert to float - ensure buffer sizes match
+                        size_t sampleCount = std::min(pcmBuffer.size(), tempBuffer.size());
+                        for (size_t j = 0; j < sampleCount; ++j) {
                             tempBuffer[j] = pcmBuffer[j] / 32768.0f;
                         }
                     }
@@ -1946,12 +2314,38 @@ namespace tremor::audio {
     }
     
     void TaffyAudioProcessor::preloadStreamingChunkAsync(StreamingAudioInfo& stream, uint32_t chunkIndex) {
-        if (stream.isLoadingNext) {
+        // Use atomic exchange to prevent race condition
+        if (stream.isLoadingNext.exchange(true)) {
             return; // Already loading
+        }
+        
+        // Validate chunk index
+        if (stream.chunkSize == 0 || stream.totalSamples == 0) {
+            stream.isLoadingNext = false;
+            return;
+        }
+        
+        uint32_t totalChunks = (stream.totalSamples + stream.chunkSize - 1) / stream.chunkSize;
+        if (chunkIndex >= totalChunks) {
+            stream.isLoadingNext = false;
+            return;
         }
         
         {
             std::lock_guard<std::mutex> lock(loaderMutex_);
+            
+            // Clear any pending loads for this stream to avoid stale requests
+            std::queue<LoadRequest> newQueue;
+            while (!loadQueue_.empty()) {
+                LoadRequest req = loadQueue_.front();
+                loadQueue_.pop();
+                if (req.stream != &stream) {
+                    newQueue.push(req);
+                }
+            }
+            loadQueue_ = std::move(newQueue);
+            
+            // Add new request
             loadQueue_.push({&stream, chunkIndex});
         }
         loaderCV_.notify_one();

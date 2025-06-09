@@ -307,7 +307,7 @@ public:
             "assets/audio/hihat.taf",
             "assets/audio/pad_loop.taf",
             "assets/audio/imported_bitcrushed.taf",
-            "assets/audio/streaming_import.taf"
+            "assets/audio/streaming_test.taf"
         };
         
         // Use current waveform selection
@@ -562,7 +562,7 @@ public:
                         Logger::get().info("🎵 Creating demo streaming audio TAF...");
                         {
                             // For demo, create a simple streaming audio file
-                            std::string outputTaf = "assets/audio/streaming_import.taf";
+                            std::string outputTaf = "assets/audio/streaming_test.taf";
                             
                             // Create a simple sine wave for testing streaming
                             if (tremor::taffy::tools::createStreamingAudioAsset("assets/audio/imported_sample.wav", outputTaf, 10000)) {
