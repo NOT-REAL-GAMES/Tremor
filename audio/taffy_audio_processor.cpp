@@ -19,9 +19,22 @@ namespace tremor::audio {
 
     TaffyAudioProcessor::TaffyAudioProcessor(uint32_t sample_rate)
         : sample_rate_(sample_rate), current_time_(0.0f), sample_count_(0) {
+        // Start background loader thread
+        loaderThread_ = std::make_unique<std::thread>(&TaffyAudioProcessor::backgroundLoader, this);
     }
 
     TaffyAudioProcessor::~TaffyAudioProcessor() {
+        // Stop loader thread
+        shouldStopLoader_ = true;
+        loaderCV_.notify_all();
+        if (loaderThread_ && loaderThread_->joinable()) {
+            loaderThread_->join();
+        }
+        
+        // Clean up streaming file handles
+        for (auto& stream : streamingAudios_) {
+            stream.fileStream.reset();
+        }
     }
 
     bool TaffyAudioProcessor::loadAudioChunk(const std::vector<uint8_t>& audioData) {
@@ -290,6 +303,22 @@ namespace tremor::audio {
         std::cout << "✅ Audio chunk loaded successfully!" << std::endl;
         std::cout << "   Total streaming audios loaded: " << streamingAudios_.size() << std::endl;
         return true;
+    }
+    
+    bool TaffyAudioProcessor::loadAudioMetadata(const std::vector<uint8_t>& audioData, size_t metadataSize) {
+        // For streaming, we only load the metadata portion
+        if (audioData.size() < metadataSize) {
+            // If the chunk is smaller than expected metadata, just load it all
+            return loadAudioChunk(audioData);
+        }
+        
+        // Create a truncated vector with just metadata
+        std::vector<uint8_t> metadataOnly(audioData.begin(), audioData.begin() + metadataSize);
+        
+        std::cout << "🎵 Loading streaming metadata only (" << metadataSize << " bytes of " 
+                  << audioData.size() << " total)" << std::endl;
+        
+        return loadAudioChunk(metadataOnly);
     }
 
     void TaffyAudioProcessor::processAudio(float* outputBuffer, uint32_t frameCount, uint32_t channelCount) {
@@ -1567,9 +1596,9 @@ namespace tremor::audio {
         
         // Ensure file stream is open
         if (!stream.fileStream || !stream.fileStream->is_open()) {
-            if (stream.fileStream) delete stream.fileStream;
+            stream.fileStream.reset();
             std::cout << "🔄 Opening streaming audio file: " << stream.filePath << std::endl;
-            stream.fileStream = new std::ifstream(stream.filePath, std::ios::binary);
+            stream.fileStream = std::make_unique<std::ifstream>(stream.filePath, std::ios::binary);
             if (!stream.fileStream->is_open()) {
                 std::cerr << "❌ Failed to open streaming audio file: " << stream.filePath << std::endl;
                 std::cerr << "   Does file exist? " << std::filesystem::exists(stream.filePath) << std::endl;
@@ -1577,6 +1606,33 @@ namespace tremor::audio {
                 return;
             }
             std::cout << "✅ File opened successfully!" << std::endl;
+            
+            // If this is a WAV file, we need to find the data chunk offset
+            if (stream.filePath.find(".wav") != std::string::npos) {
+                // Read WAV header to find data chunk
+                char buffer[4];
+                stream.fileStream->read(buffer, 4);
+                if (std::strncmp(buffer, "RIFF", 4) == 0) {
+                    stream.fileStream->seekg(12); // Skip RIFF header
+                    
+                    // Search for data chunk
+                    while (!stream.fileStream->eof()) {
+                        stream.fileStream->read(buffer, 4);
+                        if (std::strncmp(buffer, "data", 4) == 0) {
+                            uint32_t dataSize;
+                            stream.fileStream->read(reinterpret_cast<char*>(&dataSize), 4);
+                            stream.dataOffset = stream.fileStream->tellg();
+                            std::cout << "📍 Found WAV data chunk at offset: " << stream.dataOffset << std::endl;
+                            break;
+                        } else {
+                            // Skip this chunk
+                            uint32_t chunkSize;
+                            stream.fileStream->read(reinterpret_cast<char*>(&chunkSize), 4);
+                            stream.fileStream->seekg(chunkSize, std::ios::cur);
+                        }
+                    }
+                }
+            }
         }
         
         // Process each frame
@@ -1613,18 +1669,26 @@ namespace tremor::audio {
                 stream.currentChunk = static_cast<uint32_t>(node.samplePosition / stream.chunkSize);
                 stream.bufferPosition = static_cast<uint32_t>(node.samplePosition) % stream.chunkSize;
                 
-                // Use pre-loaded chunk if available, otherwise load synchronously (which causes a hitch)
-                if (stream.nextChunkReady && stream.currentChunk == 0) {
-                    // Use pre-loaded first chunk
-                    stream.chunkBuffer = std::move(stream.nextChunkBuffer);
-                    stream.nextChunkReady = false;
-                    std::cout << "✅ Using pre-loaded first chunk!" << std::endl;
-                } else {
-                    // Load the chunk containing our start position (causes hitch)
-                    std::cout << "⚠️  Loading chunk synchronously (may cause hitch)" << std::endl;
-                    preloadStreamingChunk(stream, stream.currentChunk);
-                    stream.chunkBuffer = std::move(stream.nextChunkBuffer);
-                    stream.nextChunkReady = false;
+                // Use pre-loaded chunk if available
+                {
+                    std::lock_guard<std::mutex> lock(stream.bufferMutex);
+                    if (stream.nextChunkReady && stream.nextChunkIndex == stream.currentChunk) {
+                        // Use pre-loaded chunk
+                        stream.chunkBuffer = std::move(stream.nextChunkBuffer);
+                        stream.nextChunkReady = false;
+                        std::cout << "✅ Using pre-loaded chunk " << stream.currentChunk << std::endl;
+                    } else {
+                        // Need to load synchronously (causes hitch)
+                        std::cout << "⚠️  Loading chunk " << stream.currentChunk << " synchronously (may cause hitch)" << std::endl;
+                        preloadStreamingChunk(stream, stream.currentChunk);
+                        stream.chunkBuffer = std::move(stream.nextChunkBuffer);
+                        stream.nextChunkReady = false;
+                    }
+                }
+                
+                // Pre-load next chunk in background
+                if (stream.currentChunk + 1 < (stream.totalSamples + stream.chunkSize - 1) / stream.chunkSize) {
+                    preloadStreamingChunkAsync(stream, stream.currentChunk + 1);
                 }
             }
             node.lastTrigger = trigger;
@@ -1671,22 +1735,29 @@ namespace tremor::audio {
                     stream.currentChunk = newChunk;
                     
                     // Load next chunk
-                    uint64_t chunkOffset = stream.dataOffset + (stream.currentChunk * stream.chunkSize * stream.channelCount * (stream.bitDepth / 8));
-                    stream.fileStream->seekg(chunkOffset);
-                    
-                    // Read chunk data (same as above)
-                    if (stream.format == 1) {
-                        stream.fileStream->read(reinterpret_cast<char*>(stream.chunkBuffer.data()), 
-                                              stream.chunkSize * stream.channelCount * sizeof(float));
-                    } else {
-                        if (stream.bitDepth == 16) {
-                            std::vector<int16_t> pcmBuffer(stream.chunkSize * stream.channelCount);
-                            stream.fileStream->read(reinterpret_cast<char*>(pcmBuffer.data()), 
-                                                  pcmBuffer.size() * sizeof(int16_t));
-                            for (size_t j = 0; j < pcmBuffer.size(); ++j) {
-                                stream.chunkBuffer[j] = pcmBuffer[j] / 32768.0f;
-                            }
+                    bool useAsync = false;
+                    {
+                        std::lock_guard<std::mutex> lock(stream.bufferMutex);
+                        if (stream.nextChunkReady && stream.nextChunkIndex == stream.currentChunk) {
+                            // Use pre-loaded chunk (seamless transition)
+                            stream.chunkBuffer = std::move(stream.nextChunkBuffer);
+                            stream.nextChunkReady = false;
+                            std::cout << "✅ Seamless transition to chunk " << stream.currentChunk << std::endl;
+                            useAsync = true;
                         }
+                    }
+                    
+                    if (!useAsync) {
+                        // Need to load synchronously (causes hitch)
+                        std::cout << "⚠️  Loading chunk " << stream.currentChunk << " synchronously (HITCH!)" << std::endl;
+                        preloadStreamingChunk(stream, stream.currentChunk);
+                        stream.chunkBuffer = std::move(stream.nextChunkBuffer);
+                        stream.nextChunkReady = false;
+                    }
+                    
+                    // Pre-load next chunk in background
+                    if (stream.currentChunk + 1 < (stream.totalSamples + stream.chunkSize - 1) / stream.chunkSize) {
+                        preloadStreamingChunkAsync(stream, stream.currentChunk + 1);
                     }
                 }
                 
@@ -1704,11 +1775,38 @@ namespace tremor::audio {
     void TaffyAudioProcessor::preloadStreamingChunk(StreamingAudioInfo& stream, uint32_t chunkIndex) {
         // Ensure file stream is open
         if (!stream.fileStream || !stream.fileStream->is_open()) {
-            if (stream.fileStream) delete stream.fileStream;
-            stream.fileStream = new std::ifstream(stream.filePath, std::ios::binary);
+            stream.fileStream.reset();
+            stream.fileStream = std::make_unique<std::ifstream>(stream.filePath, std::ios::binary);
             if (!stream.fileStream->is_open()) {
                 std::cerr << "❌ Failed to open streaming audio file for preload: " << stream.filePath << std::endl;
                 return;
+            }
+            
+            // If this is a WAV file, we need to find the data chunk offset
+            if (stream.filePath.find(".wav") != std::string::npos) {
+                // Read WAV header to find data chunk
+                char buffer[4];
+                stream.fileStream->read(buffer, 4);
+                if (std::strncmp(buffer, "RIFF", 4) == 0) {
+                    stream.fileStream->seekg(12); // Skip RIFF header
+                    
+                    // Search for data chunk
+                    while (!stream.fileStream->eof()) {
+                        stream.fileStream->read(buffer, 4);
+                        if (std::strncmp(buffer, "data", 4) == 0) {
+                            uint32_t dataSize;
+                            stream.fileStream->read(reinterpret_cast<char*>(&dataSize), 4);
+                            stream.dataOffset = stream.fileStream->tellg();
+                            std::cout << "📍 Found WAV data chunk at offset: " << stream.dataOffset << std::endl;
+                            break;
+                        } else {
+                            // Skip this chunk
+                            uint32_t chunkSize;
+                            stream.fileStream->read(reinterpret_cast<char*>(&chunkSize), 4);
+                            stream.fileStream->seekg(chunkSize, std::ios::cur);
+                        }
+                    }
+                }
             }
         }
         
@@ -1745,6 +1843,118 @@ namespace tremor::audio {
         
         stream.nextChunkReady = true;
         std::cout << "📦 Pre-loaded chunk " << chunkIndex << " for streaming audio" << std::endl;
+    }
+
+    void TaffyAudioProcessor::backgroundLoader() {
+        std::cout << "🚀 Background loader thread started" << std::endl;
+        
+        while (!shouldStopLoader_) {
+            LoadRequest request;
+            
+            {
+                std::unique_lock<std::mutex> lock(loaderMutex_);
+                loaderCV_.wait(lock, [this] { return !loadQueue_.empty() || shouldStopLoader_; });
+                
+                if (shouldStopLoader_) break;
+                if (loadQueue_.empty()) continue;
+                
+                request = loadQueue_.front();
+                loadQueue_.pop();
+            }
+            
+            // Load the chunk
+            if (request.stream && !request.stream->isLoadingNext) {
+                request.stream->isLoadingNext = true;
+                
+                std::cout << "🔄 Background loading chunk " << request.chunkIndex << std::endl;
+                
+                // Ensure file stream is open
+                if (!request.stream->fileStream || !request.stream->fileStream->is_open()) {
+                    request.stream->fileStream = std::make_unique<std::ifstream>(request.stream->filePath, std::ios::binary);
+                    if (!request.stream->fileStream->is_open()) {
+                        std::cerr << "❌ Failed to open file in background loader" << std::endl;
+                        request.stream->isLoadingNext = false;
+                        continue;
+                    }
+                    
+                    // If this is a WAV file, we need to find the data chunk offset
+                    if (request.stream->filePath.find(".wav") != std::string::npos) {
+                        // Read WAV header to find data chunk
+                        char buffer[4];
+                        request.stream->fileStream->read(buffer, 4);
+                        if (std::strncmp(buffer, "RIFF", 4) == 0) {
+                            request.stream->fileStream->seekg(12); // Skip RIFF header
+                            
+                            // Search for data chunk
+                            while (!request.stream->fileStream->eof()) {
+                                request.stream->fileStream->read(buffer, 4);
+                                if (std::strncmp(buffer, "data", 4) == 0) {
+                                    uint32_t dataSize;
+                                    request.stream->fileStream->read(reinterpret_cast<char*>(&dataSize), 4);
+                                    request.stream->dataOffset = request.stream->fileStream->tellg();
+                                    std::cout << "📍 Background loader: Found WAV data chunk at offset: " << request.stream->dataOffset << std::endl;
+                                    break;
+                                } else {
+                                    // Skip this chunk
+                                    uint32_t chunkSize;
+                                    request.stream->fileStream->read(reinterpret_cast<char*>(&chunkSize), 4);
+                                    request.stream->fileStream->seekg(chunkSize, std::ios::cur);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Calculate chunk offset
+                uint64_t chunkOffset = request.stream->dataOffset + 
+                    (request.chunkIndex * request.stream->chunkSize * request.stream->channelCount * (request.stream->bitDepth / 8));
+                request.stream->fileStream->seekg(chunkOffset);
+                
+                // Allocate temporary buffer
+                std::vector<float> tempBuffer(request.stream->chunkSize * request.stream->channelCount);
+                
+                // Read chunk data
+                if (request.stream->format == 1) { // Float format
+                    request.stream->fileStream->read(reinterpret_cast<char*>(tempBuffer.data()), 
+                                          request.stream->chunkSize * request.stream->channelCount * sizeof(float));
+                } else { // PCM format
+                    if (request.stream->bitDepth == 16) {
+                        std::vector<int16_t> pcmBuffer(request.stream->chunkSize * request.stream->channelCount);
+                        request.stream->fileStream->read(reinterpret_cast<char*>(pcmBuffer.data()), 
+                                              pcmBuffer.size() * sizeof(int16_t));
+                        // Convert to float
+                        for (size_t j = 0; j < pcmBuffer.size(); ++j) {
+                            tempBuffer[j] = pcmBuffer[j] / 32768.0f;
+                        }
+                    }
+                }
+                
+                // Swap buffers under lock
+                {
+                    std::lock_guard<std::mutex> lock(request.stream->bufferMutex);
+                    request.stream->nextChunkBuffer = std::move(tempBuffer);
+                    request.stream->nextChunkReady = true;
+                    request.stream->nextChunkIndex = request.chunkIndex;
+                }
+                
+                std::cout << "✅ Chunk " << request.chunkIndex << " loaded in background" << std::endl;
+                request.stream->isLoadingNext = false;
+            }
+        }
+        
+        std::cout << "🛑 Background loader thread stopped" << std::endl;
+    }
+    
+    void TaffyAudioProcessor::preloadStreamingChunkAsync(StreamingAudioInfo& stream, uint32_t chunkIndex) {
+        if (stream.isLoadingNext) {
+            return; // Already loading
+        }
+        
+        {
+            std::lock_guard<std::mutex> lock(loaderMutex_);
+            loadQueue_.push({&stream, chunkIndex});
+        }
+        loaderCV_.notify_one();
     }
 
 } // namespace tremor::audio

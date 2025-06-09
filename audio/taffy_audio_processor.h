@@ -4,6 +4,11 @@
 #include <unordered_map>
 #include <memory>
 #include <cmath>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
 #include "taffy.h"
 
 namespace tremor::audio {
@@ -27,6 +32,14 @@ namespace tremor::audio {
             std::vector<uint8_t> buffer(data, data + size);
             return loadAudioChunk(buffer);
         }
+        
+        /**
+         * Load only audio metadata for streaming (no audio data)
+         * @param audioData Raw audio chunk data
+         * @param metadataSize Size of metadata to load
+         * @return true if loaded successfully
+         */
+        bool loadAudioMetadata(const std::vector<uint8_t>& audioData, size_t metadataSize);
 
         /**
          * Process audio and fill output buffer
@@ -178,18 +191,54 @@ namespace tremor::audio {
             uint32_t format;
             
             // Runtime state
-            std::ifstream* fileStream = nullptr;
+            std::unique_ptr<std::ifstream> fileStream;
             std::vector<float> chunkBuffer;
             std::vector<float> nextChunkBuffer;  // Pre-loaded next chunk
             uint32_t currentChunk = 0;
             uint32_t bufferPosition = 0;
             bool nextChunkReady = false;
             bool needsPreload = true;
+            
+            // Async loading state
+            std::atomic<bool> isLoadingNext{false};
+            std::mutex bufferMutex;
+            uint32_t nextChunkIndex = 0;
+            
+            // Constructor
+            StreamingAudioInfo() = default;
+            
+            // Copy constructor (needed for vector)
+            StreamingAudioInfo(const StreamingAudioInfo& other) 
+                : filePath(other.filePath), dataOffset(other.dataOffset),
+                  totalSamples(other.totalSamples), chunkSize(other.chunkSize),
+                  sampleRate(other.sampleRate), channelCount(other.channelCount),
+                  bitDepth(other.bitDepth), format(other.format),
+                  currentChunk(other.currentChunk), bufferPosition(other.bufferPosition),
+                  nextChunkReady(other.nextChunkReady), needsPreload(other.needsPreload),
+                  isLoadingNext(false), nextChunkIndex(other.nextChunkIndex) {}
+            
+            // Move constructor
+            StreamingAudioInfo(StreamingAudioInfo&& other) = default;
         };
         
         std::vector<StreamingAudioInfo> streamingAudios_;
         
         void preloadStreamingChunk(StreamingAudioInfo& stream, uint32_t chunkIndex);
+        void preloadStreamingChunkAsync(StreamingAudioInfo& stream, uint32_t chunkIndex);
+        
+        // Background loading thread
+        std::unique_ptr<std::thread> loaderThread_;
+        std::atomic<bool> shouldStopLoader_{false};
+        std::mutex loaderMutex_;
+        std::condition_variable loaderCV_;
+        
+        struct LoadRequest {
+            StreamingAudioInfo* stream;
+            uint32_t chunkIndex;
+        };
+        std::queue<LoadRequest> loadQueue_;
+        
+        void backgroundLoader();
         
     public:
         // Set the TAF file path for streaming audio (needed for file access)

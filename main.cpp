@@ -253,7 +253,7 @@ public:
     }
 
     void switchWaveform(int waveform) {
-        if (waveform >= 0 && waveform <= 22) {
+        if (waveform >= 0 && waveform <= 21) {
             currentWaveform = waveform;
             const char* waveform_names[] = {
                 "Sine", "Square", "Saw", "Triangle", "Noise", "Mixer Demo", "ADSR Demo", 
@@ -265,14 +265,21 @@ public:
             };
             Logger::get().info("🎵 Switching to {}", waveform_names[waveform]);
             
-            // Pause audio during switch
-            SDL_PauseAudioDevice(audioDevice, 1);
-            
-            // Reload with new waveform
-            loadTestAudioAsset();
-            
-            // Resume audio
-            SDL_PauseAudioDevice(audioDevice, 0);
+            // For streaming audio, don't pause - just load new audio
+            // Pausing/resuming can cause additional hitches
+            if (waveform == 21) {
+                Logger::get().info("🎵 Loading streaming audio without pausing...");
+                loadTestAudioAsset();
+            } else {
+                // Pause audio during switch for non-streaming
+                SDL_PauseAudioDevice(audioDevice, 1);
+                
+                // Reload with new waveform
+                loadTestAudioAsset();
+                
+                // Resume audio
+                SDL_PauseAudioDevice(audioDevice, 0);
+            }
         }
     }
 
@@ -345,29 +352,94 @@ public:
             auto audioData = audioAsset.get_chunk_data(Taffy::ChunkType::AUDI);
             if (audioData) {
                 Logger::get().info("📦 Found audio chunk, size: {} bytes", audioData->size());
-                if (audioProcessor->loadAudioChunk(*audioData)) {
-                    Logger::get().info("✅ Audio chunk loaded into processor");
-                    Logger::get().info("🎵 Playing waveform type {}", waveform_index);
+                
+                // For streaming audio, we need to handle it differently
+                if (waveform_index == 21) {
+                    // For streaming, only load the metadata, not the actual audio data
+                    // The audio data will be streamed from disk
+                    Logger::get().info("🎵 Loading streaming audio metadata only...");
                     
-                    // For streaming audio, set the file path
-                    if (waveform_index == 21) {
-                        audioProcessor->setStreamingAudioFilePath(audioPath);
-                        Logger::get().info("📁 Set streaming audio file path: {}", audioPath);
-                    }
+                    // Calculate how much of the chunk is metadata vs audio data
+                    // Parse the header to get exact sizes
+                    const uint8_t* ptr = audioData->data();
+                    Taffy::AudioChunk header;
+                    std::memcpy(&header, ptr, sizeof(Taffy::AudioChunk));
                     
-                    // For sample-based assets (16-21), trigger the gate parameter
-                    if (waveform_index >= 16 && waveform_index <= 21) {
-                        // Set gate parameter to 1 to trigger sample playback
-                        uint64_t gateHash = Taffy::fnv1a_hash("gate");
-                        audioProcessor->setParameter(gateHash, 1.0f);
-                        Logger::get().info("🎯 Triggered sample playback (gate=1) for waveform {}", waveform_index);
+                    size_t metadataSize = sizeof(Taffy::AudioChunk);
+                    metadataSize += header.node_count * sizeof(Taffy::AudioChunk::Node);
+                    metadataSize += header.connection_count * sizeof(Taffy::AudioChunk::Connection);
+                    metadataSize += header.pattern_count * sizeof(Taffy::AudioChunk::Pattern);
+                    metadataSize += header.sample_count * sizeof(Taffy::AudioChunk::WaveTable);
+                    metadataSize += header.parameter_count * sizeof(Taffy::AudioChunk::Parameter);
+                    metadataSize += header.streaming_count * sizeof(Taffy::AudioChunk::StreamingAudio);
+                    
+                    Logger::get().info("📊 Metadata size: {} bytes, Total chunk: {} bytes", 
+                                     metadataSize, audioData->size());
+                    
+                    if (audioData->size() > metadataSize) {
+                        Logger::get().info("⚠️  Audio chunk contains {} MB of data - truncating to metadata only", 
+                                         (audioData->size() - metadataSize) / (1024.0 * 1024.0));
                         
-                        // Also debug what parameters exist
-                        Logger::get().info("   Setting gate parameter with hash: 0x{:x}", gateHash);
+                        // Create a truncated vector with just the metadata
+                        std::vector<uint8_t> metadataOnly(audioData->begin(), audioData->begin() + metadataSize);
                         
-                        // Reset gate after 10 audio callbacks (about 100ms at typical buffer sizes)
-                        gateResetCounter = 10;
+                        if (audioProcessor->loadAudioChunk(metadataOnly)) {
+                            Logger::get().info("✅ Streaming audio metadata loaded");
+                            // For streaming, we need to set the WAV file path, not the TAF path
+                            // The TAF only contains metadata, the actual audio is in the WAV
+                            std::string wavPath = audioPath;
+                            // Replace .taf with .wav to get the source WAV file
+                            size_t pos = wavPath.find_last_of('.');
+                            if (pos != std::string::npos) {
+                                wavPath = wavPath.substr(0, pos) + ".wav";
+                            }
+                            
+                            // Check if the WAV file exists
+                            if (!std::filesystem::exists(wavPath)) {
+                                // Try looking for imported_sample.wav as fallback
+                                wavPath = "assets/audio/imported_sample.wav";
+                                Logger::get().info("📁 Using fallback WAV: {}", wavPath);
+                            }
+                            
+                            audioProcessor->setStreamingAudioFilePath(wavPath);
+                            Logger::get().info("📁 Set streaming audio file path to WAV: {}", wavPath);
+                        }
+                    } else {
+                        // Small chunk, load normally
+                        if (audioProcessor->loadAudioChunk(*audioData)) {
+                            Logger::get().info("✅ Audio chunk loaded");
+                            // Still need to set WAV path for streaming
+                            std::string wavPath = audioPath;
+                            size_t pos = wavPath.find_last_of('.');
+                            if (pos != std::string::npos) {
+                                wavPath = wavPath.substr(0, pos) + ".wav";
+                            }
+                            if (!std::filesystem::exists(wavPath)) {
+                                wavPath = "assets/audio/imported_sample.wav";
+                            }
+                            audioProcessor->setStreamingAudioFilePath(wavPath);
+                        }
                     }
+                } else {
+                    // Non-streaming audio, load the entire chunk
+                    if (audioProcessor->loadAudioChunk(*audioData)) {
+                        Logger::get().info("✅ Audio chunk loaded into processor");
+                        Logger::get().info("🎵 Playing waveform type {}", waveform_index);
+                    }
+                }
+                
+                // For sample-based assets (16-21), trigger the gate parameter
+                if (waveform_index >= 16 && waveform_index <= 21) {
+                    // Set gate parameter to 1 to trigger sample playback
+                    uint64_t gateHash = Taffy::fnv1a_hash("gate");
+                    audioProcessor->setParameter(gateHash, 1.0f);
+                    Logger::get().info("🎯 Triggered sample playback (gate=1) for waveform {}", waveform_index);
+                    
+                    // Also debug what parameters exist
+                    Logger::get().info("   Setting gate parameter with hash: 0x{:x}", gateHash);
+                    
+                    // Reset gate after 10 audio callbacks (about 100ms at typical buffer sizes)
+                    gateResetCounter = 10;
                 }
             } else {
                 Logger::get().error("No AUDI chunk found in asset");
