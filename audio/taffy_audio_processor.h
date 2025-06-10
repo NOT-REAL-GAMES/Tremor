@@ -10,6 +10,8 @@
 #include <condition_variable>
 #include <queue>
 #include "taffy.h"
+#include "taffy_streaming.h"
+#include "../res.h"
 
 namespace tremor::audio {
 
@@ -204,8 +206,17 @@ namespace tremor::audio {
             
             // Async loading state
             std::atomic<bool> isLoadingNext{false};
+            
+            // For TAF-embedded audio data
+            const uint8_t* embeddedData = nullptr;  // Pointer to embedded audio in TAF
+            size_t embeddedDataSize = 0;            // Size of embedded audio data
+            std::vector<uint8_t> embeddedDataCopy;  // Copy of embedded data to keep pointers valid
             std::mutex bufferMutex;
             uint32_t nextChunkIndex = 0;
+            
+            // For chunked TAF streaming
+            std::shared_ptr<Taffy::StreamingTaffyLoader> tafLoader;
+            uint32_t totalChunks = 0;
             
             // Constructor
             StreamingAudioInfo() = default;
@@ -218,7 +229,15 @@ namespace tremor::audio {
                   bitDepth(other.bitDepth), format(other.format),
                   currentChunk(other.currentChunk), bufferPosition(other.bufferPosition),
                   nextChunkReady(other.nextChunkReady), needsPreload(other.needsPreload),
-                  isLoadingNext(false), nextChunkIndex(other.nextChunkIndex) {}
+                  isLoadingNext(false), embeddedDataCopy(other.embeddedDataCopy),
+                  embeddedDataSize(other.embeddedDataSize), nextChunkIndex(other.nextChunkIndex) {
+                // Update embedded data pointer to point to our copy
+                if (!embeddedDataCopy.empty()) {
+                    embeddedData = embeddedDataCopy.data();
+                } else {
+                    embeddedData = nullptr;
+                }
+            }
             
             // Move constructor
             StreamingAudioInfo(StreamingAudioInfo&& other) = default;
@@ -245,6 +264,19 @@ namespace tremor::audio {
         void backgroundLoader();
         
     public:
+        // Set TAF loader for chunked streaming
+        void setStreamingTafLoader(std::shared_ptr<Taffy::StreamingTaffyLoader> loader) {
+            std::lock_guard<std::mutex> vecLock(streamingAudiosMutex_);
+            Logger::get().info("🔧 setStreamingTafLoader called, {} streaming audios", streamingAudios_.size());
+            for (auto& stream : streamingAudios_) {
+                std::lock_guard<std::mutex> lock(stream.bufferMutex);
+                stream.tafLoader = loader;
+                stream.needsPreload = true;
+                stream.totalChunks = loader->getChunkCount() - 1; // -1 for metadata chunk
+                Logger::get().info("   ✅ Set TAF loader for stream with {} chunks", stream.totalChunks);
+            }
+        }
+        
         // Set the TAF file path for streaming audio (needed for file access)
         void setStreamingAudioFilePath(const std::string& filePath) {
             // Wait for any pending loads to complete

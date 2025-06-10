@@ -40,10 +40,17 @@
 #include "audio/taffy_audio_processor.h"
 #include "renderer/taffy_integration.h"
 #include "../Taffy/include/taffy_audio_tools.h"
+#include "../Taffy/include/taffy_streaming.h"
 #include <filesystem>
 #include <cstring>
 #include <cmath>
 #include <fstream>
+
+// Forward declaration for chunked TAF creation
+bool createChunkedStreamingTAF(const std::string& inputWavPath,
+                               const std::string& outputPath,
+                               uint32_t chunkSizeMs,
+                               bool verbose = true);
 
 
 template<typename T>
@@ -90,11 +97,32 @@ public:
         uint32_t frameCount = len / (sizeof(float) * 2);  // 2 channels
         
         static int callbackCount = 0;
-        if (callbackCount < 5) {
-            Logger::get().info("Audio callback #{}: {} frames", callbackCount++, frameCount);
+        static int waveformChangeCount = 0;
+        static int lastWaveform = -1;
+        
+        Engine* eng = static_cast<Engine*>(userdata);
+        if (eng && eng->currentWaveform != lastWaveform) {
+            lastWaveform = eng->currentWaveform;
+            waveformChangeCount = 0;
+        }
+        
+        if (callbackCount < 5 || waveformChangeCount < 5) {
+            Logger::get().info("Audio callback #{}: {} frames, waveform: {}", 
+                             callbackCount++, frameCount, eng ? eng->currentWaveform : -1);
+            waveformChangeCount++;
         }
         
         if (engine->audioProcessor) {
+            static int processorDebugCount = 0;
+            static int lastWaveformProcessed = -1;
+            if (lastWaveformProcessed != engine->currentWaveform) {
+                lastWaveformProcessed = engine->currentWaveform;
+                processorDebugCount = 0;
+            }
+            if (processorDebugCount < 5) {
+                Logger::get().info("🎵 Processing audio for waveform {}", engine->currentWaveform);
+                processorDebugCount++;
+            }
             engine->audioProcessor->processAudio(outputBuffer, frameCount, 2);
             
             // Apply bit crusher effect if enabled
@@ -189,6 +217,7 @@ public:
 
         // Create audio processor
         audioProcessor = std::make_unique<tremor::audio::TaffyAudioProcessor>(48000);
+        Logger::get().info("   Audio processor created: {}", (void*)audioProcessor.get());
 
         // Set up SDL audio specification
         SDL_AudioSpec desired, obtained;
@@ -253,7 +282,7 @@ public:
     }
 
     void switchWaveform(int waveform) {
-        if (waveform >= 0 && waveform <= 21) {
+        if (waveform >= 0 && waveform <= 22) {
             currentWaveform = waveform;
             const char* waveform_names[] = {
                 "Sine", "Square", "Saw", "Triangle", "Noise", "Mixer Demo", "ADSR Demo", 
@@ -261,15 +290,24 @@ public:
                 "Hard Clip Distortion", "Soft Clip Distortion", "Foldback Distortion",
                 "Bit Crush Distortion", "Overdrive Distortion", "ZX Spectrum Beeper",
                 "Imported Sample", "Kick Drum", "Hi-Hat", "Pad Loop", "Bit-Crushed Import",
-                "Streaming Import"
+                "Streaming Import", "Streaming Test"
             };
             Logger::get().info("🎵 Switching to {}", waveform_names[waveform]);
             
             // For streaming audio, don't pause - just load new audio
             // Pausing/resuming can cause additional hitches
-            if (waveform == 21) {
+            if (waveform == 21 || waveform == 22) {
                 Logger::get().info("🎵 Loading streaming audio without pausing...");
+                // For chunked TAFs, add a small delay to ensure clean switch
+                if (waveform == 21) {
+                    SDL_PauseAudioDevice(audioDevice, 1);
+                    SDL_Delay(2); // Give audio thread time to stop
+                }
                 loadTestAudioAsset();
+                if (waveform == 21) {
+                    SDL_Delay(2); // Give time for new nodes to be ready
+                    SDL_PauseAudioDevice(audioDevice, 0);
+                }
             } else {
                 // Pause audio during switch for non-streaming
                 SDL_PauseAudioDevice(audioDevice, 1);
@@ -307,7 +345,8 @@ public:
             "assets/audio/hihat.taf",
             "assets/audio/pad_loop.taf",
             "assets/audio/imported_bitcrushed.taf",
-            "assets/audio/streaming_test.taf"
+            "assets/audio/imported_sample.taf",
+            "streaming_drum.taf"
         };
         
         // Use current waveform selection
@@ -321,7 +360,7 @@ public:
         if (!std::filesystem::exists(audioPath)) {
             Logger::get().error("❌ File not found: {}", audioPath);
             // For streaming audio, try to create it if it doesn't exist
-            if (waveform_index == 21) {
+            if (waveform_index == 22) {
                 Logger::get().info("📁 Streaming TAF not found, creating it first...");
                 // Try to use an existing WAV file
                 std::string inputWav = "assets/audio/imported_sample.wav";
@@ -344,17 +383,57 @@ public:
             Logger::get().info("✅ File exists: {}", audioPath);
         }
 
-        Taffy::Asset audioAsset;
-        if (audioAsset.load_from_file_safe(audioPath)) {
-            Logger::get().info("✅ Loaded audio asset: {}", audioPath);
+        // For chunked TAFs (waveform 21), use StreamingTaffyLoader to get metadata
+        if (waveform_index == 21) {
+            Logger::get().info("🎵 Loading chunked TAF with StreamingTaffyLoader...");
             
-            // Get the audio chunk
-            auto audioData = audioAsset.get_chunk_data(Taffy::ChunkType::AUDI);
-            if (audioData) {
-                Logger::get().info("📦 Found audio chunk, size: {} bytes", audioData->size());
+            // IMPORTANT: Pause audio to prevent race conditions
+            SDL_PauseAudioDevice(audioDevice, 1);
+            SDL_Delay(2); // Give audio thread time to stop
+            
+            auto loader = std::make_shared<Taffy::StreamingTaffyLoader>();
+            if (loader->open(audioPath)) {
+                Logger::get().info("✅ Opened TAF for streaming, {} chunks", loader->getChunkCount());
                 
-                // For streaming audio, we need to handle it differently
-                if (waveform_index == 21) {
+                // Load the metadata chunk (chunk 0)
+                auto metadataChunk = loader->loadChunk(0);
+                if (!metadataChunk.empty()) {
+                    Logger::get().info("📦 Loaded metadata chunk, size: {} bytes", metadataChunk.size());
+                    
+                    // Load into audio processor
+                    if (audioProcessor->loadAudioChunk(metadataChunk)) {
+                        Logger::get().info("✅ Metadata loaded into processor");
+                        
+                        // Set the streaming loader
+                        Logger::get().info("🔧 About to set streaming TAF loader...");
+                        audioProcessor->setStreamingTafLoader(loader);
+                        Logger::get().info("✅ Set up chunked TAF streaming loader");
+                    } else {
+                        Logger::get().error("❌ Failed to load metadata into processor");
+                    }
+                } else {
+                    Logger::get().error("❌ Failed to load metadata chunk");
+                }
+            } else {
+                Logger::get().error("❌ Failed to open TAF for streaming");
+            }
+            
+            // Resume audio after loading
+            SDL_Delay(4); // Give more time for background loader to preload chunks
+            SDL_PauseAudioDevice(audioDevice, 0);
+        } else {
+            // Original loading code for non-chunked TAFs
+            Taffy::Asset audioAsset;
+            if (audioAsset.load_from_file_safe(audioPath)) {
+                Logger::get().info("✅ Loaded audio asset: {}", audioPath);
+                
+                // Get the audio chunk
+                auto audioData = audioAsset.get_chunk_data(Taffy::ChunkType::AUDI);
+                if (audioData) {
+                    Logger::get().info("📦 Found audio chunk, size: {} bytes", audioData->size());
+                    
+                    // For streaming audio, we need to handle it differently
+                    if (waveform_index == 22) {
                     // For streaming, only load the metadata, not the actual audio data
                     // The audio data will be streamed from disk
                     Logger::get().info("🎵 Loading streaming audio metadata only...");
@@ -376,48 +455,40 @@ public:
                     Logger::get().info("📊 Metadata size: {} bytes, Total chunk: {} bytes", 
                                      metadataSize, audioData->size());
                     
-                    if (audioData->size() > metadataSize) {
-                        Logger::get().info("⚠️  Audio chunk contains {} MB of data - truncating to metadata only", 
-                                         (audioData->size() - metadataSize) / (1024.0 * 1024.0));
-                        
-                        // Create a truncated vector with just the metadata
-                        std::vector<uint8_t> metadataOnly(audioData->begin(), audioData->begin() + metadataSize);
-                        
-                        if (audioProcessor->loadAudioChunk(metadataOnly)) {
+                    // Load the entire TAF chunk, including embedded audio data
+                    if (audioProcessor->loadAudioChunk(*audioData)) {
+                        if (header.streaming_count > 0 && audioData->size() > metadataSize) {
+                            Logger::get().info("✅ Streaming audio loaded with {} MB of embedded data", 
+                                             (audioData->size() - metadataSize) / (1024.0 * 1024.0));
+                            // No need to set external file path - audio is embedded in TAF
+                        } else {
                             Logger::get().info("✅ Streaming audio metadata loaded");
-                            // For streaming, we need to set the WAV file path, not the TAF path
-                            // The TAF only contains metadata, the actual audio is in the WAV
-                            std::string wavPath = audioPath;
-                            // Replace .taf with .wav to get the source WAV file
-                            size_t pos = wavPath.find_last_of('.');
-                            if (pos != std::string::npos) {
-                                wavPath = wavPath.substr(0, pos) + ".wav";
-                            }
                             
-                            // Check if the WAV file exists
-                            if (!std::filesystem::exists(wavPath)) {
-                                // Try looking for imported_sample.wav as fallback
-                                wavPath = "assets/audio/imported_sample.wav";
-                                Logger::get().info("📁 Using fallback WAV: {}", wavPath);
+                            // Check if this is a chunked TAF
+                            if (header.streaming_count > 0) {
+                                // Parse streaming info to check chunk count
+                                const uint8_t* ptr = audioData->data() + metadataSize - 
+                                                   (header.streaming_count * sizeof(Taffy::AudioChunk::StreamingAudio));
+                                Taffy::AudioChunk::StreamingAudio streamInfo;
+                                std::memcpy(&streamInfo, ptr, sizeof(streamInfo));
+                                
+                                if (streamInfo.chunk_count > 0 && streamInfo.data_offset == 0) {
+                                    Logger::get().info("🔄 Detected chunked TAF with {} chunks", streamInfo.chunk_count);
+                                    Logger::get().info("   Total samples: {}", streamInfo.total_samples);
+                                    Logger::get().info("   Sample rate: {} Hz", streamInfo.sample_rate);
+                                    Logger::get().info("   Chunk size: {} samples", streamInfo.chunk_size);
+                                    
+                                    // Create streaming TAF loader
+                                    auto loader = std::make_shared<Taffy::StreamingTaffyLoader>();
+                                    if (loader->open(audioPath)) {
+                                        audioProcessor->setStreamingTafLoader(loader);
+                                        Logger::get().info("✅ Set up chunked TAF streaming loader");
+                                        Logger::get().info("   Loader reports {} chunks", loader->getChunkCount());
+                                    } else {
+                                        Logger::get().error("❌ Failed to open TAF for streaming");
+                                    }
+                                }
                             }
-                            
-                            audioProcessor->setStreamingAudioFilePath(wavPath);
-                            Logger::get().info("📁 Set streaming audio file path to WAV: {}", wavPath);
-                        }
-                    } else {
-                        // Small chunk, load normally
-                        if (audioProcessor->loadAudioChunk(*audioData)) {
-                            Logger::get().info("✅ Audio chunk loaded");
-                            // Still need to set WAV path for streaming
-                            std::string wavPath = audioPath;
-                            size_t pos = wavPath.find_last_of('.');
-                            if (pos != std::string::npos) {
-                                wavPath = wavPath.substr(0, pos) + ".wav";
-                            }
-                            if (!std::filesystem::exists(wavPath)) {
-                                wavPath = "assets/audio/imported_sample.wav";
-                            }
-                            audioProcessor->setStreamingAudioFilePath(wavPath);
                         }
                     }
                 } else {
@@ -429,7 +500,7 @@ public:
                 }
                 
                 // For sample-based assets (16-21), trigger the gate parameter
-                if (waveform_index >= 16 && waveform_index <= 21) {
+                if (waveform_index >= 16 && waveform_index <= 22) {
                     // Set gate parameter to 1 to trigger sample playback
                     uint64_t gateHash = Taffy::fnv1a_hash("gate");
                     audioProcessor->setParameter(gateHash, 1.0f);
@@ -438,8 +509,15 @@ public:
                     // Also debug what parameters exist
                     Logger::get().info("   Setting gate parameter with hash: 0x{:x}", gateHash);
                     
-                    // Reset gate after 10 audio callbacks (about 100ms at typical buffer sizes)
-                    gateResetCounter = 10;
+                    // Reset gate after 100 audio callbacks (about 1 second at typical buffer sizes)
+                    gateResetCounter = 100;
+                    
+                    // Check audio device status
+                    SDL_AudioStatus status = SDL_GetAudioDeviceStatus(audioDevice);
+                    const char* statusStr = (status == SDL_AUDIO_STOPPED) ? "STOPPED" :
+                                           (status == SDL_AUDIO_PLAYING) ? "PLAYING" : 
+                                           (status == SDL_AUDIO_PAUSED) ? "PAUSED" : "UNKNOWN";
+                    Logger::get().info("   Audio device status: {}", statusStr);
                 }
             } else {
                 Logger::get().error("No AUDI chunk found in asset");
@@ -447,6 +525,29 @@ public:
         } else {
             Logger::get().error("Failed to load audio asset: {}", audioPath);
             Logger::get().info("💡 Tip: Run test_waveforms to generate audio assets");
+        }
+        }
+        
+        // For sample-based assets (16-22), trigger the gate parameter
+        // This is outside the loading logic so it works for both regular and chunked TAFs
+        if (waveform_index >= 16 && waveform_index <= 22) {
+            // Set gate parameter to 1 to trigger sample playback
+            uint64_t gateHash = Taffy::fnv1a_hash("gate");
+            audioProcessor->setParameter(gateHash, 1.0f);
+            Logger::get().info("🎯 Triggered sample playback (gate=1) for waveform {}", waveform_index);
+            
+            // Also debug what parameters exist
+            Logger::get().info("   Setting gate parameter with hash: 0x{:x}", gateHash);
+            
+            // Reset gate after 100 audio callbacks (about 1 second at typical buffer sizes)
+            gateResetCounter = 100;
+            
+            // Check audio device status
+            SDL_AudioStatus status = SDL_GetAudioDeviceStatus(audioDevice);
+            const char* statusStr = (status == SDL_AUDIO_STOPPED) ? "STOPPED" :
+                                   (status == SDL_AUDIO_PLAYING) ? "PLAYING" : 
+                                   (status == SDL_AUDIO_PAUSED) ? "PAUSED" : "UNKNOWN";
+            Logger::get().info("   Audio device status: {}", statusStr);
         }
     }
 
@@ -558,25 +659,47 @@ public:
                         switchWaveform(20); // Use switchWaveform to ensure proper loading
                         break;
                     case SDLK_m:
-                        // Import large audio file as streaming
-                        Logger::get().info("🎵 Creating demo streaming audio TAF...");
+                        // Create chunked streaming audio TAF
+                        Logger::get().info("🎵 Creating chunked streaming audio TAF...");
                         {
-                            // For demo, create a simple streaming audio file
-                            std::string outputTaf = "assets/audio/streaming_test.taf";
+                            // First check if we have a large WAV file
+                            std::string inputWav = "assets/audio/imported_sample.wav";
+                            if (!std::filesystem::exists(inputWav)) {
+                                // Use a test file if no imported sample
+                                inputWav = "../large_test.wav";
+                                if (!std::filesystem::exists(inputWav)) {
+                                    Logger::get().error("❌ No WAV file found for chunking");
+                                    Logger::get().info("💡 Please import a WAV file first (drag & drop)");
+                                    break;
+                                }
+                            }
                             
-                            // Create a simple sine wave for testing streaming
-                            if (tremor::taffy::tools::createStreamingAudioAsset("assets/audio/imported_sample.wav", outputTaf, 10000)) {
-                                Logger::get().info("✅ Streaming TAF created! Press 'N' to play it");
+                            std::string outputTaf = "assets/audio/imported_sample.taf";
+                            uint32_t chunkSizeMs = 500; // 500ms chunks for smoother playback
+                            
+                            Logger::get().info("📦 Input: {}", inputWav);
+                            Logger::get().info("📦 Output: {}", outputTaf);
+                            Logger::get().info("📦 Chunk size: {} ms", chunkSizeMs);
+                            
+                            // Call the chunked TAF creation function
+                            if (createChunkedStreamingTAF(inputWav, outputTaf, chunkSizeMs)) {
+                                Logger::get().info("✅ Chunked streaming TAF created successfully!");
+                                Logger::get().info("🎵 Press 'N' to play the chunked streaming audio");
+                                
+                                // Get file sizes for comparison
+                                auto wavSize = std::filesystem::file_size(inputWav) / (1024.0 * 1024.0);
+                                auto tafSize = std::filesystem::file_size(outputTaf) / (1024.0 * 1024.0);
+                                Logger::get().info("📊 WAV size: {:.2f} MB, TAF size: {:.2f} MB", wavSize, tafSize);
                             } else {
-                                Logger::get().error("❌ Failed to create streaming TAF");
+                                Logger::get().error("❌ Failed to create chunked streaming TAF");
                             }
                         }
                         break;
                     case SDLK_n:
-                        // Load and play streaming audio
-                        Logger::get().info("🎵 Loading and playing streaming audio...");
-                        currentWaveform = 21;  // Set the current waveform index
-                        switchWaveform(21); // streaming_import.taf is index 21
+                        // Cycle through all waveforms
+                        currentWaveform = 21; // Use our chunked TAF
+                        Logger::get().info("🎵 Loading waveform {} (chunked TAF)...", currentWaveform);
+                        switchWaveform(currentWaveform);
                         break;
                 }
             }
@@ -621,4 +744,372 @@ int main(int argc, char** argv) {
 	} while (engine.Loop());
 
 	return 0;
+}
+
+// Implementation of chunked streaming TAF creation
+bool createChunkedStreamingTAF(const std::string& inputWavPath,
+                               const std::string& outputPath,
+                               uint32_t chunkSizeMs,
+                               bool verbose) {
+    Logger::get().info("🎵 Creating chunked streaming TAF");
+    Logger::get().info("  Input: {}", inputWavPath);
+    Logger::get().info("  Chunk size: {} ms", chunkSizeMs);
+    
+    // Load WAV file header
+    std::ifstream file(inputWavPath, std::ios::binary);
+    if (!file) {
+        Logger::get().error("Failed to open WAV file: {}", inputWavPath);
+        return false;
+    }
+    
+    // Read WAV header
+    char riff[4];
+    file.read(riff, 4);
+    if (std::string(riff, 4) != "RIFF") {
+        Logger::get().error("Not a valid WAV file: missing RIFF header");
+        return false;
+    }
+    
+    uint32_t fileSize;
+    file.read(reinterpret_cast<char*>(&fileSize), 4);
+    
+    char wave[4];
+    file.read(wave, 4);
+    if (std::string(wave, 4) != "WAVE") {
+        Logger::get().error("Not a valid WAV file: missing WAVE header");
+        return false;
+    }
+    
+    // Find and read fmt chunk
+    uint32_t sampleRate = 0;
+    uint16_t channelCount = 0;
+    uint16_t bitsPerSample = 0;
+    uint64_t dataSize = 0;
+    uint64_t dataOffset = 0;
+    
+    while (file.good()) {
+        char chunkId[4];
+        file.read(chunkId, 4);
+        if (!file.good()) break;
+        
+        uint32_t chunkSize;
+        file.read(reinterpret_cast<char*>(&chunkSize), 4);
+        
+        if (std::string(chunkId, 4) == "fmt ") {
+            uint16_t format;
+            file.read(reinterpret_cast<char*>(&format), 2);
+            file.read(reinterpret_cast<char*>(&channelCount), 2);
+            file.read(reinterpret_cast<char*>(&sampleRate), 4);
+            file.seekg(6, std::ios::cur);
+            file.read(reinterpret_cast<char*>(&bitsPerSample), 2);
+            
+            if (chunkSize > 16) {
+                file.seekg(chunkSize - 16, std::ios::cur);
+            }
+        } else if (std::string(chunkId, 4) == "data") {
+            dataSize = chunkSize;
+            dataOffset = file.tellg();
+            break;
+        } else {
+            file.seekg(chunkSize, std::ios::cur);
+        }
+    }
+    
+    if (dataOffset == 0) {
+        Logger::get().error("No data chunk found in WAV file");
+        return false;
+    }
+    
+    uint32_t totalSamples = dataSize / (channelCount * (bitsPerSample / 8));
+    uint32_t samplesPerChunk = (chunkSizeMs * sampleRate) / 1000;
+    uint32_t bytesPerSample = channelCount * (bitsPerSample / 8);
+    uint32_t bytesPerChunk = samplesPerChunk * bytesPerSample;
+    uint32_t totalChunks = (totalSamples + samplesPerChunk - 1) / samplesPerChunk;
+    
+    Logger::get().info("📊 WAV file info:");
+    Logger::get().info("  Sample rate: {} Hz", sampleRate);
+    Logger::get().info("  Channels: {}", channelCount);
+    Logger::get().info("  Bits per sample: {}", bitsPerSample);
+    Logger::get().info("  Total samples: {}", totalSamples);
+    Logger::get().info("  Duration: {:.1f} seconds", totalSamples / (float)sampleRate);
+    Logger::get().info("  Data size: {:.2f} MB", dataSize / (1024.0 * 1024.0));
+    Logger::get().info("📦 Chunking info:");
+    Logger::get().info("  Samples per chunk: {}", samplesPerChunk);
+    Logger::get().info("  Bytes per chunk: {:.1f} KB", bytesPerChunk / 1024.0);
+    Logger::get().info("  Total chunks: {}", totalChunks);
+    
+    // Create metadata chunk
+    std::vector<uint8_t> metadataChunk;
+    
+    // Write audio chunk header
+    Taffy::AudioChunk header{};  // Zero-initialize
+    header.node_count = 3;        // Parameter -> StreamingSampler -> Amplifier
+    header.connection_count = 2;
+    header.pattern_count = 0;
+    header.sample_count = 0;
+    header.parameter_count = 5;
+    header.sample_rate = sampleRate;
+    header.tick_rate = 0;
+    header.streaming_count = 1;   // One streaming audio entry
+    
+    metadataChunk.resize(sizeof(Taffy::AudioChunk));
+    std::memcpy(metadataChunk.data(), &header, sizeof(header));
+    
+    // Add nodes
+    std::vector<Taffy::AudioChunk::Node> nodes;
+    nodes.resize(3);
+    
+    // Zero-initialize all nodes first
+    std::memset(nodes.data(), 0, nodes.size() * sizeof(Taffy::AudioChunk::Node));
+    
+    // Parameter (gate)
+    nodes[0].id = 0;
+    nodes[0].type = static_cast<Taffy::AudioChunk::NodeType>(41);  // Parameter
+    nodes[0].name_hash = Taffy::fnv1a_hash("gate_param");
+    nodes[0].input_count = 0;
+    nodes[0].output_count = 1;
+    nodes[0].param_offset = 0;
+    nodes[0].param_count = 1;
+    nodes[0].position[0] = 0;
+    nodes[0].position[1] = 0;
+    
+    // StreamingSampler
+    nodes[1].id = 1;
+    nodes[1].type = static_cast<Taffy::AudioChunk::NodeType>(4);  // StreamingSampler
+    nodes[1].name_hash = Taffy::fnv1a_hash("streaming_sampler");
+    nodes[1].input_count = 1;
+    nodes[1].output_count = 1;
+    nodes[1].param_offset = 1;
+    nodes[1].param_count = 3;
+    nodes[1].position[0] = 0;
+    nodes[1].position[1] = 0;
+    
+    // Amplifier
+    nodes[2].id = 2;
+    nodes[2].type = static_cast<Taffy::AudioChunk::NodeType>(11);  // Amplifier
+    nodes[2].name_hash = Taffy::fnv1a_hash("amplifier");
+    nodes[2].input_count = 2;
+    nodes[2].output_count = 1;
+    nodes[2].param_offset = 4;
+    nodes[2].param_count = 1;
+    nodes[2].position[0] = 0;
+    nodes[2].position[1] = 0;
+    
+    size_t nodeOffset = metadataChunk.size();
+    metadataChunk.resize(nodeOffset + nodes.size() * sizeof(Taffy::AudioChunk::Node));
+    std::memcpy(metadataChunk.data() + nodeOffset, nodes.data(), 
+                nodes.size() * sizeof(Taffy::AudioChunk::Node));
+    
+    // Add connections
+    std::vector<Taffy::AudioChunk::Connection> connections = {
+        {0, 0, 1, 0, 1.0f},  // Parameter -> StreamingSampler
+        {1, 0, 2, 0, 1.0f}   // StreamingSampler -> Amplifier
+    };
+    
+    size_t connOffset = metadataChunk.size();
+    metadataChunk.resize(connOffset + connections.size() * sizeof(Taffy::AudioChunk::Connection));
+    std::memcpy(metadataChunk.data() + connOffset, connections.data(),
+                connections.size() * sizeof(Taffy::AudioChunk::Connection));
+    
+    // Add parameters
+    std::vector<Taffy::AudioChunk::Parameter> params = {
+        {Taffy::fnv1a_hash("gate"), 0.0f, 0.0f, 1.0f},
+        {Taffy::fnv1a_hash("stream_index"), 0.0f, 0.0f, 10.0f},
+        {Taffy::fnv1a_hash("pitch"), 1.0f, 0.1f, 4.0f},
+        {Taffy::fnv1a_hash("start_position"), 0.0f, 0.0f, 1.0f},
+        {Taffy::fnv1a_hash("amplitude"), 1.0f, 0.0f, 2.0f}
+    };
+    
+    size_t paramOffset = metadataChunk.size();
+    metadataChunk.resize(paramOffset + params.size() * sizeof(Taffy::AudioChunk::Parameter));
+    std::memcpy(metadataChunk.data() + paramOffset, params.data(),
+                params.size() * sizeof(Taffy::AudioChunk::Parameter));
+    
+    // Add streaming audio info
+    Taffy::AudioChunk::StreamingAudio streamInfo;
+    streamInfo.name_hash = Taffy::fnv1a_hash("chunked_stream");
+    streamInfo.total_samples = totalSamples;
+    streamInfo.sample_rate = sampleRate;
+    streamInfo.channel_count = channelCount;
+    streamInfo.bit_depth = bitsPerSample;
+    streamInfo.chunk_size = samplesPerChunk;
+    streamInfo.format = 0;  // PCM
+    streamInfo.data_offset = 0;  // Data is in separate chunks
+    streamInfo.chunk_count = totalChunks;
+    
+    size_t streamOffset = metadataChunk.size();
+    metadataChunk.resize(streamOffset + sizeof(streamInfo));
+    std::memcpy(metadataChunk.data() + streamOffset, &streamInfo, sizeof(streamInfo));
+    
+    // Use a temporary asset to write chunks
+    Taffy::Asset tempAsset;
+    
+    // Create a single Asset with all chunks combined
+    // First, we need to manually build the asset to work around the map limitation
+    
+    // Calculate total data size
+    size_t totalDataSize = metadataChunk.size();
+    for (uint32_t i = 0; i < totalChunks; ++i) {
+        size_t chunkBytes = (i == totalChunks - 1) ? 
+            ((totalSamples - (i * samplesPerChunk)) * bytesPerSample) : bytesPerChunk;
+        totalDataSize += chunkBytes;
+    }
+    
+    Logger::get().info("📝 Creating chunked TAF with {} chunks, total data: {:.2f} MB", 
+                      totalChunks + 1, totalDataSize / (1024.0 * 1024.0));
+    
+    // We'll create a custom save method since Asset class has the map limitation
+    std::ofstream outFile(outputPath, std::ios::binary);
+    if (!outFile) {
+        Logger::get().error("❌ Failed to open output file: {}", outputPath);
+        return false;
+    }
+    
+    // Write TAF header
+    Taffy::AssetHeader assetHeader{};
+    std::memcpy(assetHeader.magic, "TAF!", 4);
+    assetHeader.version_major = 1;
+    assetHeader.version_minor = 0;
+    assetHeader.version_patch = 0;
+    std::strncpy(assetHeader.creator, "Tremor", sizeof(assetHeader.creator) - 1);
+    std::strncpy(assetHeader.description, "Chunked Streaming Audio", sizeof(assetHeader.description) - 1);
+    assetHeader.feature_flags = Taffy::FeatureFlags::None;
+    assetHeader.chunk_count = totalChunks + 1; // +1 for metadata
+    
+    // Calculate header and directory size
+    size_t headerSize = sizeof(Taffy::AssetHeader);
+    size_t dirSize = assetHeader.chunk_count * sizeof(Taffy::ChunkDirectoryEntry);
+    assetHeader.total_size = headerSize + dirSize + totalDataSize;
+    
+    outFile.write(reinterpret_cast<const char*>(&assetHeader), sizeof(assetHeader));
+    
+    // Write chunk directory
+    uint64_t currentOffset = headerSize + dirSize;
+    
+    // Metadata chunk entry
+    Taffy::ChunkDirectoryEntry metaEntry{};
+    metaEntry.type = Taffy::ChunkType::AUDI;
+    metaEntry.flags = 0;
+    metaEntry.offset = currentOffset;
+    metaEntry.size = metadataChunk.size();
+    metaEntry.checksum = 0; // We'll calculate this properly
+    std::strncpy(metaEntry.name, "audio_metadata", sizeof(metaEntry.name) - 1);
+    
+    // Calculate CRC32 for metadata
+    {
+        uint32_t crc = 0xFFFFFFFF;
+        for (size_t i = 0; i < metadataChunk.size(); ++i) {
+            crc ^= metadataChunk[i];
+            for (int j = 0; j < 8; ++j) {
+                crc = (crc >> 1) ^ (0xEDB88320 * (crc & 1));
+            }
+        }
+        metaEntry.checksum = ~crc;
+    }
+    
+    outFile.write(reinterpret_cast<const char*>(&metaEntry), sizeof(metaEntry));
+    currentOffset += metadataChunk.size();
+    
+    // Write directory entries for audio chunks
+    std::vector<Taffy::ChunkDirectoryEntry> audioEntries;
+    audioEntries.reserve(totalChunks);
+    
+    file.seekg(dataOffset);
+    
+    for (uint32_t i = 0; i < totalChunks; ++i) {
+        Taffy::ChunkDirectoryEntry entry{};
+        entry.type = Taffy::ChunkType::AUDI;
+        entry.flags = 0;
+        entry.offset = currentOffset;
+        
+        size_t chunkBytes = bytesPerChunk;
+        if (i == totalChunks - 1) {
+            uint32_t remainingSamples = totalSamples - (i * samplesPerChunk);
+            chunkBytes = remainingSamples * bytesPerSample;
+        }
+        
+        entry.size = chunkBytes;
+        std::string chunkName = "audio_chunk_" + std::to_string(i);
+        std::strncpy(entry.name, chunkName.c_str(), sizeof(entry.name) - 1);
+        
+        // We'll calculate checksum when we write the data
+        entry.checksum = 0;
+        
+        audioEntries.push_back(entry);
+        currentOffset += chunkBytes;
+    }
+    
+    // First pass: read all audio chunks and calculate checksums
+    Logger::get().info("📊 Calculating checksums for {} audio chunks...", totalChunks);
+    std::vector<uint32_t> audioChecksums;
+    audioChecksums.reserve(totalChunks);
+    
+    for (uint32_t i = 0; i < totalChunks; ++i) {
+        size_t bytesToRead = bytesPerChunk;
+        if (i == totalChunks - 1) {
+            uint32_t remainingSamples = totalSamples - (i * samplesPerChunk);
+            bytesToRead = remainingSamples * bytesPerSample;
+        }
+        
+        std::vector<uint8_t> tempBuffer(bytesToRead);
+        file.read(reinterpret_cast<char*>(tempBuffer.data()), bytesToRead);
+        size_t bytesRead = file.gcount();
+        
+        // Calculate CRC32
+        uint32_t crc = 0xFFFFFFFF;
+        for (size_t j = 0; j < bytesRead; ++j) {
+            crc ^= tempBuffer[j];
+            for (int k = 0; k < 8; ++k) {
+                crc = (crc >> 1) ^ (0xEDB88320 * (crc & 1));
+            }
+        }
+        audioChecksums.push_back(~crc);
+        
+        // Update the checksum in our vector
+        audioEntries[i].checksum = ~crc;
+        audioEntries[i].size = bytesRead; // Update actual size if different
+    }
+    
+    // Now write all directory entries with correct checksums
+    for (const auto& entry : audioEntries) {
+        outFile.write(reinterpret_cast<const char*>(&entry), sizeof(entry));
+    }
+    
+    // Now write the actual data
+    // First, metadata
+    outFile.write(reinterpret_cast<const char*>(metadataChunk.data()), metadataChunk.size());
+    
+    // Then audio chunks (second pass)
+    std::vector<uint8_t> audioBuffer(bytesPerChunk);
+    file.seekg(dataOffset);
+    
+    for (uint32_t i = 0; i < totalChunks; ++i) {
+        size_t bytesToRead = bytesPerChunk;
+        if (i == totalChunks - 1) {
+            uint32_t remainingSamples = totalSamples - (i * samplesPerChunk);
+            bytesToRead = remainingSamples * bytesPerSample;
+            audioBuffer.resize(bytesToRead);
+        }
+        
+        file.read(reinterpret_cast<char*>(audioBuffer.data()), bytesToRead);
+        size_t bytesRead = file.gcount();
+        
+        outFile.write(reinterpret_cast<const char*>(audioBuffer.data()), bytesRead);
+        
+        if (verbose && (i % 50 == 0 || i == totalChunks - 1)) {
+            Logger::get().info("  Progress: {}/{} chunks", i + 1, totalChunks);
+        }
+    }
+    
+    file.close();
+    outFile.close();
+    
+    // Verify the file was created
+    auto tafFileSize = std::filesystem::file_size(outputPath);
+    Logger::get().info("✅ Chunked streaming TAF created successfully!");
+    Logger::get().info("  Output: {}", outputPath);
+    Logger::get().info("  TAF size: {:.2f} MB", tafFileSize / (1024.0 * 1024.0));
+    Logger::get().info("  Chunks: 1 metadata + {} audio", totalChunks);
+    
+    return true;
 }
