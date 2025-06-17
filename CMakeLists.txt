@@ -127,7 +127,9 @@ add_executable(Tremor
     renderer/taffy_mesh.cpp
     renderer/sdf_text_renderer.cpp
     renderer/ui_renderer.cpp
+    renderer/sequencer_ui.cpp
     audio/taffy_audio_processor.cpp
+    audio/taffy_polyphonic_processor.cpp
 )
 
 # Include directories

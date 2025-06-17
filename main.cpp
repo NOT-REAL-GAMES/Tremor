@@ -38,6 +38,7 @@
 
 #include "main.h"
 #include "audio/taffy_audio_processor.h"
+#include "audio/taffy_polyphonic_processor.h"
 #include "renderer/taffy_integration.h"
 #include "../Taffy/include/taffy_audio_tools.h"
 #include "../Taffy/include/taffy_streaming.h"
@@ -78,7 +79,11 @@ public:
     bool bitCrushEnabled = false;  // Enable bit crusher effect
 
     std::unique_ptr<tremor::gfx::RenderBackend> rb;
-    std::unique_ptr<tremor::audio::TaffyAudioProcessor> audioProcessor;
+    std::unique_ptr<tremor::audio::TaffyPolyphonicProcessor> audioProcessor;
+    
+    // Simple voice management for drum playback
+    int drumGateCounter = 0;  // Counter to track when gate can be retriggered
+    static constexpr int MIN_GATE_INTERVAL = 3;  // Minimum audio callbacks between triggers
     
     // Simple bit crusher effect
     float applyBitCrush(float sample, float bits = 3.0f) {
@@ -132,15 +137,9 @@ public:
                 }
             }
             
-            // Handle gate reset for sample triggering
-            if (engine->gateResetCounter > 0) {
-                engine->gateResetCounter--;
-                if (engine->gateResetCounter == 0) {
-                    // Reset gate to 0 so next trigger works
-                    uint64_t gateHash = Taffy::fnv1a_hash("gate");
-                    engine->audioProcessor->setParameter(gateHash, 0.0f);
-                    Logger::get().info("🔄 Reset gate parameter to 0");
-                }
+            // Update drum gate counter
+            if (engine->drumGateCounter > 0) {
+                engine->drumGateCounter--;
             }
             
             // Debug: Check the actual output values
@@ -187,6 +186,7 @@ public:
         }
     }
 
+
     Engine() : audioDevice(0) {
         Logger::get().critical("Engine constructor called!");
         Logger::get().critical("  Engine instance: {}", (void*)this);
@@ -204,6 +204,38 @@ public:
         Logger::get().critical("About to initialize audio...");
         initializeAudio();
         Logger::get().critical("Audio initialization complete. Device ID: {}", audioDevice);
+        
+        // Set up sequencer callback to trigger drum sample
+        if (rb) {
+            auto* vulkanBackend = static_cast<tremor::gfx::VulkanBackend*>(rb.get());
+            vulkanBackend->setSequencerCallback([this](int step) {
+                Logger::get().info("🥁 Sequencer step {} triggered - playing drum sample!", step);
+                
+                // Make sure we're on the kick drum sample
+                if (currentWaveform != 17) {
+                    currentWaveform = 17;  // Kick drum
+                    loadTestAudioAsset();
+                }
+                
+                // With polyphonic processor, just trigger the gate
+                if (audioProcessor) {
+                    uint64_t gateHash = Taffy::fnv1a_hash("gate");
+                    
+                    // The polyphonic processor handles voice allocation automatically
+                    // Just send gate transitions
+                    audioProcessor->setParameter(gateHash, 0.0f);  // Ensure clean start
+                    audioProcessor->setParameter(gateHash, 1.0f);  // Trigger
+                    
+                    Logger::get().info("🎯 Triggered polyphonic drum for step {}", step);
+                    
+                    // Schedule gate release (shorter for drums)
+                    drumGateCounter = 2;  // Release after 2 audio callbacks
+                }
+            });
+            Logger::get().info("✅ Sequencer callback connected to audio system");
+        }
+        
+        Logger::get().critical("Engine constructor complete!");
     }
 
     ~Engine() {
@@ -215,9 +247,9 @@ public:
     void initializeAudio() {
         Logger::get().info("🎵 Initializing audio system...");
 
-        // Create audio processor
-        audioProcessor = std::make_unique<tremor::audio::TaffyAudioProcessor>(48000);
-        Logger::get().info("   Audio processor created: {}", (void*)audioProcessor.get());
+        // Create polyphonic audio processor
+        audioProcessor = std::make_unique<tremor::audio::TaffyPolyphonicProcessor>(48000);
+        Logger::get().info("   Polyphonic audio processor created: {}", (void*)audioProcessor.get());
 
         // Set up SDL audio specification
         SDL_AudioSpec desired, obtained;
@@ -298,14 +330,12 @@ public:
             // Pausing/resuming can cause additional hitches
             if (waveform == 21 || waveform == 22) {
                 Logger::get().info("🎵 Loading streaming audio without pausing...");
-                // For chunked TAFs, add a small delay to ensure clean switch
+                // For chunked TAFs, pause audio to ensure clean switch
                 if (waveform == 21) {
                     SDL_PauseAudioDevice(audioDevice, 1);
-                    SDL_Delay(1); // Give audio thread time to stop
                 }
                 loadTestAudioAsset();
                 if (waveform == 21) {
-                    SDL_Delay(1); // Give time for new nodes to be ready
                     SDL_PauseAudioDevice(audioDevice, 0);
                 }
             } else {
@@ -389,7 +419,7 @@ public:
             
             // IMPORTANT: Pause audio to prevent race conditions
             SDL_PauseAudioDevice(audioDevice, 1);
-            SDL_Delay(1); // Give audio thread time to stop
+            // Audio thread will stop on next callback
             
             auto loader = std::make_shared<Taffy::StreamingTaffyLoader>();
             if (loader->open(audioPath)) {
@@ -419,7 +449,7 @@ public:
             }
             
             // Resume audio after loading
-            SDL_Delay(2); // Give more time for background loader to preload chunks
+            // Background loader will preload chunks
             SDL_PauseAudioDevice(audioDevice, 0);
         } else {
             // Original loading code for non-chunked TAFs
@@ -498,27 +528,6 @@ public:
                         Logger::get().info("🎵 Playing waveform type {}", waveform_index);
                     }
                 }
-                
-                // For sample-based assets (16-21), trigger the gate parameter
-                if (waveform_index >= 16 && waveform_index <= 22) {
-                    // Set gate parameter to 1 to trigger sample playback
-                    uint64_t gateHash = Taffy::fnv1a_hash("gate");
-                    audioProcessor->setParameter(gateHash, 1.0f);
-                    Logger::get().info("🎯 Triggered sample playback (gate=1) for waveform {}", waveform_index);
-                    
-                    // Also debug what parameters exist
-                    Logger::get().info("   Setting gate parameter with hash: 0x{:x}", gateHash);
-                    
-                    // Reset gate after 100 audio callbacks (about 1 second at typical buffer sizes)
-                    gateResetCounter = 100;
-                    
-                    // Check audio device status
-                    SDL_AudioStatus status = SDL_GetAudioDeviceStatus(audioDevice);
-                    const char* statusStr = (status == SDL_AUDIO_STOPPED) ? "STOPPED" :
-                                           (status == SDL_AUDIO_PLAYING) ? "PLAYING" : 
-                                           (status == SDL_AUDIO_PAUSED) ? "PAUSED" : "UNKNOWN";
-                    Logger::get().info("   Audio device status: {}", statusStr);
-                }
             } else {
                 Logger::get().error("No AUDI chunk found in asset");
             }
@@ -528,31 +537,37 @@ public:
         }
         }
         
-        // For sample-based assets (16-22), trigger the gate parameter
-        // This is outside the loading logic so it works for both regular and chunked TAFs
-        if (waveform_index >= 16 && waveform_index <= 22) {
-            // Set gate parameter to 1 to trigger sample playback
-            uint64_t gateHash = Taffy::fnv1a_hash("gate");
-            audioProcessor->setParameter(gateHash, 1.0f);
-            Logger::get().info("🎯 Triggered sample playback (gate=1) for waveform {}", waveform_index);
-            
-            // Also debug what parameters exist
-            Logger::get().info("   Setting gate parameter with hash: 0x{:x}", gateHash);
-            
-            // Reset gate after 100 audio callbacks (about 1 second at typical buffer sizes)
-            gateResetCounter = 100;
-            
-            // Check audio device status
-            SDL_AudioStatus status = SDL_GetAudioDeviceStatus(audioDevice);
-            const char* statusStr = (status == SDL_AUDIO_STOPPED) ? "STOPPED" :
-                                   (status == SDL_AUDIO_PLAYING) ? "PLAYING" : 
-                                   (status == SDL_AUDIO_PAUSED) ? "PAUSED" : "UNKNOWN";
-            Logger::get().info("   Audio device status: {}", statusStr);
-        }
+        // Disabled gate triggering to debug hanging issue
+        // // For sample-based assets (16-22), trigger the gate parameter
+        // // This is outside the loading logic so it works for both regular and chunked TAFs
+        // if (waveform_index >= 16 && waveform_index <= 22) {
+        //     // Set gate parameter to 1 to trigger sample playback
+        //     uint64_t gateHash = Taffy::fnv1a_hash("gate");
+        //     audioProcessor->setParameter(gateHash, 1.0f);
+        //     Logger::get().info("🎯 Triggered sample playback (gate=1) for waveform {}", waveform_index);
+        //     
+        //     // Also debug what parameters exist
+        //     Logger::get().info("   Setting gate parameter with hash: 0x{:x}", gateHash);
+        //     
+        //     // Reset gate after 100 audio callbacks (about 1 second at typical buffer sizes)
+        //     gateResetCounter = 100;
+        //     
+        //     // Check audio device status
+        //     SDL_AudioStatus status = SDL_GetAudioDeviceStatus(audioDevice);
+        //     const char* statusStr = (status == SDL_AUDIO_STOPPED) ? "STOPPED" :
+        //                            (status == SDL_AUDIO_PLAYING) ? "PLAYING" : 
+        //                            (status == SDL_AUDIO_PAUSED) ? "PAUSED" : "UNKNOWN";
+        //     Logger::get().info("   Audio device status: {}", statusStr);
+        // }
     }
 
     bool Loop() {
 #if defined(USING_VULKAN)
+        static int loopCount = 0;
+        if (loopCount < 10) {
+            Logger::get().info("Loop() called, count: {}", loopCount++);
+        }
+        
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
             // Pass event to render backend for UI handling
@@ -689,13 +704,36 @@ public:
         }
 
         
+        static int renderCallCount = 0;
+        if (renderCallCount < 5) {
+            Logger::get().critical("About to call beginFrame, count {}", renderCallCount);
+        }
 
         rb.get()->beginFrame();
 
+        if (renderCallCount < 5) {
+            Logger::get().critical("beginFrame returned, about to call endFrame");
+        }
 
         rb.get()->endFrame();
+        
+        if (renderCallCount < 5) {
+            Logger::get().critical("endFrame returned, render loop iteration {} complete", renderCallCount);
+            renderCallCount++;
+        }
 
-        //SDL_Delay(1); // Simulate a frame delay (~60 FPS)
+        // Reset gate when counter expires
+        static bool gateIsHigh = false;
+        if (drumGateCounter > 0) {
+            gateIsHigh = true;
+        } else if (gateIsHigh && audioProcessor) {
+            // Counter expired, reset gate
+            uint64_t gateHash = Taffy::fnv1a_hash("gate");
+            audioProcessor->setParameter(gateHash, 0.0f);
+            gateIsHigh = false;
+            Logger::get().info("🔄 Auto-reset gate after counter expired");
+        }
+        
         return true;
 #endif
     }
@@ -723,6 +761,7 @@ int main(int argc, char** argv) {
 	Logger::get().info("Welcome. Starting Tremor...");
 
     Engine engine;
+    Logger::get().critical("Engine constructed, starting main loop...");
 
 	do {
 

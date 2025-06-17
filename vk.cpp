@@ -6,6 +6,7 @@
 #include "renderer/taffy_integration.h"
 #include "renderer/sdf_text_renderer.h"
 #include "renderer/ui_renderer.h"
+#include "renderer/sequencer_ui.h"
 #include "tools.h"
 #include "asset.h"
 #include "overlay.h"
@@ -176,7 +177,6 @@ namespace tremor::gfx {
                 std::cerr << "Failed to load asset: " << asset_path << std::endl;
                 return;
             }
-            std::cout << "Asset loaded successfully" << std::endl;
 
             // Get or create pipeline for this asset
             PipelineInfo* pipeline = getOrCreatePipeline(asset_path);
@@ -442,7 +442,7 @@ namespace tremor::gfx {
             loaded_assets_[asset_path] = std::move(asset);
             gpu_data_cache_[asset_path] = gpuData;
             
-            //Logger::get().info("Asset loaded and cached: {}", asset_path);
+            // std::cout << "Asset loaded successfully: " << asset_path << std::endl;
             //Logger::get().info("  Loaded assets count: {}", loaded_assets_.size());
             //Logger::get().info("  GPU data cache count: {}", gpu_data_cache_.size());
             //Logger::get().info("  Vertex storage buffer: {}", (void*)gpuData.vertexStorageBuffer);
@@ -784,9 +784,9 @@ namespace tremor::gfx {
             //Logger::get().info("  Vertex stride floats: {}", gpuData.vertexStrideFloats);
             //Logger::get().info("  Storage buffer: {}", (void*)gpuData.vertexStorageBuffer);
             
-            std::cout << "CALLING vkCmdDrawMeshTasksEXT NOW!" << std::endl;
+            //std::cout << "CALLING vkCmdDrawMeshTasksEXT NOW!" << std::endl;
             vkCmdDrawMeshTasksEXT(cmd, 3, 1, 1);  // 1x1x1 workgroups
-            std::cout << "vkCmdDrawMeshTasksEXT completed successfully!" << std::endl;
+            //std::cout << "vkCmdDrawMeshTasksEXT completed successfully!" << std::endl;
         }
 
         TaffyOverlayManager::MeshAssetGPUData TaffyOverlayManager::uploadTaffyAsset(const Taffy::Asset& asset) {
@@ -959,6 +959,7 @@ namespace tremor::gfx {
                 VkResult allocResult = vkAllocateDescriptorSets(device_, &descAllocInfo, &gpuData.descriptorSet);
                 if (allocResult == VK_ERROR_OUT_OF_POOL_MEMORY || allocResult == VK_ERROR_FRAGMENTED_POOL) {
                     std::cout << "⚠️  Descriptor pool exhausted, recreating..." << std::endl;
+                    Logger::get().error("DESCRIPTOR POOL EXHAUSTED! This is likely causing the hang.");
                     
                     // Recreate the descriptor pool with more capacity
                     recreateDescriptorPool();
@@ -4459,11 +4460,11 @@ namespace tremor::gfx {
             : m_device(device) {
             // Create descriptor pool with capacity for all common descriptor types
             std::vector<VkDescriptorPoolSize> poolSizes = {
-                {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 100},
-                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 100},
-                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 100},
-                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 100},
-                {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 100}
+                {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10000},
+                {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10000},
+                {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10000},
+                {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10000},
+                {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 10000}
             };
 
             VkDescriptorPoolCreateInfo poolInfo{};
@@ -5861,6 +5862,10 @@ namespace tremor::gfx {
 
 
         void VulkanBackend::beginFrame() {
+            static int frameCount = 0;
+            if (frameCount < 5) {
+                Logger::get().critical("beginFrame() called, frame {}", frameCount++);
+            }
 
             updateOverlaySystem();
 
@@ -5884,9 +5889,31 @@ namespace tremor::gfx {
             m_clusteredRenderer->setCamera(&cam);
             m_clusteredRenderer->buildClusters(&cam, (m_sceneOctree));
 
-            // Wait for previous frame to finish
+            // Wait for previous frame to finish with timeout to prevent hangs
             if (m_inFlightFences.size() > 0) {
-                vkWaitForFences(device, 1, &m_inFlightFences[currentFrame].handle(), VK_TRUE, UINT64_MAX);
+                // Debug: Log fence status before waiting
+                // Logger::get().info("Waiting for fence {}, total fences: {}", 
+                //                   currentFrame, m_inFlightFences.size());
+                
+                // Use 1 second timeout instead of infinite wait
+                VkResult fenceResult = vkWaitForFences(device, 1, &m_inFlightFences[currentFrame].handle(), VK_TRUE, 1000000000ULL);
+                if (fenceResult == VK_TIMEOUT) {
+                    Logger::get().error("Fence wait timeout for frame {}! GPU might be hung.", currentFrame);
+                    // Skip this frame to avoid complete hang
+                    return;
+                } else if (fenceResult != VK_SUCCESS) {
+                    Logger::get().error("vkWaitForFences failed with result: {} for fence index {}", 
+                                      static_cast<int>(fenceResult), currentFrame);
+                    
+                    // Check device status
+                    VkPhysicalDeviceProperties deviceProps;
+                    vkGetPhysicalDeviceProperties(physicalDevice, &deviceProps);
+                    Logger::get().error("Device: {}", deviceProps.deviceName);
+                    
+                    return;
+                }
+                
+                // Logger::get().info("Fence {} signaled successfully", currentFrame);
             }
 
             if (!vkSwapchain || !vkSwapchain.get()) {
@@ -6058,17 +6085,21 @@ namespace tremor::gfx {
 			
             //hot_pink_enabled = std::chrono::steady_clock::now().time_since_epoch().count() % 1000000000 > 500000000;
             
-            if(hot_pink_enabled){
-                m_overlayManager->loadAssetWithOverlay("assets/cube.taf","assets/overlays/tri_hot_pink.tafo");
-            }
-            else {
-                m_overlayManager->clear_overlays("assets/cube.taf");
+            static bool last_hot_pink_enabled = false;
+            if (hot_pink_enabled != last_hot_pink_enabled) {
+                if(hot_pink_enabled){
+                    m_overlayManager->loadAssetWithOverlay("assets/cube.taf","assets/overlays/tri_hot_pink.tafo");
+                }
+                else {
+                    m_overlayManager->clear_overlays("assets/cube.taf");
+                }
+                last_hot_pink_enabled = hot_pink_enabled;
             }
 
             // Check if asset reload was requested (could be set by keyboard input)
             if (reload_assets_requested) {
                 //Logger::get().info("Reloading assets...");
-                m_overlayManager->reloadAsset("assets/fixed_triangle.taf");
+                m_overlayManager->reloadAsset("assets/cube.taf");
                 reload_assets_requested = false;
                 //Logger::get().info("Assets reloaded!");
             }
@@ -6085,29 +6116,8 @@ namespace tremor::gfx {
 				return;
 			}
 			
-			// Render the cube
 			m_overlayManager->renderMeshAsset("assets/cube.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
 
-			// Render text overlay
-			if (m_textRenderer) {
-				// Create orthographic projection for UI
-				float width = static_cast<float>(vkSwapchain->extent().width);
-				float height = static_cast<float>(vkSwapchain->extent().height);
-				glm::mat4 orthoProjection = glm::orthoZO(0.0f, width, 0.0f, height, -10.0f, 1.0f);
-				
-
-				m_textRenderer->render(m_commandBuffers[currentFrame], orthoProjection);
-			}
-			
-			// Render UI elements
-			if (m_uiRenderer) {
-				// Create orthographic projection for UI
-				float width = static_cast<float>(vkSwapchain->extent().width);
-				float height = static_cast<float>(vkSwapchain->extent().height);
-				glm::mat4 orthoProjection = glm::orthoZO(0.0f, width, 0.0f, height, -10.0f, 1.0f);
-				
-				m_uiRenderer->render(m_commandBuffers[currentFrame], orthoProjection);
-			}
 
         }
 
@@ -6219,6 +6229,39 @@ namespace tremor::gfx {
         }
 
         void VulkanBackend::endFrame() {
+        static int endFrameCount = 0;
+        if (endFrameCount < 50) {
+            Logger::get().critical("endFrame() called, count {}", endFrameCount++);
+        }
+
+        			// Render text overlay
+			if (m_textRenderer) {
+				// Create orthographic projection for UI
+				float width = static_cast<float>(vkSwapchain->extent().width);
+				float height = static_cast<float>(vkSwapchain->extent().height);
+				glm::mat4 orthoProjection = glm::orthoZO(0.0f, width, 0.0f, height, -10.0f, 1.0f);
+				
+
+				m_textRenderer->render(m_commandBuffers[currentFrame], orthoProjection);
+			}
+			
+			// // Update sequencer
+			// // Disabled sequencer update to debug hanging issue
+		    if (m_sequencerUI) {
+				m_sequencerUI->update();
+			}
+			
+			// Render UI elements
+			if (m_uiRenderer) {
+				// Create orthographic projection for UI
+				float width = static_cast<float>(vkSwapchain->extent().width);
+				float height = static_cast<float>(vkSwapchain->extent().height);
+				glm::mat4 orthoProjection = glm::orthoZO(0.0f, width, 0.0f, height, -10.0f, 1.0f);
+				
+				m_uiRenderer->render(m_commandBuffers[currentFrame], orthoProjection);
+			}
+
+        
         // FPS counter
         static auto lastTime = std::chrono::high_resolution_clock::now();
         static int frameCount = 0;
@@ -6265,12 +6308,13 @@ namespace tremor::gfx {
             submitInfo.signalSemaphoreCount = 1;
             submitInfo.pSignalSemaphores = signalSemaphores;
 
+            // Logger::get().info("Submitting command buffer with fence {}", currentFrame);
             VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo, m_inFlightFences[currentFrame].handle());
             if (submitResult != VK_SUCCESS) {
-                //Logger::get().error("Failed to submit command buffer: {}", static_cast<int>(submitResult));
+                Logger::get().error("Failed to submit command buffer: {}", static_cast<int>(submitResult));
                 return;
             }
-            //Logger::get().info("Command buffer submitted successfully");
+            // Logger::get().info("Command buffer submitted successfully");
 
             // Present the image
             VkResult presentResult = vkSwapchain.get()->present(m_currentImageIndex, m_renderFinishedSemaphores[currentFrame]);
@@ -6485,6 +6529,17 @@ namespace tremor::gfx {
                         quit_event.type = SDL_QUIT;
                         SDL_PushEvent(&quit_event);
                     });
+                
+                // Initialize sequencer
+                m_sequencerUI = std::make_unique<tremor::gfx::SequencerUI>(m_uiRenderer.get());
+                m_sequencerUI->initialize();
+                m_sequencerUI->onStepTriggered([this](int step) {
+                    Logger::get().info("🎵 Sequencer step {} triggered!", step);
+                    // Call the external callback if set
+                    if (m_sequencerCallback) {
+                        m_sequencerCallback(step);
+                    }
+                });
             }
 
             createDevelopmentOverlays();
@@ -6526,6 +6581,20 @@ namespace tremor::gfx {
             // Pass input to UI renderer
             if (m_uiRenderer) {
                 m_uiRenderer->updateInput(event);
+            }
+        }
+        
+        void VulkanBackend::setSequencerCallback(SequencerCallback callback) {
+            m_sequencerCallback = callback;
+            
+            // If sequencer is already initialized, update its callback
+            if (m_sequencerUI) {
+                m_sequencerUI->onStepTriggered([this](int step) {
+                    Logger::get().info("🎵 Sequencer step {} triggered!", step);
+                    if (m_sequencerCallback) {
+                        m_sequencerCallback(step);
+                    }
+                });
             }
         }
 

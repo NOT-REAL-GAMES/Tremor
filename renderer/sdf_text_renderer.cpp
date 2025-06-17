@@ -107,15 +107,18 @@ namespace tremor::gfx {
         // Create descriptor pool
         std::array<VkDescriptorPoolSize, 2> poolSizes{};
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSizes[0].descriptorCount = 1;
+        // Increase descriptor counts for multiple frames in flight
+        const uint32_t MAX_FRAMES_IN_FLIGHT = 3;
+        poolSizes[0].descriptorCount = MAX_FRAMES_IN_FLIGHT * 2;  // Extra capacity
         poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[1].descriptorCount = 1;
+        poolSizes[1].descriptorCount = MAX_FRAMES_IN_FLIGHT * 2;  // Extra capacity
         
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
         poolInfo.pPoolSizes = poolSizes.data();
-        poolInfo.maxSets = 1;
+        poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT * 2;  // Allow for multiple frames
+        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         
         if (vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descriptorPool_) != VK_SUCCESS) {
             Logger::get().error("Failed to create descriptor pool for text renderer");
@@ -918,8 +921,8 @@ namespace tremor::gfx {
         // Only rebuild if this is the first time OR if the geometry actually changed
         bool needsRebuild = needsGeometryRebuild();
         if ((geometryCache_.dirty && cachedTextInstances_.empty()) || needsRebuild) {
-            Logger::get().info("🔨 Rebuilding text geometry cache (dirty={}, needsRebuild={}, instances={}, cached={})", 
-                              geometryCache_.dirty, needsRebuild, textInstances_.size(), cachedTextInstances_.size());
+            // Logger::get().info("🔨 Rebuilding text geometry cache (dirty={}, needsRebuild={}, instances={}, cached={})", 
+            //                   geometryCache_.dirty, needsRebuild, textInstances_.size(), cachedTextInstances_.size());
             rebuildGeometryCache();
         }
         
@@ -994,6 +997,24 @@ namespace tremor::gfx {
         memcpy(data, &projection, sizeof(glm::mat4));
         vkUnmapMemory(device_, uniformBufferMemory_);
         
+        // Debug: Verify resources before binding
+        if (pipeline_ == VK_NULL_HANDLE) {
+            Logger::get().error("SDF Text Renderer: Pipeline is NULL!");
+            return;
+        }
+        if (pipelineLayout_ == VK_NULL_HANDLE) {
+            Logger::get().error("SDF Text Renderer: Pipeline layout is NULL!");
+            return;
+        }
+        if (descriptorSet_ == VK_NULL_HANDLE) {
+            Logger::get().error("SDF Text Renderer: Descriptor set is NULL!");
+            return;
+        }
+        if (commandBuffer == VK_NULL_HANDLE) {
+            Logger::get().error("SDF Text Renderer: Command buffer is NULL!");
+            return;
+        }
+        
         // Bind pipeline
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         
@@ -1034,6 +1055,11 @@ namespace tremor::gfx {
                           0, sizeof(pushConstants), &pushConstants);
         
         // Bind vertex buffer
+        if (vertexBuffer_ == VK_NULL_HANDLE) {
+            Logger::get().error("SDF Text Renderer: Vertex buffer is NULL!");
+            return;
+        }
+        
         VkBuffer vertexBuffers[] = {vertexBuffer_};
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
@@ -1043,6 +1069,14 @@ namespace tremor::gfx {
         for (const auto& text : textInstances_) {
             vertexCount += text.text.length() * 6; // 6 vertices per character
         }
+        
+        // Debug vertex count
+        if (vertexCount == 0) {
+            Logger::get().warning("SDF Text Renderer: No vertices to draw");
+            return;
+        }
+        
+        // Logger::get().info("SDF Text Renderer: Drawing {} vertices", vertexCount);
         
         // Draw
         vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);

@@ -262,6 +262,7 @@ namespace tremor::audio {
         std::queue<LoadRequest> loadQueue_;
         
         void backgroundLoader();
+        void clearLoadQueueForStream(StreamingAudioInfo* stream);
         
     public:
         // Set TAF loader for chunked streaming

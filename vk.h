@@ -86,6 +86,7 @@ namespace tremor::gfx {
     // Forward declarations
     class SDFTextRenderer;
     class UIRenderer;
+    class SequencerUI;
 
     class VulkanDevice {
     public:
@@ -2090,6 +2091,10 @@ namespace tremor::gfx {
         
         // Input handling
         void handleInput(const SDL_Event& event);
+        
+        // Audio integration
+        using SequencerCallback = std::function<void(int)>;
+        void setSequencerCallback(SequencerCallback callback);
 
         // Resource creation interface
         uint32_t loadMeshFromFile(const std::string& filename);
@@ -2161,6 +2166,8 @@ namespace tremor::gfx {
         std::unique_ptr<RenderPass> rp;
         std::unique_ptr<SDFTextRenderer> m_textRenderer;
         std::unique_ptr<UIRenderer> m_uiRenderer;
+        std::unique_ptr<SequencerUI> m_sequencerUI;
+        SequencerCallback m_sequencerCallback;
 
         // Camera
         Camera cam;

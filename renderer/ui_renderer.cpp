@@ -80,16 +80,20 @@ namespace tremor::gfx {
             return false;
         }
         
-        // Create descriptor pool
+        // Create descriptor pool with proper capacity for UI rendering
+        // We need multiple descriptor sets for multi-frame rendering
+        const uint32_t MAX_FRAMES_IN_FLIGHT = 3;  // Match the main renderer
+        
         VkDescriptorPoolSize poolSize{};
         poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSize.descriptorCount = 1;
+        poolSize.descriptorCount = MAX_FRAMES_IN_FLIGHT * 2;  // Extra capacity
         
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.poolSizeCount = 1;
         poolInfo.pPoolSizes = &poolSize;
-        poolInfo.maxSets = 1;
+        poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT * 2;  // Allow for multiple frames in flight
+        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;  // Allow freeing
         
         if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
             Logger::get().error("Failed to create descriptor pool for UI renderer");
@@ -443,9 +447,10 @@ namespace tremor::gfx {
         label->position = position;
         label->size = glm::vec2(0, 0); // Labels don't have explicit size
         
+        auto lb = label->id;
         m_elements.push_back(std::move(label));
         
-        return label->id;
+        return lb;
     }
 
     void UIRenderer::removeElement(uint32_t id) {
@@ -538,6 +543,7 @@ namespace tremor::gfx {
                 m_hoveredElement->state = UIElementState::Normal;
                 if (oldState != UIElementState::Normal) {
                     m_quadsDirty = true; // State changed, need to update quads
+                    m_textDirty = true;  // Also need to update text colors
                 }
             }
             
@@ -548,6 +554,7 @@ namespace tremor::gfx {
                 m_hoveredElement->state = UIElementState::Hovered;
                 if (oldState != UIElementState::Hovered) {
                     m_quadsDirty = true; // State changed, need to update quads
+                    m_textDirty = true;  // Also need to update text colors
                 }
                 if (m_hoveredElement->onHover) {
                     m_hoveredElement->onHover();
@@ -590,8 +597,16 @@ namespace tremor::gfx {
         // Track if any text colors changed (which happens with hover)
         bool textColorsChanged = false;
         
-        // Clear text renderer for this frame
-        m_textRenderer->clearText();
+        // Only rebuild text if UI has changed
+        if (m_textDirty) {
+            // Clear text renderer for this frame
+            m_textRenderer->clearText();
+            m_textDirty = false;
+        } else {
+            // Skip text processing if nothing changed
+            // Don't render here - let the main renderer handle it
+            return;
+        }
         
         // Process all elements
         for (const auto& elem : m_elements) {
@@ -687,8 +702,8 @@ namespace tremor::gfx {
             }
         }
         
-        // Render all text
-        m_textRenderer->render(commandBuffer, projection);
+        // Don't render text here - the main renderer will call m_textRenderer->render()
+        // This prevents double rendering which was causing GPU crashes
     }
 
     UIElement* UIRenderer::getElement(uint32_t id) {

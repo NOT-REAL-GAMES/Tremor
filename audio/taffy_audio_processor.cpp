@@ -490,8 +490,14 @@ namespace tremor::audio {
     }
 
     void TaffyAudioProcessor::processAudio(float* outputBuffer, uint32_t frameCount, uint32_t channelCount) {
-        // Lock the graph mutex during processing
-        std::lock_guard<std::mutex> lock(graphMutex_);
+        // Try to lock the graph mutex during processing
+        // If we can't get the lock, skip this frame to avoid blocking the audio thread
+        std::unique_lock<std::mutex> lock(graphMutex_, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            // Can't get lock, clear output and return to avoid blocking
+            std::memset(outputBuffer, 0, frameCount * channelCount * sizeof(float));
+            return;
+        }
         
         static int processCallCount = 0;
         static bool hasStreamingAudio = false;
@@ -671,6 +677,17 @@ namespace tremor::audio {
     }
 
     void TaffyAudioProcessor::setParameter(uint64_t parameterHash, float value) {
+        // Try to lock the mutex to prevent race conditions with audio processing
+        // If we can't get the lock, skip this update to avoid blocking
+        std::unique_lock<std::mutex> lock(graphMutex_, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            // Can't get lock, skip this parameter update
+            if (parameterHash == Taffy::fnv1a_hash("gate")) {
+                std::cout << "⚡ Gate parameter SET skipped (mutex busy)" << std::endl;
+            }
+            return;
+        }
+        
         auto it = parameters_.find(parameterHash);
         if (it != parameters_.end()) {
             // Clamp to valid range
@@ -1756,8 +1773,8 @@ namespace tremor::audio {
                 
                 // Debug output for first few samples
                 if (sampleDebugFrame < 10 && output != 0.0f) {
-                    std::cout << "Sample playback[" << i << "]: pos=" << node.samplePosition 
-                              << ", output=" << output << ", playbackRate=" << playbackRate << std::endl;
+                    //std::cout << "Sample playback[" << i << "]: pos=" << node.samplePosition 
+                    //          << ", output=" << output << ", playbackRate=" << playbackRate << std::endl;
                 }
                 
                 // Debug: Check for pitch drift every 2 seconds
@@ -1807,8 +1824,10 @@ namespace tremor::audio {
                     // End of sample
                     node.isPlaying = false;
                     node.outputBuffer[i] = 0.0f;
-                    std::cout << "🛑 Sample playback ended at position " << node.samplePosition 
-                              << " (max=" << maxSamples << ")" << std::endl;
+                    if (node.samplePosition == maxSamples) { // Only print once
+                        std::cout << "🛑 Sample playback ended at position " << node.samplePosition 
+                                  << " (max=" << maxSamples << ")" << std::endl;
+                    }
                 }
             } else {
                 node.outputBuffer[i] = 0.0f;
@@ -2230,7 +2249,21 @@ namespace tremor::audio {
                 
                 // Advance position
                 node.samplePosition += playbackRate;
-                stream.bufferPosition = static_cast<uint32_t>(node.samplePosition) % stream.chunkSize;
+                // Calculate buffer position within the current chunk
+                uint32_t absoluteSamplePos = static_cast<uint32_t>(node.samplePosition);
+                uint32_t chunkStartSample = stream.currentChunk * stream.chunkSize;
+                stream.bufferPosition = absoluteSamplePos - chunkStartSample;
+                
+                // Debug buffer position advancement
+                static int posDebugCount = 0;
+                if (posDebugCount < 20 && i < 5) {
+                    std::cout << "📍 Frame " << i << ": samplePos=" << node.samplePosition 
+                              << ", absPos=" << absoluteSamplePos 
+                              << ", chunk=" << stream.currentChunk 
+                              << ", bufferPos=" << stream.bufferPosition 
+                              << ", playbackRate=" << playbackRate << std::endl;
+                    posDebugCount++;
+                }
                 
                 // Debug chunk boundaries
                 static uint32_t lastChunk = 0;
@@ -2292,6 +2325,9 @@ namespace tremor::audio {
                     node.isPlaying = false;
                     node.samplePosition = 0.0f;
                     std::cout << "🛑 StreamingSampler stopped at end of sample" << std::endl;
+                    
+                    // Clear any pending load requests for this stream
+                    clearLoadQueueForStream(&stream);
                 }
             } else {
                 // Not playing, output silence
@@ -2617,6 +2653,26 @@ namespace tremor::audio {
         std::cout << "📦 Pre-loaded chunk " << chunkIndex << " for streaming audio" << std::endl;
     }
 
+    void TaffyAudioProcessor::clearLoadQueueForStream(StreamingAudioInfo* stream) {
+        std::lock_guard<std::mutex> lock(loaderMutex_);
+        
+        // Create a new queue without requests for this stream
+        std::queue<LoadRequest> newQueue;
+        while (!loadQueue_.empty()) {
+            LoadRequest req = loadQueue_.front();
+            loadQueue_.pop();
+            if (req.stream != stream) {
+                newQueue.push(req);
+            }
+        }
+        loadQueue_ = std::move(newQueue);
+        
+        // Mark stream as not loading
+        stream->isLoadingNext = false;
+        
+        std::cout << "🧹 Cleared load queue for stream, remaining requests: " << loadQueue_.size() << std::endl;
+    }
+
     void TaffyAudioProcessor::backgroundLoader() {
         std::cout << "🚀 Background loader thread started" << std::endl;
         
@@ -2626,9 +2682,18 @@ namespace tremor::audio {
             {
                 std::unique_lock<std::mutex> lock(loaderMutex_);
                 std::cout << "🔄 Background loader waiting, queue size: " << loadQueue_.size() << std::endl;
-                loaderCV_.wait(lock, [this] { return !loadQueue_.empty() || shouldStopLoader_; });
+                
+                // Wait with timeout to prevent indefinite blocking
+                auto status = loaderCV_.wait_for(lock, std::chrono::seconds(5),
+                    [this] { return !loadQueue_.empty() || shouldStopLoader_; });
                 
                 if (shouldStopLoader_) break;
+                
+                if (!status) {
+                    // Timeout occurred - this is normal when no loads are pending
+                    continue;
+                }
+                
                 if (loadQueue_.empty()) {
                     std::cout << "⚠️ Background loader woke up but queue is empty" << std::endl;
                     continue;
