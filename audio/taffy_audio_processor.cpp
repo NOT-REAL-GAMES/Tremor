@@ -512,7 +512,7 @@ namespace tremor::audio {
         // Debug: Check output buffer before processing
         static int preProcessDebug = 0;
         if (preProcessDebug < 3) {
-            std::cout << "🔍 processAudio: frameCount=" << frameCount << ", channelCount=" << channelCount << std::endl;
+            // std::cout << "🔍 processAudio: frameCount=" << frameCount << ", channelCount=" << channelCount << std::endl;
             std::cout << "   Output buffer cleared, processing " << nodes_.size() << " nodes" << std::endl;
             preProcessDebug++;
         }
@@ -608,7 +608,7 @@ namespace tremor::audio {
                 if (!hasOutgoingConnections) {
                     outputNodeId = nodeId;
                     if (debugCount <= 3) {
-                        std::cout << "   ✅ Found output amplifier: Node " << nodeId << std::endl;
+                        //std::cout << "   ✅ Found output amplifier: Node " << nodeId << std::endl;
                     }
                     break;
                 }
@@ -645,7 +645,7 @@ namespace tremor::audio {
             }
             
             if (copyDebug < 5 && maxCopied > 0.0f) {
-                std::cout << "📻 Copied " << frameCount << " frames to output buffer, max amplitude: " << maxCopied << std::endl;
+                // std::cout << "📻 Copied " << frameCount << " frames to output buffer, max amplitude: " << maxCopied << std::endl;
                 // Also check what's actually in the output buffer
                 float maxInOutput = 0.0f;
                 for (uint32_t i = 0; i < frameCount * channelCount; ++i) {
@@ -895,14 +895,14 @@ namespace tremor::audio {
         // Debug
         static int ampProcessDebug = 0;
         if (ampProcessDebug < 3) {
-            std::cout << "🎚️ Amplifier " << node.node.id << " processing: amplitude=" << amplitude << std::endl;
-            std::cout << "   Parameters at offset " << node.node.param_offset << ":" << std::endl;
+            //std::cout << "🎚️ Amplifier " << node.node.id << " processing: amplitude=" << amplitude << std::endl;
+            //std::cout << "   Parameters at offset " << node.node.param_offset << ":" << std::endl;
             for (uint32_t i = 0; i < node.node.param_count; ++i) {
                 uint32_t paramIdx = node.node.param_offset + i;
                 if (paramIdx < parameterList_.size()) {
                     const auto& param = parameterList_[paramIdx];
-                    std::cout << "     Param " << paramIdx << ": value=" << param.currentValue 
-                              << " (hash=0x" << std::hex << param.param.name_hash << std::dec << ")" << std::endl;
+                    //std::cout << "     Param " << paramIdx << ": value=" << param.currentValue 
+                    //          << " (hash=0x" << std::hex << param.param.name_hash << std::dec << ")" << std::endl;
                 }
             }
             ampProcessDebug++;
@@ -959,8 +959,8 @@ namespace tremor::audio {
                 }
                 maxInput = std::max(maxInput, std::abs(audioInput));
             }
-            std::cout << "   Max input to amplifier: " << maxInput << std::endl;
-            std::cout << "   Max output from amplifier: " << std::max(maxInput * amplitude, 0.0f) << std::endl;
+            //std::cout << "   Max input to amplifier: " << maxInput << std::endl;
+            //std::cout << "   Max output from amplifier: " << std::max(maxInput * amplitude, 0.0f) << std::endl;
         }
     }
 
@@ -982,15 +982,15 @@ namespace tremor::audio {
                 // Output the actual parameter value
                 static int gateDebugCount = 0;
                 if (gateDebugCount < 10) {
-                    std::cout << "⚡ Gate parameter node " << node.node.id << " outputting: " << value << std::endl;
-                    std::cout << "   Output buffer size: " << node.outputBuffer.size() << ", frameCount: " << frameCount << std::endl;
+                    //std::cout << "⚡ Gate parameter node " << node.node.id << " outputting: " << value << std::endl;
+                    //std::cout << "   Output buffer size: " << node.outputBuffer.size() << ", frameCount: " << frameCount << std::endl;
                     
                     // Find what's connected to this parameter node
-                    std::cout << "   Connections FROM this node:" << std::endl;
+                    //std::cout << "   Connections FROM this node:" << std::endl;
                     for (const auto& conn : connections_) {
                         if (conn.sourceNode == node.node.id) {
-                            std::cout << "     -> Node " << conn.destNode << " input " << conn.destInput 
-                                     << " (strength=" << conn.strength << ")" << std::endl;
+                            //std::cout << "     -> Node " << conn.destNode << " input " << conn.destInput 
+                            //         << " (strength=" << conn.strength << ")" << std::endl;
                         }
                     }
                     gateDebugCount++;
@@ -1001,8 +1001,8 @@ namespace tremor::audio {
                 
                 // Verify what we wrote
                 if (gateDebugCount <= 10 && value != 0.0f) {
-                    std::cout << "   Verified output[0] = " << node.outputBuffer[0] 
-                             << ", output[" << (frameCount-1) << "] = " << node.outputBuffer[frameCount-1] << std::endl;
+                    //std::cout << "   Verified output[0] = " << node.outputBuffer[0] 
+                    //         << ", output[" << (frameCount-1) << "] = " << node.outputBuffer[frameCount-1] << std::endl;
                 }
             } else {
                 // Normal parameter - constant value
@@ -1131,8 +1131,8 @@ namespace tremor::audio {
                 node.envPhase = EnvelopePhase::Release;
                 node.envTime = 0.0f;
                 node.lastValue = node.envLevel;  // Save current level for release
-                std::cout << "🎹 ADSR: Starting release from level " << node.envLevel 
-                         << " with release time " << release << "s" << std::endl;
+                //std::cout << "🎹 ADSR: Starting release from level " << node.envLevel 
+                //         << " with release time " << release << "s" << std::endl;
             }
             
             // Calculate envelope level based on current phase
@@ -1184,9 +1184,9 @@ namespace tremor::audio {
                         // Debug output for first few samples of release
                         static int releaseDebugCount = 0;
                         if (releaseDebugCount < 5) {
-                            std::cout << "Release: start=" << releaseStart 
-                                     << " progress=" << releaseProgress 
-                                     << " level=" << node.envLevel << std::endl;
+                            //std::cout << "Release: start=" << releaseStart 
+                            //         << " progress=" << releaseProgress 
+                            //         << " level=" << node.envLevel << std::endl;
                             releaseDebugCount++;
                         }
                         
@@ -1410,8 +1410,8 @@ namespace tremor::audio {
         float distType = 0.0f;   // Default to hard clip
         
         // Get parameters based on node's param_offset
-        std::cout << "🎸 Checking distortion node params: offset=" << node.node.param_offset 
-                  << ", count=" << node.node.param_count << std::endl;
+        //std::cout << "🎸 Checking distortion node params: offset=" << node.node.param_offset 
+        //          << ", count=" << node.node.param_count << std::endl;
         if (node.node.param_count > 0 && node.node.param_offset < parameterList_.size()) {
             for (uint32_t i = 0; i < node.node.param_count; ++i) {
                 uint32_t paramIdx = node.node.param_offset + i;
@@ -1466,8 +1466,8 @@ namespace tremor::audio {
             // Debug first few samples
             static int sampleCount = 0;
             if (sampleCount < 5) {
-                std::cout << "Distortion sample " << sampleCount << ": input=" << input 
-                         << ", driven=" << driven << ", drive=" << drive << std::endl;
+                //std::cout << "Distortion sample " << sampleCount << ": input=" << input 
+                //         << ", driven=" << driven << ", drive=" << drive << std::endl;
                 sampleCount++;
             }
             
@@ -1561,8 +1561,8 @@ namespace tremor::audio {
         // Get parameters based on node's param_offset
         if (node.node.param_count > 0 && node.node.param_offset < parameterList_.size()) {
             if (!debugPrinted) {
-                std::cout << "🎛️ Sampler parameters: offset=" << node.node.param_offset 
-                          << ", count=" << node.node.param_count << std::endl;
+                //std::cout << "🎛️ Sampler parameters: offset=" << node.node.param_offset 
+                //          << ", count=" << node.node.param_count << std::endl;
             }
             for (uint32_t i = 0; i < node.node.param_count; ++i) {
                 uint32_t paramIdx = node.node.param_offset + i;
@@ -1570,8 +1570,8 @@ namespace tremor::audio {
                     const auto& param = parameterList_[paramIdx];
                     
                     if (!debugPrinted) {
-                        std::cout << "   Param[" << i << "]: hash=0x" << std::hex << param.param.name_hash 
-                                  << std::dec << ", value=" << param.currentValue << std::endl;
+                    //   std::cout << "   Param[" << i << "]: hash=0x" << std::hex << param.param.name_hash 
+                    //              << std::dec << ", value=" << param.currentValue << std::endl;
                     }
                     
                     if (param.param.name_hash == Taffy::fnv1a_hash("sample_index")) {
@@ -1600,7 +1600,7 @@ namespace tremor::audio {
         const SampleData& sample = samples_[sampleIndex];
         
         if (!debugPrinted) {
-            std::cout << "🎵 Sampler: Processing sample " << sampleIndex << ", " 
+            /*std::cout << "🎵 Sampler: Processing sample " << sampleIndex << ", " 
                       << sample.data.size() << " samples, " 
                       << sample.channelCount << " channels" << std::endl;
             std::cout << "   Sample rate: " << sample.sampleRate << " Hz" << std::endl;
@@ -1617,7 +1617,7 @@ namespace tremor::audio {
                     std::cout << sample.data[i] << " ";
                 }
                 std::cout << std::endl;
-            }
+            }*/
             debugPrinted = true;
         }
         

@@ -126,6 +126,7 @@ add_executable(Tremor
     renderer/taffy_integration.cpp
     renderer/taffy_mesh.cpp
     renderer/sdf_text_renderer.cpp
+    renderer/ui_renderer.cpp
     audio/taffy_audio_processor.cpp
 )
 

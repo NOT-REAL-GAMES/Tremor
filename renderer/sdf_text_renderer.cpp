@@ -226,14 +226,14 @@ namespace tremor::gfx {
         std::memcpy(currentFont_->glyphs.data(), glyphPtr, 
                    fontChunk->glyph_count * sizeof(Taffy::FontChunk::Glyph));
         
-        // Debug: Log first few glyphs
-        Logger::get().info("Loaded {} glyphs:", fontChunk->glyph_count);
-        for (size_t i = 0; i < std::min(5u, fontChunk->glyph_count); i++) {
+        // Build glyph lookup map for fast access
+        currentFont_->glyphMap.clear();
+        for (size_t i = 0; i < fontChunk->glyph_count; i++) {
             const auto& g = currentFont_->glyphs[i];
-            Logger::get().info("  Glyph {}: codepoint={}, uv=({:.3f}, {:.3f}, {:.3f}, {:.3f}), size={}x{}", 
-                              i, g.codepoint, g.uv_x, g.uv_y, g.uv_width, g.uv_height, 
-                              static_cast<int>(g.width), static_cast<int>(g.height));
+            currentFont_->glyphMap[g.codepoint] = &currentFont_->glyphs[i];
         }
+        
+        Logger::get().info("Loaded {} glyphs", fontChunk->glyph_count);
         
         // Create Vulkan texture from texture data
         const uint8_t* texturePtr = fontData->data() + fontChunk->texture_data_offset;
@@ -748,11 +748,18 @@ namespace tremor::gfx {
     }
 
     void SDFTextRenderer::addText(const TextInstance& text) {
+        // Reserve space if needed to avoid reallocations
+        if (textInstances_.capacity() < textInstances_.size() + 1) {
+            textInstances_.reserve(textInstances_.size() * 2 + 10);
+        }
         textInstances_.push_back(text);
+        
+        // Don't mark as dirty here - we'll check in updateVertexBuffer
     }
 
     void SDFTextRenderer::clearText() {
         textInstances_.clear();
+        // Don't mark geometry dirty here - we'll check in render()
     }
 
     bool SDFTextRenderer::createVertexBuffer(size_t size) {
@@ -803,50 +810,59 @@ namespace tremor::gfx {
         return true;
     }
 
-    void SDFTextRenderer::updateVertexBuffer() {
-        struct Vertex {
-            glm::vec2 pos;
-            glm::vec2 uv;
-            glm::vec4 color;
-        };
+    bool SDFTextRenderer::needsGeometryRebuild() const {
+        // If we have no cached instances yet, we need to build
+        if (cachedTextInstances_.empty() && !textInstances_.empty()) {
+            return true;
+        }
         
-        std::vector<Vertex> vertices;
+        // Check if the number of text instances changed
+        if (textInstances_.size() != cachedTextInstances_.size()) {
+            return true;
+        }
         
-        // Generate vertices for all text instances
-        for (const auto& text : textInstances_) {
+        // Check if any text or position changed
+        for (size_t i = 0; i < textInstances_.size(); ++i) {
+            const auto& current = textInstances_[i];
+            const auto& cached = cachedTextInstances_[i];
+            
+            if (current.text != cached.text ||
+                current.position.x != cached.position.x ||
+                current.position.y != cached.position.y ||
+                current.scale != cached.scale ||
+                current.font_spacing != cached.font_spacing) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    void SDFTextRenderer::rebuildGeometryCache() {
+        geometryCache_.vertices.clear();
+        geometryCache_.textInstanceIndices.clear();
+        geometryCache_.vertexCounts.clear();
+        
+        // Reserve space to avoid reallocations
+        geometryCache_.vertices.reserve(textInstances_.size() * 100);
+        geometryCache_.vertexCounts.reserve(textInstances_.size());
+        
+        // Generate geometry for all text instances
+        for (size_t instanceIdx = 0; instanceIdx < textInstances_.size(); ++instanceIdx) {
+            const auto& text = textInstances_[instanceIdx];
             float x = text.position.x;
             float y = text.position.y;
             
-            // Unpack color (RGBA format)
-            glm::vec4 color;
-            color.r = ((text.color >> 24) & 0xFF) / 255.0f;
-            color.g = ((text.color >> 16) & 0xFF) / 255.0f;
-            color.b = ((text.color >> 8) & 0xFF) / 255.0f;
-            color.a = ((text.color >> 0) & 0xFF) / 255.0f;
+            uint32_t vertexCount = 0;
             
             // Generate vertices for each character
             for (char c : text.text) {
-                // Find glyph
-                const Taffy::FontChunk::Glyph* glyph = nullptr;
-                for (const auto& g : currentFont_->glyphs) {
-                    if (g.codepoint == static_cast<uint32_t>(c)) {
-                        glyph = &g;
-                        break;
-                    }
-                }
-                
-                if (!glyph) {
-                    Logger::get().warning("Glyph not found for character '{}' (code: {})", c, static_cast<int>(c));
+                // Find glyph using fast lookup
+                auto it = currentFont_->glyphMap.find(static_cast<uint32_t>(c));
+                if (it == currentFont_->glyphMap.end()) {
                     continue;
                 }
-                
-                // Debug first character
-                static bool firstChar = true;
-                if (firstChar) {
-                    Logger::get().info("First character '{}' (code: {}) found glyph with uv=({:.3f}, {:.3f}, {:.3f}, {:.3f})",
-                                      c, static_cast<int>(c), glyph->uv_x, glyph->uv_y, glyph->uv_width, glyph->uv_height);
-                    firstChar = false;
-                }
+                const Taffy::FontChunk::Glyph* glyph = it->second;
                 
                 // Calculate scaled dimensions
                 float width = glyph->width * text.scale;
@@ -859,63 +875,81 @@ namespace tremor::gfx {
                 float quadY = y + (currentFont_->ascent - bearingY) * std::min(text.scale,1.0f);
                 
                 // Add 6 vertices (2 triangles)
-                // Don't flip V coordinates - the font generation already handles coordinate system
                 float u0 = glyph->uv_x;
                 float v0 = glyph->uv_y;
                 float u1 = glyph->uv_x + glyph->uv_width;
                 float v1 = glyph->uv_y + glyph->uv_height;
                 
-                // Top-left
-                vertices.push_back({
-                    {quadX, quadY},
-                    {u0, v0},
-                    color
-                });
+                // Store vertices with position and UV only
+                geometryCache_.vertices.push_back({{quadX, quadY}, {u0, v0}});
+                geometryCache_.vertices.push_back({{quadX + width, quadY}, {u1, v0}});
+                geometryCache_.vertices.push_back({{quadX, quadY + height}, {u0, v1}});
+                geometryCache_.vertices.push_back({{quadX + width, quadY}, {u1, v0}});
+                geometryCache_.vertices.push_back({{quadX + width, quadY + height}, {u1, v1}});
+                geometryCache_.vertices.push_back({{quadX, quadY + height}, {u0, v1}});
                 
-                // Top-right
-                vertices.push_back({
-                    {quadX + width, quadY},
-                    {u1, v0},
-                    color
-                });
+                // Track which instance each vertex belongs to
+                for (int i = 0; i < 6; ++i) {
+                    geometryCache_.textInstanceIndices.push_back(instanceIdx);
+                }
                 
-                // Bottom-left
-                vertices.push_back({
-                    {quadX, quadY + height},
-                    {u0, v1},
-                    color
-                });
-                
-                // Second triangle
-                // Top-right
-                vertices.push_back({
-                    {quadX + width, quadY},
-                    {u1, v0},
-                    color
-                });
-                
-                // Bottom-right
-                vertices.push_back({
-                    {quadX + width, quadY + height},
-                    {u1, v1},
-                    color
-                });
-                
-                // Bottom-left
-                vertices.push_back({
-                    {quadX, quadY + height},
-                    {u0, v1},
-                    color
-                });
+                vertexCount += 6;
                 
                 // Advance cursor
                 x += glyph->advance * text.scale * text.font_spacing;
             }
+            
+            geometryCache_.vertexCounts.push_back(vertexCount);
+        }
+        
+        // Update cached instances
+        cachedTextInstances_ = textInstances_;
+        geometryCache_.dirty = false;
+    }
+
+    void SDFTextRenderer::updateVertexBuffer() {
+        struct Vertex {
+            glm::vec2 pos;
+            glm::vec2 uv;
+            glm::vec4 color;
+        };
+        
+        // Check if we need to rebuild geometry
+        // Only rebuild if this is the first time OR if the geometry actually changed
+        bool needsRebuild = needsGeometryRebuild();
+        if ((geometryCache_.dirty && cachedTextInstances_.empty()) || needsRebuild) {
+            Logger::get().info("🔨 Rebuilding text geometry cache (dirty={}, needsRebuild={}, instances={}, cached={})", 
+                              geometryCache_.dirty, needsRebuild, textInstances_.size(), cachedTextInstances_.size());
+            rebuildGeometryCache();
+        }
+        
+        // Pre-allocate vertices vector to avoid reallocations
+        static std::vector<Vertex> vertices;
+        vertices.clear();
+        vertices.reserve(geometryCache_.vertices.size());
+        
+        // Combine cached geometry with current colors
+        for (size_t i = 0; i < geometryCache_.vertices.size(); ++i) {
+            const auto& cachedVertex = geometryCache_.vertices[i];
+            uint32_t instanceIdx = geometryCache_.textInstanceIndices[i];
+            
+            // Get color from current text instance
+            glm::vec4 color;
+            uint32_t packedColor = textInstances_[instanceIdx].color;
+            color.r = ((packedColor >> 24) & 0xFF) / 255.0f;
+            color.g = ((packedColor >> 16) & 0xFF) / 255.0f;
+            color.b = ((packedColor >> 8) & 0xFF) / 255.0f;
+            color.a = ((packedColor >> 0) & 0xFF) / 255.0f;
+            
+            vertices.push_back({
+                cachedVertex.pos,
+                cachedVertex.uv,
+                color
+            });
         }
         
         // Check if we need to recreate the buffer
         size_t requiredSize = vertices.size() * sizeof(Vertex);
-        Logger::get().info("Generated {} vertices ({} bytes) for text", vertices.size(), requiredSize);
         
         if (requiredSize > vertexBufferSize_) {
             // Destroy old buffer
@@ -932,17 +966,6 @@ namespace tremor::gfx {
         
         // Copy vertex data
         if (!vertices.empty()) {
-            // Log first few vertices for debugging
-            /*if (vertices.size() >= 6) {
-                Logger::get().info("First quad vertices:");
-                for (int i = 0; i < 6 && i < vertices.size(); i++) {
-                    Logger::get().info("  V{}: pos({:.1f}, {:.1f}) uv({:.3f}, {:.3f}) color({:.2f}, {:.2f}, {:.2f}, {:.2f})", 
-                                      i, vertices[i].pos.x, vertices[i].pos.y,
-                                      vertices[i].uv.x, vertices[i].uv.y,
-                                      vertices[i].color.r, vertices[i].color.g, vertices[i].color.b, vertices[i].color.a);
-                }
-            }*/
-            
             void* data;
             vkMapMemory(device_, vertexBufferMemory_, 0, requiredSize, 0, &data);
             memcpy(data, vertices.data(), requiredSize);
@@ -964,12 +987,6 @@ namespace tremor::gfx {
         
         // Update vertex buffer
         updateVertexBuffer();
-        
-        // Log first few vertex positions for debugging
-        if (vertexBuffer_ != VK_NULL_HANDLE && textInstances_.size() > 0) {
-            //Logger::get().info("First text instance position: ({}, {})", 
-             //                 textInstances_[0].position.x, textInstances_[0].position.y);
-        }
         
         // Update uniform buffer with projection matrix
         void* data;
@@ -1043,16 +1060,28 @@ namespace tremor::gfx {
         
         // Calculate text width
         for (char c : text) {
-            // Find glyph
-            for (const auto& glyph : currentFont_->glyphs) {
-                if (glyph.codepoint == static_cast<uint32_t>(c)) {
-                    width += glyph.advance * scale;
-                    break;
-                }
+            // Find glyph using fast lookup
+            auto it = currentFont_->glyphMap.find(static_cast<uint32_t>(c));
+            if (it != currentFont_->glyphMap.end()) {
+                width += it->second->advance * scale;
             }
         }
         
         return glm::vec2(width, height);
+    }
+
+    void SDFTextRenderer::beginPersistentText() {
+        // TODO: Implement proper persistent text caching
+        textInstances_.clear();
+    }
+    
+    void SDFTextRenderer::endPersistentText() {
+        // TODO: Implement proper persistent text caching
+    }
+    
+    void SDFTextRenderer::renderPersistent(VkCommandBuffer commandBuffer, const glm::mat4& projection) {
+        // TODO: Implement proper persistent text caching
+        render(commandBuffer, projection);
     }
 
 } // namespace tremor::gfx

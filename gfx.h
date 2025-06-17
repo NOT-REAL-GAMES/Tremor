@@ -649,6 +649,12 @@ namespace tremor::gfx {
         return m_viewProjectionMatrix;
     }
 
+    inline void Camera::setClipPlanes(float nearZ, float farZ) {
+        m_nearZ = nearZ;
+        m_farZ = farZ;
+        updateProjectionMatrix();
+    }
+
     inline void Camera::updateViewMatrix() const {
         m_viewMatrix = calculateViewMatrix();
 
@@ -663,7 +669,7 @@ namespace tremor::gfx {
 
     inline void Camera::updateProjectionMatrix() const {
         // Use reverse depth for better precision
-        m_projectionMatrix = glm::perspectiveZO(m_fovRadians, m_aspectRatio, m_nearZ, m_farZ);
+        m_projectionMatrix = glm::perspectiveZO(m_fovRadians, m_aspectRatio, m_farZ, m_nearZ);
 
         // Fix Vulkan's coordinate system (flip Y)
         m_projectionMatrix[1][1] *= -1;

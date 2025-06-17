@@ -301,11 +301,11 @@ public:
                 // For chunked TAFs, add a small delay to ensure clean switch
                 if (waveform == 21) {
                     SDL_PauseAudioDevice(audioDevice, 1);
-                    SDL_Delay(2); // Give audio thread time to stop
+                    SDL_Delay(1); // Give audio thread time to stop
                 }
                 loadTestAudioAsset();
                 if (waveform == 21) {
-                    SDL_Delay(2); // Give time for new nodes to be ready
+                    SDL_Delay(1); // Give time for new nodes to be ready
                     SDL_PauseAudioDevice(audioDevice, 0);
                 }
             } else {
@@ -389,7 +389,7 @@ public:
             
             // IMPORTANT: Pause audio to prevent race conditions
             SDL_PauseAudioDevice(audioDevice, 1);
-            SDL_Delay(2); // Give audio thread time to stop
+            SDL_Delay(1); // Give audio thread time to stop
             
             auto loader = std::make_shared<Taffy::StreamingTaffyLoader>();
             if (loader->open(audioPath)) {
@@ -419,7 +419,7 @@ public:
             }
             
             // Resume audio after loading
-            SDL_Delay(4); // Give more time for background loader to preload chunks
+            SDL_Delay(2); // Give more time for background loader to preload chunks
             SDL_PauseAudioDevice(audioDevice, 0);
         } else {
             // Original loading code for non-chunked TAFs
@@ -555,6 +555,10 @@ public:
 #if defined(USING_VULKAN)
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
+            // Pass event to render backend for UI handling
+            if (rb) {
+                static_cast<tremor::gfx::VulkanBackend*>(rb.get())->handleInput(event);
+            }
 
             if (event.type == SDL_QUIT) {
                 SDL_DestroyWindow(window);
@@ -636,28 +640,7 @@ public:
                             Logger::get().info("   🎵 Your audio will sound gloriously lo-fi!");
                         }
                         break;
-                    case SDLK_j:
-                        // Load bit crusher distortion demo (which has the effect in the TAF)
-                        Logger::get().info("🎵 Loading bit crusher distortion demo (TAF with embedded effect)");
-                        switchWaveform(13); // Bit crusher distortion
-                        break;
-                    case SDLK_k:
-                        // Create bit-crushed version of imported sample
-                        Logger::get().info("🎵 Creating bit-crushed version of imported sample...");
-                        {
-                            // Call the function from taffy_audio_tools
-                            if (tremor::taffy::tools::createBitcrushedImportAsset("assets/audio/imported_bitcrushed.taf")) {
-                                Logger::get().info("✅ Bit-crushed TAF created! Press 'L' to play it");
-                            } else {
-                                Logger::get().error("❌ Failed to create bit-crushed TAF");
-                            }
-                        }
-                        break;
-                    case SDLK_l:
-                        // Load the bit-crushed import if it exists
-                        Logger::get().info("🎵 Loading bit-crushed imported sample...");
-                        switchWaveform(20); // Use switchWaveform to ensure proper loading
-                        break;
+                    
                     case SDLK_m:
                         // Create chunked streaming audio TAF
                         Logger::get().info("🎵 Creating chunked streaming audio TAF...");
@@ -705,12 +688,14 @@ public:
             }
         }
 
+        
+
         rb.get()->beginFrame();
 
 
         rb.get()->endFrame();
 
-        SDL_Delay(17); // Simulate a frame delay (~60 FPS)
+        //SDL_Delay(1); // Simulate a frame delay (~60 FPS)
         return true;
 #endif
     }

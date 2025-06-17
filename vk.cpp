@@ -5,6 +5,7 @@
 #include "quan.h"
 #include "renderer/taffy_integration.h"
 #include "renderer/sdf_text_renderer.h"
+#include "renderer/ui_renderer.h"
 #include "tools.h"
 #include "asset.h"
 #include "overlay.h"
@@ -167,8 +168,8 @@ namespace tremor::gfx {
             // Extract camera position from view matrix (inverse of last column)
             glm::vec3 camPos = -glm::vec3(viewProj[3]);
             
-            std::cout << "\n=== renderMeshAsset called for: " << asset_path << " ===" << std::endl;
-            std::cout << "Camera position from viewProj: (" << camPos.x << ", " << camPos.y << ", " << camPos.z << ")" << std::endl;
+            //std::cout << "\n=== renderMeshAsset called for: " << asset_path << " ===" << std::endl;
+            //std::cout << "Camera position from viewProj: (" << camPos.x << ", " << camPos.y << ", " << camPos.z << ")" << std::endl;
             
             // Ensure asset is loaded
             if (!ensureAssetLoaded(asset_path)) {
@@ -559,7 +560,7 @@ namespace tremor::gfx {
             rasterizer.rasterizerDiscardEnable = VK_FALSE;
             rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
             rasterizer.lineWidth = 1.0f;
-            rasterizer.cullMode = VK_CULL_MODE_NONE; // Disable culling for debugging
+            rasterizer.cullMode = VK_CULL_MODE_BACK_BIT; // Disable culling for debugging
             rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
             rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -572,9 +573,9 @@ namespace tremor::gfx {
             // Depth testing
             VkPipelineDepthStencilStateCreateInfo depthStencil{};
             depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-            depthStencil.depthTestEnable = VK_FALSE; // Disable depth test for debugging
-            depthStencil.depthWriteEnable = VK_FALSE;
-            depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+            depthStencil.depthTestEnable = VK_TRUE; // Disable depth test for debugging
+            depthStencil.depthWriteEnable = VK_TRUE;
+            depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
             depthStencil.depthBoundsTestEnable = VK_FALSE;
             depthStencil.stencilTestEnable = VK_FALSE;
 
@@ -736,28 +737,6 @@ namespace tremor::gfx {
 
             // Draw with mesh shader
             //Logger::get().info("Drawing mesh shader with 1x1x1 workgroups");
-            
-            // Debug: Test transform all three vertices
-            glm::vec4 vertices[3] = {
-                glm::vec4(0.0f, 0.5f, 0.0f, 1.0f),    // Top
-                glm::vec4(-0.5f, -0.5f, 0.0f, 1.0f),  // Bottom left
-                glm::vec4(0.5f, -0.5f, 0.0f, 1.0f)    // Bottom right
-            };
-            
-            for (int i = 0; i < 3; i++) {
-                glm::vec4 transformed = viewProj * vertices[i];
-                glm::vec3 ndc = glm::vec3(transformed) / transformed.w;
-                //Logger::get().info("Vertex {} -> NDC: ({:.3f}, {:.3f}, {:.3f}) [w={:.3f}]", 
-                //    i, ndc.x, ndc.y, ndc.z, transformed.w);
-                
-                // Check if vertex is inside NDC bounds
-                bool inside = (ndc.x >= -1.0f && ndc.x <= 1.0f && 
-                             ndc.y >= -1.0f && ndc.y <= 1.0f && 
-                             ndc.z >= 0.0f && ndc.z <= 1.0f);
-                if (!inside) {
-                    //Logger::get().warning("  Vertex {} is OUTSIDE NDC bounds!", i);
-                }
-            }
             
             // Ensure vkCmdDrawMeshTasksEXT is available
             if (!vkCmdDrawMeshTasksEXT) {
@@ -2431,10 +2410,16 @@ namespace tremor::gfx {
 
 
 
-        // Clear and reset
+        // Clear vectors but keep capacity to avoid reallocations
         m_clusterLightIndices.clear();
         m_clusterObjectIndices.clear();
         m_visibleObjects.clear();
+        
+        // Reserve capacity if needed
+        if (m_visibleObjects.capacity() < 1000) {
+            m_visibleObjects.reserve(1000);
+            m_clusterObjectIndices.reserve(1000);
+        }
 
 
 
@@ -3819,6 +3804,11 @@ namespace tremor::gfx {
         m_colorSpace = surfaceFormat.colorSpace;
         m_extent = extent;
         m_vsync = (presentMode == VK_PRESENT_MODE_FIFO_KHR || presentMode == VK_PRESENT_MODE_FIFO_RELAXED_KHR);
+        
+        Logger::get().info("Swap chain created: {}x{}, {} images, format: {}, {}",
+                          m_extent.width, m_extent.height, m_images.size(), 
+                          static_cast<uint32_t>(m_imageFormat),
+                          m_vsync ? "VSync ON" : "VSync OFF");
     }
 
     void SwapChain::createImageViews() {
@@ -4391,11 +4381,11 @@ namespace tremor::gfx {
         }
 
         // Log basic device info
-        //Logger::get().info("Selected GPU: {} ({})", m_deviceProperties.deviceName, vendorName);
-        //Logger::get().info("Driver version: {}.{}.{}",
-        //    VK_VERSION_MAJOR(m_deviceProperties.driverVersion),
-        //    VK_VERSION_MINOR(m_deviceProperties.driverVersion),
-        //    VK_VERSION_PATCH(m_deviceProperties.driverVersion));
+        Logger::get().info("Selected GPU: {} ({})", m_deviceProperties.deviceName, vendorName);
+        Logger::get().info("Driver version: {}.{}.{}",
+            VK_VERSION_MAJOR(m_deviceProperties.driverVersion),
+            VK_VERSION_MINOR(m_deviceProperties.driverVersion),
+            VK_VERSION_PATCH(m_deviceProperties.driverVersion));
 
         // Log color and depth formats
         //Logger::get().info("Color format: {}", m_colorFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ?
@@ -5879,8 +5869,11 @@ namespace tremor::gfx {
             updateUniformBuffer();
             updateLight();
 
-            cam.setPosition({sin(std::chrono::steady_clock::now().time_since_epoch().count()/1000000000.0f)*5,0.0,cos(std::chrono::steady_clock::now().time_since_epoch().count()/1000000000.0f)*5});
-            cam.lookAt({0.0f,0.0f,0.0f});
+            cam.setClipPlanes(0.01f,1000000000.0f);
+            // Camera orbiting at a reasonable distance for a 0.5 unit cube
+            float time = std::chrono::steady_clock::now().time_since_epoch().count()/1000000000.0f;
+            cam.setPosition({sin(time)*5.0f, 0.001f, cos(time)*5.0f});
+            cam.lookAt({0.0f,0.0f,0.0f});  // Look at origin where the cube is centered
 
             // Add camera debug info
             glm::vec3 camPos = cam.getLocalPosition();
@@ -5979,7 +5972,7 @@ namespace tremor::gfx {
                 depthStencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
                 depthStencilAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
                 depthStencilAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                depthStencilAttachment.clearValue.depthStencil = { 0.0f, 1 };
+                depthStencilAttachment.clearValue.depthStencil = { 1.0f, 0 };
 
                 // Add to the renderingInfo
                 renderingInfo.depthStencilAttachment = depthStencilAttachment;
@@ -6047,7 +6040,7 @@ namespace tremor::gfx {
 					Logger::get().info("  [{:.3f}, {:.3f}, {:.3f}, {:.3f}]", 
 						mvp[i][0], mvp[i][1], mvp[i][2], mvp[i][3]);
 				}*/
-				
+
 				// Also check view and projection separately
 				glm::mat4 view = cam.getViewMatrix();
 				glm::mat4 proj = cam.getProjectionMatrix();
@@ -6063,13 +6056,13 @@ namespace tremor::gfx {
 				//Logger::get().info("Current swapchain extent: {}x{}", vkSwapchain.get()->extent().width, vkSwapchain.get()->extent().height);
 			}
 			
-            hot_pink_enabled = std::chrono::steady_clock::now().time_since_epoch().count() % 1000000000 > 500000000;
+            //hot_pink_enabled = std::chrono::steady_clock::now().time_since_epoch().count() % 1000000000 > 500000000;
             
             if(hot_pink_enabled){
-                m_overlayManager->loadAssetWithOverlay("assets/fixed_triangle.taf","assets/overlays/tri_hot_pink.tafo");
+                m_overlayManager->loadAssetWithOverlay("assets/cube.taf","assets/overlays/tri_hot_pink.tafo");
             }
             else {
-                m_overlayManager->clear_overlays("assets/fixed_triangle.taf");
+                m_overlayManager->clear_overlays("assets/cube.taf");
             }
 
             // Check if asset reload was requested (could be set by keyboard input)
@@ -6092,8 +6085,8 @@ namespace tremor::gfx {
 				return;
 			}
 			
-			// Test the fixed triangle instead
-			m_overlayManager->renderMeshAsset("assets/fixed_triangle.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
+			// Render the cube
+			m_overlayManager->renderMeshAsset("assets/cube.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
 
 			// Render text overlay
 			if (m_textRenderer) {
@@ -6104,6 +6097,16 @@ namespace tremor::gfx {
 				
 
 				m_textRenderer->render(m_commandBuffers[currentFrame], orthoProjection);
+			}
+			
+			// Render UI elements
+			if (m_uiRenderer) {
+				// Create orthographic projection for UI
+				float width = static_cast<float>(vkSwapchain->extent().width);
+				float height = static_cast<float>(vkSwapchain->extent().height);
+				glm::mat4 orthoProjection = glm::orthoZO(0.0f, width, 0.0f, height, -10.0f, 1.0f);
+				
+				m_uiRenderer->render(m_commandBuffers[currentFrame], orthoProjection);
 			}
 
         }
@@ -6216,6 +6219,21 @@ namespace tremor::gfx {
         }
 
         void VulkanBackend::endFrame() {
+        // FPS counter
+        static auto lastTime = std::chrono::high_resolution_clock::now();
+        static int frameCount = 0;
+        static float fps = 0.0f;
+        
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        float deltaTime = std::chrono::duration<float>(currentTime - lastTime).count();
+        frameCount++;
+        
+        if (deltaTime >= 1.0f) {
+            fps = frameCount / deltaTime;
+            Logger::get().info("FPS: {:.1f} ({:.2f}ms)", fps, 1000.0f / fps);
+            frameCount = 0;
+            lastTime = currentTime;
+        }
             if (vkDevice->capabilities().dynamicRendering) {
                 dr.get()->end(m_commandBuffers[currentFrame]);
             }
@@ -6434,12 +6452,49 @@ namespace tremor::gfx {
                 // Continue anyway - text rendering is optional
             }
 
+            // Initialize UI renderer
+            m_uiRenderer = std::make_unique<tremor::gfx::UIRenderer>(
+                device, physicalDevice, m_commandPool->handle(), graphicsQueue);
+            if (!m_uiRenderer->initialize(
+                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
+                vkSwapchain->imageFormat(),
+                m_msaaSamples)) {
+                Logger::get().error("Failed to initialize UI renderer");
+                // Continue anyway - UI is optional
+            } else {
+                // Set text renderer for the UI
+                m_uiRenderer->setTextRenderer(m_textRenderer.get());
+                
+                // Add some test buttons
+                m_uiRenderer->addButton("Reload Assets", glm::vec2(20, 100), glm::vec2(160, 40),
+                    [this]() {
+                        Logger::get().info("🔄 Reload Assets button clicked!");
+                        reload_assets_requested = true;
+                    });
+                
+                m_uiRenderer->addButton("Toggle Overlay", glm::vec2(20, 150), glm::vec2(160, 40),
+                    [this]() {
+                        Logger::get().info("🎨 Toggle Overlay button clicked!");
+                        hot_pink_enabled = !hot_pink_enabled;
+                    });
+                
+                m_uiRenderer->addButton("Exit", glm::vec2(20, 200), glm::vec2(160, 40),
+                    []() {
+                        Logger::get().info("❌ Exit button clicked!");
+                        SDL_Event quit_event;
+                        quit_event.type = SDL_QUIT;
+                        SDL_PushEvent(&quit_event);
+                    });
+            }
+
             createDevelopmentOverlays();
             // loadTestAssetWithOverlays(); // Commented out - creating test triangle interferes with proper_triangle.taf
 
             // Load test font
             if (m_textRenderer) {
-                m_textRenderer->loadFont("assets/fonts/test_font.taf");
+                if (!m_textRenderer->loadFont("assets/fonts/test_font.taf")) {
+                    Logger::get().warning("Failed to load test font - UI will render without text");
+                }
                 
                 // Add some test text
                 tremor::gfx::TextInstance testText;
@@ -6457,15 +6512,22 @@ namespace tremor::gfx {
             initializeOverlaySystem();
             initializeOverlayWorkflow();
 
-			// Load the fixed triangle
-			m_overlayManager->reloadAsset("assets/fixed_triangle.taf");
-			m_overlayManager->load_master_asset("assets/fixed_triangle.taf");
+			// Load the cube instead of triangle
+			m_overlayManager->reloadAsset("assets/cube.taf");
+			m_overlayManager->load_master_asset("assets/cube.taf");
 
             // Create enhanced content
 
             return true;
         };
         void VulkanBackend::shutdown() {};
+        
+        void VulkanBackend::handleInput(const SDL_Event& event) {
+            // Pass input to UI renderer
+            if (m_uiRenderer) {
+                m_uiRenderer->updateInput(event);
+            }
+        }
 
 
         TextureHandle VulkanBackend::createTexture(const TextureDesc& desc) {
@@ -6752,6 +6814,8 @@ namespace tremor::gfx {
             SDL_GetWindowSize(w, &width, &height);
             swapChainInfo.width = static_cast<uint32_t>(width);
             swapChainInfo.height = static_cast<uint32_t>(height);
+            swapChainInfo.vsync = false;  // Disable VSync for maximum performance
+            swapChainInfo.imageCount = 3;  // Triple buffering for better performance
 
             vkSwapchain = std::make_unique<SwapChain>(*vkDevice, surface, swapChainInfo);
 
