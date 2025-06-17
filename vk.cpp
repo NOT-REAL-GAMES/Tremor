@@ -5869,10 +5869,10 @@ namespace tremor::gfx {
             updateUniformBuffer();
             updateLight();
 
-            cam.setClipPlanes(0.01f,1000000000.0f);
+            cam.setClipPlanes(0.01f,100000000000.0f);
             // Camera orbiting at a reasonable distance for a 0.5 unit cube
             float time = std::chrono::steady_clock::now().time_since_epoch().count()/1000000000.0f;
-            cam.setPosition({sin(time)*5.0f, 0.001f, cos(time)*5.0f});
+            cam.setPosition({sin(time)*10.0f, 2.0f, cos(time)*10.0f});
             cam.lookAt({0.0f,0.0f,0.0f});  // Look at origin where the cube is centered
 
             // Add camera debug info
