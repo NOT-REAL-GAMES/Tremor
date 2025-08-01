@@ -16,6 +16,7 @@ namespace tremor::audio {
             voices_[i].processor = std::make_unique<TaffyAudioProcessor>(sampleRate);
             voices_[i].triggerParam = 0;
             voices_[i].lastGate = 0.0f;
+            voices_[i].releaseAge = 0;
         }
         
         Logger::get().info("🎹 TaffyPolyphonicProcessor initialized with {} voices", MAX_VOICES);
@@ -120,14 +121,13 @@ namespace tremor::audio {
                     if (voiceId < MAX_VOICES && voices_[voiceId].active) {
                         voices_[voiceId].processor->setParameter(parameterHash, value);
                         voices_[voiceId].lastGate = value;
+                        voices_[voiceId].releaseAge = 0;  // Start counting release time
                         Logger::get().info("🎵 Gate falling edge - voice {} released", voiceId);
                     }
                 }
                 
-                // Update last value
-                if (routeIt != parameterRoutes_.end()) {
-                    routeIt->second.lastValue = value;
-                }
+                // Clear the parameter route so next trigger allocates a new voice
+                parameterRoutes_.erase(parameterHash);
             }
         } else {
             // Non-gate parameter - send to all active voices
@@ -158,6 +158,7 @@ namespace tremor::audio {
                 voices_[i].age = 0;
                 voices_[i].priority = 1.0f;
                 voices_[i].triggerParam = triggerParam;
+                voices_[i].releaseAge = 0;
                 return i;
             }
         }
@@ -173,6 +174,7 @@ namespace tremor::audio {
             voices_[oldestVoice].age = 0;
             voices_[oldestVoice].priority = 1.0f;
             voices_[oldestVoice].triggerParam = triggerParam;
+            voices_[oldestVoice].releaseAge = 0;
             
             // Force gate off first
             voices_[oldestVoice].processor->setParameter(Taffy::fnv1a_hash("gate"), 0.0f);
@@ -189,11 +191,16 @@ namespace tremor::audio {
                 voice.age += frameCount;
                 
                 // Check if voice should be deactivated
-                // Simple heuristic: deactivate if gate has been low for a while
-                if (voice.lastGate < 0.5f && voice.age > sampleRate_ / 10) {  // 100ms after gate release
-                    voice.active = false;
-                    Logger::get().debug("🔕 Voice {} auto-deactivated after {} samples", 
-                                      voice.id, voice.age);
+                // For drums, deactivate quickly after gate release
+                if (voice.lastGate < 0.5f) {
+                    voice.releaseAge += frameCount;
+                    
+                    // Deactivate after 50ms (typical drum tail)
+                    if (voice.releaseAge > sampleRate_ / 20) {
+                        voice.active = false;
+                        Logger::get().debug("🔕 Voice {} auto-deactivated after {} samples", 
+                                          voice.id, voice.releaseAge);
+                    }
                 }
             }
         }

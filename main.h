@@ -24,6 +24,9 @@
 #define USING_VULKAN
 #endif
 
+#define VK_NO_PROTOTYPES 1
+#define VK_USE_64_BIT_PTR_DEFINES 0
+
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 
 #include <errno.h>

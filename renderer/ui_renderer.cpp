@@ -483,6 +483,14 @@ namespace tremor::gfx {
         switch (event.type) {
             case SDL_MOUSEMOTION:
                 updateMousePosition(event.motion.x, event.motion.y);
+                for (auto& elem : m_elements) {
+                        if (elem->enabled && elem->visible && elem->contains(m_mousePosition)) {
+                            if(!m_pressedElement || elem->id != m_pressedElement->id){
+                                elem->state = UIElementState::Hovered;
+                                break;
+                            }
+                        }
+                    }
                 break;
                 
             case SDL_MOUSEBUTTONDOWN:
@@ -494,6 +502,8 @@ namespace tremor::gfx {
                         if (elem->enabled && elem->visible && elem->contains(m_mousePosition)) {
                             m_pressedElement = elem.get();
                             elem->state = UIElementState::Pressed;
+                                m_quadsDirty = true; // State changed, need to update quads
+                                m_textDirty = true;  // Also need to update text colors
                             break;
                         }
                     }
@@ -511,6 +521,9 @@ namespace tremor::gfx {
                         }
                         // Set state to hovered since mouse is still over the element
                         m_pressedElement->state = UIElementState::Hovered;
+                            m_quadsDirty = true; // State changed, need to update quads
+                            m_textDirty = true;  // Also need to update text colors
+
                     }
                     
                     m_pressedElement = nullptr;
@@ -527,7 +540,7 @@ namespace tremor::gfx {
 
     void UIRenderer::updateElementStates() {
         UIElement* newHovered = nullptr;
-        
+
         // Find which element is hovered
         for (auto& elem : m_elements) {
             if (elem->enabled && elem->visible && elem->contains(m_mousePosition)) {
@@ -567,13 +580,17 @@ namespace tremor::gfx {
             auto oldState = m_pressedElement->state;
             if (m_pressedElement->contains(m_mousePosition)) {
                 m_pressedElement->state = UIElementState::Pressed;
+
             } else {
                 m_pressedElement->state = UIElementState::Normal;
             }
             if (oldState != m_pressedElement->state) {
                 m_quadsDirty = true; // State changed, need to update quads
+                m_textDirty = true;  // Also need to update text colors
+
             }
         }
+
     }
 
     void UIRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& projection) {
@@ -649,24 +666,39 @@ namespace tremor::gfx {
                     
                     // Determine text color based on element state
                     uint32_t textColor = button->textColor;
-                    if (elem->state == UIElementState::Hovered) {
-                        // Make text brighter when hovered (add 0x40 to RGB components)
-                        uint8_t r = 255;//(textColor >> 24) & 0xFF;
-                        uint8_t g = 0;//(textColor >> 16) & 0xFF;
-                        uint8_t b = 80;//(textColor >> 8) & 0xFF;
-                        uint8_t a = textColor & 0xFF;
-                                                
-                        textColor = (r << 24) | (g << 16) | (b << 8) | a;
-                    } else if (elem->state == UIElementState::Pressed) {
-                        // Make text even brighter when pressed
-                        uint8_t r = 127;//(textColor >> 24) & 0xFF;
-                        uint8_t g = 0;//(textColor >> 16) & 0xFF;
-                        uint8_t b = 40;//(textColor >> 8) & 0xFF;
-                        uint8_t a = textColor & 0xFF;
-                                                
-                        textColor = (r << 24) | (g << 16) | (b << 8) | a;
+                    uint8_t r;
+                    uint8_t g;
+                    uint8_t b;
+                    uint8_t a;
+                    switch (elem->state)
+                    {
+                        case UIElementState::Hovered:
+                            r = 255;//(textColor >> 24) & 0xFF;
+                            g = 0;//(textColor >> 16) & 0xFF;
+                            b = 80;//(textColor >> 8) & 0xFF;
+                            a = textColor & 0xFF;
+                                                    
+                            break;
+                        
+                        case UIElementState::Pressed:
+                            r = 63;//(textColor >> 24) & 0xFF;
+                            g = 0;//(textColor >> 16) & 0xFF;
+                            b = 20;//(textColor >> 8) & 0xFF;
+                            a = textColor & 0xFF;
+                                                    
+                            break;
+                        
+                        default:
+                            r = 255;//(textColor >> 24) & 0xFF;
+                            g = 255;//(textColor >> 16) & 0xFF;
+                            b = 255;//(textColor >> 8) & 0xFF;
+                            a = textColor & 0xFF;
+                                                    
+                            break;
                     }
-                    
+
+                    textColor = (r << 24) | (g << 16) | (b << 8) | a;                        
+
                     // Add text to renderer
                     TextInstance textInst;
                     textInst.position = textPos;
@@ -767,13 +799,13 @@ namespace tremor::gfx {
                 uint32_t bgColor;
                 switch (elem->state) {
                     case UIElementState::Normal:
-                        bgColor = 0x00000040; // Black with 25% opacity (64/255)
+                        bgColor = 0x00000020; // Black with 25% opacity (64/255)
                         break;
                     case UIElementState::Hovered:
-                        bgColor = 0x00000050; // Black with ~31% opacity (80/255)
+                        bgColor = 0x00000020; // Black with ~31% opacity (80/255)
                         break;
                     case UIElementState::Pressed:
-                        bgColor = 0x00000055; // Black with ~33% opacity (85/255)
+                        bgColor = 0x00000040; // Black with ~33% opacity (85/255)
                         break;
                     case UIElementState::Disabled:
                         bgColor = 0x00000020; // Black with ~12% opacity (32/255)

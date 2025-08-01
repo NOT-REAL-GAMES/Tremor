@@ -371,29 +371,6 @@ namespace tremor::gfx {
 
             return;
             
-            /* TODO: Re-enable when we have proper descriptor set management
-            // Clean up old GPU data before replacing
-            auto oldDataIt = gpu_data_cache_.find(master_path);
-            if (oldDataIt != gpu_data_cache_.end()) {
-                // Clean up old buffers
-                if (oldDataIt->second.vertexStorageBuffer) {
-                    vkDestroyBuffer(device_, oldDataIt->second.vertexStorageBuffer, nullptr);
-                }
-                if (oldDataIt->second.vertexStorageMemory) {
-                    vkFreeMemory(device_, oldDataIt->second.vertexStorageMemory, nullptr);
-                }
-                // Note: Descriptor sets are automatically returned to pool when freed
-                // The new uploadTaffyAsset call will allocate a fresh descriptor set
-            }
-            
-            // Update GPU data cache with original data
-            gpu_data_cache_[master_path] = gpuData;
-            
-            // Invalidate pipeline to ensure it uses the original data
-            invalidatePipeline(master_path);
-            
-            //Logger::get().info("Overlays cleared - restored original asset");
-            */
         }
 
         // Check if pipeline needs rebuild (e.g., after overlay changes)
@@ -6412,7 +6389,7 @@ namespace tremor::gfx {
             createLightBuffer();
             createMaterialBuffer();
 
-            cam = tremor::gfx::Camera(60, 16.0f / 9.0f, 0.1f, 100.0f);
+            cam = tremor::gfx::Camera(10.0f, 16.0f / 9.0f, 0.1f, 100.0f);
 
             cam.setPosition(glm::vec3(0.0f, 0.0f, 5.0f));
             cam.lookAt(glm::vec3(0.0f, 0.0f, 0.0f));
@@ -6510,11 +6487,11 @@ namespace tremor::gfx {
                 m_uiRenderer->setTextRenderer(m_textRenderer.get());
                 
                 // Add some test buttons
-                m_uiRenderer->addButton("Reload Assets", glm::vec2(20, 100), glm::vec2(160, 40),
+                /*m_uiRenderer->addButton("Reload Assets", glm::vec2(20, 100), glm::vec2(160, 40),
                     [this]() {
                         Logger::get().info("🔄 Reload Assets button clicked!");
                         reload_assets_requested = true;
-                    });
+                    });*/
                 
                 m_uiRenderer->addButton("Toggle Overlay", glm::vec2(20, 150), glm::vec2(160, 40),
                     [this]() {
@@ -6531,15 +6508,15 @@ namespace tremor::gfx {
                     });
                 
                 // Initialize sequencer
-                m_sequencerUI = std::make_unique<tremor::gfx::SequencerUI>(m_uiRenderer.get());
-                m_sequencerUI->initialize();
-                m_sequencerUI->onStepTriggered([this](int step) {
-                    Logger::get().info("🎵 Sequencer step {} triggered!", step);
-                    // Call the external callback if set
-                    if (m_sequencerCallback) {
-                        m_sequencerCallback(step);
-                    }
-                });
+                // m_sequencerUI = std::make_unique<tremor::gfx::SequencerUI>(m_uiRenderer.get());
+                // m_sequencerUI->initialize();
+                // m_sequencerUI->onStepTriggered([this](int step) {
+                //     Logger::get().info("🎵 Sequencer step {} triggered!", step);
+                //     // Call the external callback if set
+                //     if (m_sequencerCallback) {
+                //         m_sequencerCallback(step);
+                //     }
+                // });
             }
 
             createDevelopmentOverlays();

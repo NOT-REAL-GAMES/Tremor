@@ -24,6 +24,7 @@ namespace tremor::audio {
             // Voice-specific parameters
             uint64_t triggerParam;  // Parameter that triggered this voice
             float lastGate;         // Last gate value for edge detection
+            int releaseAge;         // Samples since gate was released
         };
         
         TaffyPolyphonicProcessor(uint32_t sampleRate = 48000);
