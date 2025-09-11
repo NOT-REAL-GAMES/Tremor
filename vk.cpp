@@ -739,31 +739,11 @@ namespace tremor::gfx {
             meshPushData.index_offset_bytes = gpuData.indexOffset;
             meshPushData.overlay_flags = 0; // Overlays will be handled by shader replacement
             meshPushData.overlay_data_offset = 0;
-            
-            //std::cout << "🔍 Push constants debug:" << std::endl;
-            //std::cout << "  vertex_count: " << meshPushData.vertex_count << std::endl;
-            //std::cout << "  primitive_count: " << meshPushData.primitive_count << std::endl;
-            //std::cout << "  vertex_stride_floats: " << meshPushData.vertex_stride_floats << std::endl;
-            //std::cout << "  index_offset_bytes: " << meshPushData.index_offset_bytes << std::endl;
-            //std::cout << "  overlay_flags: 0x" << std::hex << meshPushData.overlay_flags << std::dec << std::endl;
-            //std::cout << "  overlay_data_offset: " << meshPushData.overlay_data_offset << std::endl;
-            //std::cout << "  sizeof(pushConstants): " << sizeof(meshPushData) << " bytes" << std::endl;
-            
+                        
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT,
                 0, sizeof(meshPushData), &meshPushData);
             
-            // Log all state before draw
-            //Logger::get().info("Mesh shader draw state:");
-            //Logger::get().info("  Pipeline: {}", (void*)meshPipeline);
-            //Logger::get().info("  Descriptor set: {}", (void*)gpuData.descriptorSet);
-            //Logger::get().info("  Vertex count: {}", gpuData.vertexCount);
-            //Logger::get().info("  Primitive count: {}", gpuData.primitiveCount);
-            //Logger::get().info("  Vertex stride floats: {}", gpuData.vertexStrideFloats);
-            //Logger::get().info("  Storage buffer: {}", (void*)gpuData.vertexStorageBuffer);
-            
-            //std::cout << "CALLING vkCmdDrawMeshTasksEXT NOW!" << std::endl;
             vkCmdDrawMeshTasksEXT(cmd, 3, 1, 1);  // 1x1x1 workgroups
-            //std::cout << "vkCmdDrawMeshTasksEXT completed successfully!" << std::endl;
         }
 
         TaffyOverlayManager::MeshAssetGPUData TaffyOverlayManager::uploadTaffyAsset(const Taffy::Asset& asset) {
@@ -5765,8 +5745,8 @@ namespace tremor::gfx {
                                        physicalDeviceProperties.limits.framebufferDepthSampleCounts;
             
             // Try to use 4x MSAA for good quality without too much performance impact
-            if (counts & VK_SAMPLE_COUNT_4_BIT) { return VK_SAMPLE_COUNT_4_BIT; }
-            if (counts & VK_SAMPLE_COUNT_2_BIT) { return VK_SAMPLE_COUNT_2_BIT; }
+            //if (counts & VK_SAMPLE_COUNT_4_BIT) { return VK_SAMPLE_COUNT_4_BIT; }
+            //if (counts & VK_SAMPLE_COUNT_2_BIT) { return VK_SAMPLE_COUNT_2_BIT; }
             return VK_SAMPLE_COUNT_1_BIT;
         }
 
@@ -5845,6 +5825,17 @@ namespace tremor::gfx {
             }
 
             updateOverlaySystem();
+
+            // Update model editor
+            if (m_editorIntegration) {
+                // Calculate deltaTime (simple approach)
+                static auto lastFrameTime = std::chrono::high_resolution_clock::now();
+                auto currentTime = std::chrono::high_resolution_clock::now();
+                float deltaTime = std::chrono::duration<float>(currentTime - lastFrameTime).count();
+                lastFrameTime = currentTime;
+                
+                m_editorIntegration->update(deltaTime);
+            }
 
             cam.extent = vkSwapchain.get()->extent();
 
@@ -6093,7 +6084,7 @@ namespace tremor::gfx {
 				return;
 			}
 			
-			m_overlayManager->renderMeshAsset("assets/cube.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
+			//m_overlayManager->renderMeshAsset("assets/cube.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
 
 
         }
@@ -6208,7 +6199,7 @@ namespace tremor::gfx {
         void VulkanBackend::endFrame() {
         static int endFrameCount = 0;
         if (endFrameCount < 50) {
-            Logger::get().critical("endFrame() called, count {}", endFrameCount++);
+            //Logger::get().critical("endFrame() called, count {}", endFrameCount++);
         }
 
         			// Render text overlay
@@ -6236,6 +6227,11 @@ namespace tremor::gfx {
 				glm::mat4 orthoProjection = glm::orthoZO(0.0f, width, 0.0f, height, -10.0f, 1.0f);
 				
 				m_uiRenderer->render(m_commandBuffers[currentFrame], orthoProjection);
+			}
+
+			// Render model editor
+			if (m_editorIntegration) {
+				m_editorIntegration->render();
 			}
 
         
@@ -6356,11 +6352,12 @@ namespace tremor::gfx {
 
 
         bool VulkanBackend::initialize(SDL_Window* window) {
+            Logger::get().info("*** VulkanBackend::initialize() CALLED ***");
             //Logger::get().critical("VulkanBackend::initialize called!");
             //Logger::get().critical("  VulkanBackend instance: {}", (void*)this);
             
             static int initCount = 0;
-            //Logger::get().critical("  Initialize call count: {}", ++initCount);
+            Logger::get().info("*** VulkanBackend::initialize() call count: {} ***", ++initCount);
             
             if (initCount > 1) {
                 //Logger::get().critical("WARNING: VulkanBackend::initialize called multiple times!");
@@ -6493,13 +6490,23 @@ namespace tremor::gfx {
                         reload_assets_requested = true;
                     });*/
                 
-                m_uiRenderer->addButton("Toggle Overlay", glm::vec2(20, 150), glm::vec2(160, 40),
+                m_toggleOverlayButtonId = m_uiRenderer->addButton("Toggle Overlay", glm::vec2(20, 150), glm::vec2(160, 40),
                     [this]() {
                         Logger::get().info("🎨 Toggle Overlay button clicked!");
                         hot_pink_enabled = !hot_pink_enabled;
                     });
                 
-                m_uiRenderer->addButton("Exit", glm::vec2(20, 200), glm::vec2(160, 40),
+                m_modelEditorButtonId = m_uiRenderer->addButton("Model Editor", glm::vec2(20, 200), glm::vec2(160, 40),
+                    [this]() {
+                        Logger::get().info("🔧 Model Editor button clicked!");
+                        if (m_editorIntegration) {
+                            bool isEnabled = m_editorIntegration->isEditorEnabled();
+                            m_editorIntegration->setEditorEnabled(!isEnabled);
+                            Logger::get().info("Model Editor {}", !isEnabled ? "enabled" : "disabled");
+                        }
+                    });
+                
+                m_exitButtonId = m_uiRenderer->addButton("Exit", glm::vec2(20, 250), glm::vec2(160, 40),
                     []() {
                         Logger::get().info("❌ Exit button clicked!");
                         SDL_Event quit_event;
@@ -6519,6 +6526,21 @@ namespace tremor::gfx {
                 // });
             }
 
+            Logger::get().info("*** VulkanBackend::initialize() ABOUT TO CREATE ModelEditorIntegration ***");
+            // Initialize model editor integration
+            Logger::get().info("*** VulkanBackend: Creating ModelEditorIntegration ***");
+            m_editorIntegration = std::make_unique<tremor::editor::ModelEditorIntegration>(*this);
+            Logger::get().info("*** VulkanBackend: ModelEditorIntegration created, calling initialize() ***");
+            Logger::get().info("*** VulkanBackend: About to call m_editorIntegration->initialize() ***");
+            bool initResult = m_editorIntegration->initialize();
+            Logger::get().info("*** VulkanBackend: m_editorIntegration->initialize() returned: {} ***", initResult);
+            if (!initResult) {
+                Logger::get().error("*** VulkanBackend: Model Editor failed to initialize ***");
+                // Continue anyway - editor is optional
+            } else {
+                Logger::get().info("*** VulkanBackend: Model Editor initialized successfully ***");
+            }
+
             createDevelopmentOverlays();
             // loadTestAssetWithOverlays(); // Commented out - creating test triangle interferes with proper_triangle.taf
 
@@ -6528,17 +6550,7 @@ namespace tremor::gfx {
                     Logger::get().warning("Failed to load test font - UI will render without text");
                 }
                 
-                // Add some test text
-                tremor::gfx::TextInstance testText;
-                
-                testText.position = glm::vec2(24, 24);
-                testText.color = 0xFF0050FF; // Hot Pink (RGBA)
-                testText.text = "NOT REAL GAMES";
-                testText.scale = 0.4f;
-                testText.font_spacing = 0.95f;
-                testText.flags = 0;
-
-                m_textRenderer->addText(testText);
+                m_uiRenderer->addLabel("NOT REAL GAMES",glm::vec2(24,36),0xFF0050FF);
             }
 
             initializeOverlaySystem();
@@ -6555,6 +6567,14 @@ namespace tremor::gfx {
         void VulkanBackend::shutdown() {};
         
         void VulkanBackend::handleInput(const SDL_Event& event) {
+            // Pass input to model editor first (it may consume the event)
+            if (m_editorIntegration) {
+                m_editorIntegration->handleInput(event);
+                if (m_editorIntegration->isEditorEnabled()) {
+                    return; // Editor consumed the event
+                }
+            }
+            
             // Pass input to UI renderer
             if (m_uiRenderer) {
                 m_uiRenderer->updateInput(event);
@@ -7208,15 +7228,6 @@ namespace tremor::gfx {
                     // Convert Vec3Q position to float
                     glm::vec3 floatPos = vertex.position.toFloat();
                     
-                    // Debug output for first few vertices
-                    if (i < 3) {
-                        //Logger::get().info("Vertex {} - Vec3Q: ({}, {}, {}) -> Float: ({:.6f}, {:.6f}, {:.6f})", 
-                        //    i, vertex.position.x, vertex.position.y, vertex.position.z,
-                        //    floatPos.x, floatPos.y, floatPos.z);
-                        //Logger::get().info("  Color: ({:.3f}, {:.3f}, {:.3f}, {:.3f})",
-                        //    vertex.color.x, vertex.color.y, vertex.color.z, vertex.color.w);
-                    }
-                    
                     // IMPORTANT: Pack data to match Taffy's OverlayVertex structure
                     // OverlayVertex layout:
                     // - position at offset 0 (Vec3Q = 24 bytes, stored as 6 floats)
@@ -7388,6 +7399,14 @@ namespace tremor::gfx {
         }
         catch (const std::exception& e) {
             //Logger::get().error("Exception in updateUniformBuffers: {}", e.what());
+        }
+    }
+
+    void VulkanBackend::setMainMenuVisible(bool visible) {
+        if (m_uiRenderer) {
+            m_uiRenderer->setElementVisible(m_toggleOverlayButtonId, visible);
+            m_uiRenderer->setElementVisible(m_modelEditorButtonId, visible);
+            m_uiRenderer->setElementVisible(m_exitButtonId, visible);
         }
     }
 

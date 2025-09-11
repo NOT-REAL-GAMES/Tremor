@@ -10,6 +10,11 @@ set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_C_STANDARD 23)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Ensure proper C++23 support
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_compile_options(-std=c++23)
+endif()
+
 # Add custom module path for finding packages
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
 message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
@@ -130,6 +135,16 @@ add_executable(Tremor
     renderer/sequencer_ui.cpp
     audio/taffy_audio_processor.cpp
     audio/taffy_polyphonic_processor.cpp
+    editor/model_editor.cpp
+    editor/model_editor_ui.cpp
+    editor/editor_viewport.cpp
+    editor/editor_tools.cpp
+    editor/editable_model.cpp
+    editor/grid_renderer.cpp
+    editor/gizmo_renderer.cpp
+    editor/model_editor_integration_impl.cpp
+    editor/model_editor_main_integration.cpp
+    editor/file_dialog.cpp
 )
 
 # Include directories
@@ -138,6 +153,7 @@ target_include_directories(Tremor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/renderer
     ${CMAKE_CURRENT_SOURCE_DIR}/taffy
     ${CMAKE_CURRENT_SOURCE_DIR}/audio
+    ${CMAKE_CURRENT_SOURCE_DIR}/editor
     ${TAFFY_INCLUDE_DIR}
     ${Vulkan_INCLUDE_DIRS}
     ${SDL2_INCLUDE_DIRS}

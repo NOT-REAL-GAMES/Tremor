@@ -440,11 +440,12 @@ namespace tremor::gfx {
         return buttonId;
     }
 
-    uint32_t UIRenderer::addLabel(const std::string& text, glm::vec2 position) {
+    uint32_t UIRenderer::addLabel(const std::string& text, glm::vec2 position, uint32_t color) {
         auto label = std::make_unique<UILabel>();
         label->id = m_nextElementId++;
         label->text = text;
         label->position = position;
+        label->textColor = color;
         label->size = glm::vec2(0, 0); // Labels don't have explicit size
         
         auto lb = label->id;
@@ -594,7 +595,9 @@ namespace tremor::gfx {
     }
 
     void UIRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& projection) {
+        //Logger::get().info("*** UIRenderer::render() instance {} called with {} elements ***", (void*)this, m_elements.size());
         if (m_elements.empty()) {
+            Logger::get().info("*** UIRenderer::render() instance {} - no elements to render ***", (void*)this);
             return;
         }
         

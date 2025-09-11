@@ -2681,7 +2681,7 @@ namespace tremor::audio {
             
             {
                 std::unique_lock<std::mutex> lock(loaderMutex_);
-                std::cout << "🔄 Background loader waiting, queue size: " << loadQueue_.size() << std::endl;
+                //std::cout << "🔄 Background loader waiting, queue size: " << loadQueue_.size() << std::endl;
                 
                 // Wait with timeout to prevent indefinite blocking
                 auto status = loaderCV_.wait_for(lock, std::chrono::seconds(5),

@@ -12,6 +12,8 @@
 
 namespace tremor::gfx {
 
+    class SDFTextRenderer;
+
     // UI Element types
     enum class UIElementType {
         Button,
@@ -95,7 +97,7 @@ namespace tremor::gfx {
         // Element management
         uint32_t addButton(const std::string& text, glm::vec2 position, glm::vec2 size,
                           std::function<void()> onClick = nullptr);
-        uint32_t addLabel(const std::string& text, glm::vec2 position);
+        uint32_t addLabel(const std::string& text, glm::vec2 position, uint32_t color = 0xFFFFFFFF);
         
         void removeElement(uint32_t id);
         void clearElements();

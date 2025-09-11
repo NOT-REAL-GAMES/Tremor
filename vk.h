@@ -26,6 +26,7 @@
 #include "renderer/taffy_mesh.h"
 #include "renderer/taffy_integration.h"
 #include "asset.h"
+#include "editor/model_editor_integration.h"
 
 // Define concepts for Vulkan types
 template<typename T>
@@ -78,6 +79,10 @@ inline void chainStructure(void** ppNext, T& structure) {
 // Helper function to copy buffer data - DECLARATION ONLY
 void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
     VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
+
+namespace tremor::editor{
+    class ModelEditorIntegration;
+}
 
 namespace tremor::gfx {
 
@@ -474,7 +479,7 @@ namespace tremor::gfx {
 
             VkRect2D scissor{};
             scissor.offset = { 0, 0 };
-            scissor.extent = { 800, 600 };  // Use your actual swapchain extent
+            scissor.extent = {  };  // Use your actual swapchain extent
 
             VkPipelineViewportStateCreateInfo viewport_state{};
             viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -759,6 +764,7 @@ namespace tremor::gfx {
         // Accessors
         VkDescriptorPool getDescriptorPool() const { return descriptorPool; }
         VkDescriptorSetLayout getMeshShaderDescriptorSetLayout() const { return meshShaderDescSetLayout; }
+        VkExtent2D getSwapchainExtent() const { return swapchain_extent_; }
 
     private:
         struct PipelineInfo {
@@ -2092,6 +2098,9 @@ namespace tremor::gfx {
         // Input handling
         void handleInput(const SDL_Event& event);
         
+        // UI control
+        void setMainMenuVisible(bool visible);
+        
         // Audio integration
         using SequencerCallback = std::function<void(int)>;
         void setSequencerCallback(SequencerCallback callback);
@@ -2109,6 +2118,9 @@ namespace tremor::gfx {
         VkDevice getDevice() const { return device; }
         VkPhysicalDevice getPhysicalDevice() const { return physicalDevice; }
         VkQueue getGraphicsQueue() const { return graphicsQueue; }
+        VkCommandBuffer getCurrentCommandBuffer() const { return m_commandBuffers[currentFrame]; }
+        VkExtent2D getSwapchainExtent() const { return vkSwapchain ? vkSwapchain->extent() : VkExtent2D{1920, 1080}; }
+        UIRenderer* getUIRenderer() const { return m_uiRenderer.get(); }
 
         std::unique_ptr<TaffyOverlayManager> m_overlayManager;
 
@@ -2168,6 +2180,12 @@ namespace tremor::gfx {
         std::unique_ptr<UIRenderer> m_uiRenderer;
         std::unique_ptr<SequencerUI> m_sequencerUI;
         SequencerCallback m_sequencerCallback;
+        std::unique_ptr<tremor::editor::ModelEditorIntegration> m_editorIntegration;
+        
+        // Main menu button IDs for visibility control
+        uint32_t m_toggleOverlayButtonId = 0;
+        uint32_t m_modelEditorButtonId = 0;
+        uint32_t m_exitButtonId = 0;
 
         // Camera
         Camera cam;
