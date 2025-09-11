@@ -24,6 +24,7 @@ namespace tremor::editor {
           m_scaleVertexBuffer(VK_NULL_HANDLE), m_scaleVertexBufferMemory(VK_NULL_HANDLE),
           m_indexBuffer(VK_NULL_HANDLE), m_indexBufferMemory(VK_NULL_HANDLE),
           m_uniformBuffer(VK_NULL_HANDLE), m_uniformBufferMemory(VK_NULL_HANDLE),
+          m_gizmoDescriptorSet(VK_NULL_HANDLE), m_gizmoUniformBuffer(VK_NULL_HANDLE), m_gizmoUniformBufferMemory(VK_NULL_HANDLE),
           m_vertexShader(VK_NULL_HANDLE), m_fragmentShader(VK_NULL_HANDLE),
           m_translationVertexCount(0), m_rotationVertexCount(0), m_scaleVertexCount(0),
           m_indexCount(0),
@@ -71,6 +72,12 @@ namespace tremor::editor {
             }
             if (m_uniformBufferMemory != VK_NULL_HANDLE) {
                 vkFreeMemory(m_device, m_uniformBufferMemory, nullptr);
+            }
+            if (m_gizmoUniformBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(m_device, m_gizmoUniformBuffer, nullptr);
+            }
+            if (m_gizmoUniformBufferMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(m_device, m_gizmoUniformBufferMemory, nullptr);
             }
             if (m_vertexMarkerBuffer != VK_NULL_HANDLE) {
                 vkDestroyBuffer(m_device, m_vertexMarkerBuffer, nullptr);
@@ -166,11 +173,11 @@ namespace tremor::editor {
                                    const glm::mat4& projMatrix, int activeAxis) {
         // Update uniform buffer
         glm::mat4 mvpMatrix = projMatrix * viewMatrix;
-        updateUniformBuffer(mvpMatrix, position);
+        updateGizmoUniformBuffer(mvpMatrix, position);
 
-        // Bind descriptor sets
+        // Bind gizmo descriptor set
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                               m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+                               m_pipelineLayout, 0, 1, &m_gizmoDescriptorSet, 0, nullptr);
 
         // Select appropriate vertex buffer and pipeline based on mode
         VkBuffer vertexBuffer = VK_NULL_HANDLE;
@@ -182,6 +189,13 @@ namespace tremor::editor {
                 vertexBuffer = m_translationVertexBuffer;
                 vertexCount = m_translationVertexCount;
                 pipeline = m_linePipeline; // Translation gizmo uses lines
+                /*
+                
+                Logger::get().info("GIZMO DEBUG: Translation mode - vertexBuffer={}, vertexCount={}", 
+                                 (void*)vertexBuffer, vertexCount);
+                
+                */
+                
                 break;
             case EditorMode::Rotate:
                 vertexBuffer = m_rotationVertexBuffer;
@@ -211,9 +225,11 @@ namespace tremor::editor {
 
         // Draw gizmo
         if (m_indexCount > 0) {
+            //Logger::get().info("GIZMO DEBUG: Drawing with indices - indexCount={}", m_indexCount);
             vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
         } else {
+            //Logger::get().info("GIZMO DEBUG: Drawing vertices - vertexCount={}", vertexCount);
             vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
         }
     }
@@ -479,7 +495,9 @@ namespace tremor::editor {
         
         // Project gizmo position to screen space
         glm::vec4 clipPos = projMatrix * viewMatrix * glm::vec4(gizmoPos, 1.0f);
-        if (clipPos.w <= 0.0f) return -1; // Behind camera
+        if (clipPos.w <= 0.0f) {
+            return -1; // Behind camera
+        }
         
         glm::vec3 ndcPos = glm::vec3(clipPos) / clipPos.w;
         glm::vec2 screenCenter = glm::vec2(
@@ -487,18 +505,29 @@ namespace tremor::editor {
             (1.0f - ndcPos.y) * 0.5f * viewport.y
         );
 
-        float hitTolerance = 10.0f; // Pixels
+        float hitTolerance = 60.0f; // Pixels - generous tolerance for easy gizmo interaction
 
+        int result = -1;
         switch (mode) {
             case EditorMode::Move:
-                return hitTestTranslationGizmo(screenPos, screenCenter, screenSize, hitTolerance);
+                result = hitTestTranslationGizmo(screenPos, screenCenter, screenSize, hitTolerance, 
+                                                 gizmoPos, viewMatrix, projMatrix, viewport);
+                break;
             case EditorMode::Rotate:
-                return hitTestRotationGizmo(screenPos, screenCenter, screenSize, hitTolerance);
+                result = hitTestRotationGizmo(screenPos, screenCenter, screenSize, hitTolerance);
+                break;
             case EditorMode::Scale:
-                return hitTestScaleGizmo(screenPos, screenCenter, screenSize, hitTolerance);
+                result = hitTestScaleGizmo(screenPos, screenCenter, screenSize, hitTolerance);
+                break;
             default:
-                return -1;
+                result = -1;
+                break;
         }
+        
+        if (result >= 0) {
+            Logger::get().info("Gizmo hit successful! Mode: {}, Axis: {}", (int)mode, result);
+        }
+        return result;
     }
 
     bool GizmoRenderer::createShaders() {
@@ -717,13 +746,13 @@ namespace tremor::editor {
 
         VkDescriptorPoolSize poolSize{};
         poolSize.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSize.descriptorCount = 1;
+        poolSize.descriptorCount = 2; // Two uniform buffers
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.poolSizeCount = 1;
         poolInfo.pPoolSizes = &poolSize;
-        poolInfo.maxSets = 1;
+        poolInfo.maxSets = 2; // Two descriptor sets
 
         if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
             Logger::get().error("Failed to create gizmo descriptor pool");
@@ -738,6 +767,12 @@ namespace tremor::editor {
 
         if (vkAllocateDescriptorSets(m_device, &allocInfo, &m_descriptorSet) != VK_SUCCESS) {
             Logger::get().error("Failed to allocate gizmo descriptor set");
+            return false;
+        }
+        
+        // Allocate second descriptor set for gizmo transforms
+        if (vkAllocateDescriptorSets(m_device, &allocInfo, &m_gizmoDescriptorSet) != VK_SUCCESS) {
+            Logger::get().error("Failed to allocate gizmo transform descriptor set");
             return false;
         }
 
@@ -838,6 +873,31 @@ namespace tremor::editor {
         descriptorWrite.pBufferInfo = &bufferInfo;
 
         vkUpdateDescriptorSets(m_device, 1, &descriptorWrite, 0, nullptr);
+        
+        // Create second uniform buffer for gizmo transforms
+        if (!createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         m_gizmoUniformBuffer, m_gizmoUniformBufferMemory)) {
+            Logger::get().error("Failed to create gizmo transform uniform buffer");
+            return false;
+        }
+        
+        // Update gizmo descriptor set
+        VkDescriptorBufferInfo gizmoBufferInfo{};
+        gizmoBufferInfo.buffer = m_gizmoUniformBuffer;
+        gizmoBufferInfo.offset = 0;
+        gizmoBufferInfo.range = bufferSize;
+        
+        VkWriteDescriptorSet gizmoDescriptorWrite{};
+        gizmoDescriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        gizmoDescriptorWrite.dstSet = m_gizmoDescriptorSet;
+        gizmoDescriptorWrite.dstBinding = 0;
+        gizmoDescriptorWrite.dstArrayElement = 0;
+        gizmoDescriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        gizmoDescriptorWrite.descriptorCount = 1;
+        gizmoDescriptorWrite.pBufferInfo = &gizmoBufferInfo;
+        
+        vkUpdateDescriptorSets(m_device, 1, &gizmoDescriptorWrite, 0, nullptr);
 
         return true;
     }
@@ -1009,41 +1069,78 @@ namespace tremor::editor {
         data.mvp = mvpMatrix;
         data.position = gizmoPos;
         data.padding = 0.0f;
+        
+        /*
+        
+        Logger::get().info("UNIFORM BUFFER DEBUG: gizmoPos=({:.3f}, {:.3f}, {:.3f})", 
+                          gizmoPos.x, gizmoPos.y, gizmoPos.z);
+        Logger::get().info("UNIFORM BUFFER DEBUG: data.position=({:.3f}, {:.3f}, {:.3f})", 
+                          data.position.x, data.position.y, data.position.z);
+        
+        */
 
         void* mappedData;
         vkMapMemory(m_device, m_uniformBufferMemory, 0, sizeof(data), 0, &mappedData);
         memcpy(mappedData, &data, sizeof(data));
         vkUnmapMemory(m_device, m_uniformBufferMemory);
     }
+    
+    void GizmoRenderer::updateGizmoUniformBuffer(const glm::mat4& mvpMatrix, const glm::vec3& gizmoPos) {
+        struct UniformData {
+            glm::mat4 mvp;
+            glm::vec3 position;
+            float padding; // Align to 16 bytes
+        };
+
+        UniformData data;
+        data.mvp = mvpMatrix;
+        data.position = gizmoPos;
+        data.padding = 0.0f;
+
+        void* mappedData;
+        vkMapMemory(m_device, m_gizmoUniformBufferMemory, 0, sizeof(data), 0, &mappedData);
+        memcpy(mappedData, &data, sizeof(data));
+        vkUnmapMemory(m_device, m_gizmoUniformBufferMemory);
+    }
 
     float GizmoRenderer::calculateScreenSpaceSize(const glm::vec3& worldPos, const glm::mat4& viewMatrix,
                                                  const glm::mat4& projMatrix, const glm::vec2& viewport) {
-        // Calculate distance from camera
-        glm::vec4 viewPos = viewMatrix * glm::vec4(worldPos, 1.0f);
-        float distance = -viewPos.z; // Distance in view space
-
-        // Calculate how much world space corresponds to a pixel
-        float fov = 45.0f; // Default FOV
-        float pixelSize = 2.0f * tan(glm::radians(fov) * 0.5f) * distance / viewport.y;
-        
-        // Return a size that maintains constant screen space size
-        return pixelSize * 100.0f; // 100 pixels in world space
+        // Return a fixed screen space size in pixels for gizmo elements
+        // This should be the length of gizmo arrows/handles in screen space
+        return 80.0f; // 80 pixels for gizmo elements
     }
 
     int GizmoRenderer::hitTestTranslationGizmo(const glm::vec2& screenPos, const glm::vec2& center,
-                                              float screenSize, float tolerance) {
-        // Test hit against three axis lines
-        glm::vec2 xEnd = center + glm::vec2(screenSize, 0.0f);
-        glm::vec2 yEnd = center + glm::vec2(0.0f, -screenSize); // Y is inverted in screen space
-        glm::vec2 zEnd = center + glm::vec2(screenSize * 0.7f, screenSize * 0.7f); // Diagonal for Z
+                                              float screenSize, float tolerance, const glm::vec3& gizmoPos,
+                                              const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                              const glm::vec2& viewport) {
+        // Generate mouse ray from screen position
+        Ray mouseRay = screenToWorldRay(screenPos, viewMatrix, projMatrix, viewport);
+        
+        // Define 3D arrow line segments (flip X and Z coordinates for ray casting)
+        float arrowLength = m_gizmoSize;
+        glm::vec3 xEnd = gizmoPos + glm::vec3(arrowLength, 0.0f, 0.0f);
+        glm::vec3 yEnd = gizmoPos + glm::vec3(0.0f, -arrowLength, 0.0f);
+        glm::vec3 zEnd = gizmoPos + glm::vec3(0.0f, 0.0f, arrowLength);
+        
+        // Convert pixel tolerance to world space tolerance
+        // Use screen-space tolerance scaled by distance to gizmo
+        float distanceToGizmo = glm::length(gizmoPos - glm::vec3(glm::inverse(viewMatrix)[3]));
+        float worldTolerance = (tolerance / 100.0f) * distanceToGizmo;
+        
+        // Test ray intersection with each axis line segment
+        float rayT, lineT;
+        float xDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, xEnd, rayT, lineT);
+        float yDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, yEnd, rayT, lineT);
+        float zDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, zEnd, rayT, lineT);
 
-        float xDist = distanceToLine(screenPos, center, xEnd);
-        float yDist = distanceToLine(screenPos, center, yEnd);
-        float zDist = distanceToLine(screenPos, center, zEnd);
-
+        // Find the closest axis
         float minDist = std::min({xDist, yDist, zDist});
-        if (minDist > tolerance) return -1;
+        if (minDist > worldTolerance) {
+            return -1;
+        }
 
+        // Return the correct axis (coordinates are already flipped in ray casting)
         if (minDist == xDist) return 0; // X axis
         if (minDist == yDist) return 1; // Y axis
         return 2; // Z axis
@@ -1068,7 +1165,22 @@ namespace tremor::editor {
         float centerDist = glm::length(screenPos - center);
         if (centerDist < tolerance) return 3; // Uniform scale
 
-        return hitTestTranslationGizmo(screenPos, center, screenSize, tolerance);
+        // TODO: Update this to use proper 3D projection like translation gizmo
+        // For now, use simplified approach for scale gizmo
+        glm::vec2 xEnd = center + glm::vec2(screenSize, 0.0f);
+        glm::vec2 yEnd = center + glm::vec2(0.0f, -screenSize);
+        glm::vec2 zEnd = center + glm::vec2(screenSize * 0.7f, screenSize * 0.7f);
+        
+        float xDist = distanceToLine(screenPos, center, xEnd);
+        float yDist = distanceToLine(screenPos, center, yEnd);
+        float zDist = distanceToLine(screenPos, center, zEnd);
+        
+        float minDist = std::min({xDist, yDist, zDist});
+        if (minDist > tolerance) return -1;
+        
+        if (xDist <= yDist && xDist <= zDist) return 0;
+        if (yDist <= zDist) return 1;
+        return 2;
     }
 
     float GizmoRenderer::distanceToLine(const glm::vec2& point, const glm::vec2& lineStart, 
@@ -1085,6 +1197,84 @@ namespace tremor::editor {
 
     bool GizmoRenderer::pointInCircle(const glm::vec2& point, const glm::vec2& center, float radius) {
         return glm::length(point - center) <= radius;
+    }
+    
+    // ================================================================================================
+    // Ray Casting Implementation
+    // ================================================================================================
+    
+    GizmoRenderer::Ray GizmoRenderer::screenToWorldRay(const glm::vec2& screenPos, const glm::mat4& viewMatrix, 
+                                                       const glm::mat4& projMatrix, const glm::vec2& viewport) {
+        // Convert screen coordinates to NDC
+        glm::vec2 ndc = glm::vec2(
+            (2.0f * screenPos.x) / viewport.x - 1.0f,
+            1.0f - (2.0f * screenPos.y) / viewport.y
+        );
+        
+        // Create points at near and far planes in NDC
+        glm::vec4 nearPoint = glm::vec4(ndc.x, ndc.y, -1.0f, 1.0f); // Near plane
+        glm::vec4 farPoint = glm::vec4(ndc.x, ndc.y, 1.0f, 1.0f);   // Far plane
+        
+        // Transform to world space
+        glm::mat4 invViewProj = glm::inverse(projMatrix * viewMatrix);
+        glm::vec4 worldNear = invViewProj * nearPoint;
+        glm::vec4 worldFar = invViewProj * farPoint;
+        
+        // Perspective divide
+        worldNear /= worldNear.w;
+        worldFar /= worldFar.w;
+        
+        // Create ray
+        Ray ray;
+        ray.origin = glm::vec3(worldNear);
+        ray.direction = glm::normalize(glm::vec3(worldFar) - glm::vec3(worldNear));
+        
+        return ray;
+    }
+    
+    float GizmoRenderer::distanceFromRayToLineSegment(const Ray& ray, const glm::vec3& lineStart, 
+                                                     const glm::vec3& lineEnd, float& rayT, float& lineT) {
+        // Implementation of ray-line segment distance calculation
+        // Based on "Real-Time Rendering" by Möller & Haines
+        
+        glm::vec3 lineDir = lineEnd - lineStart;
+        float lineLength = glm::length(lineDir);
+        if (lineLength < 0.001f) {
+            // Degenerate line, treat as point
+            glm::vec3 toPoint = lineStart - ray.origin;
+            rayT = glm::dot(toPoint, ray.direction);
+            lineT = 0.0f;
+            return glm::length(toPoint - rayT * ray.direction);
+        }
+        
+        lineDir = lineDir / lineLength; // normalize
+        
+        glm::vec3 w0 = ray.origin - lineStart;
+        float a = glm::dot(ray.direction, ray.direction);  // always >= 0
+        float b = glm::dot(ray.direction, lineDir);
+        float c = glm::dot(lineDir, lineDir);              // always >= 0
+        float d = glm::dot(ray.direction, w0);
+        float e = glm::dot(lineDir, w0);
+        
+        float denom = a * c - b * b;  // always >= 0
+        
+        if (denom < 0.001f) {
+            // Ray and line are parallel
+            rayT = 0.0f;
+            lineT = (b > c ? d / b : e / c);  // use the larger denominator
+        } else {
+            rayT = (b * e - c * d) / denom;
+            lineT = (a * e - b * d) / denom;
+        }
+        
+        // Clamp lineT to line segment bounds
+        lineT = std::clamp(lineT * lineLength, 0.0f, lineLength) / lineLength;
+        
+        // Calculate closest points
+        glm::vec3 rayPoint = ray.origin + rayT * ray.direction;
+        glm::vec3 linePoint = lineStart + lineT * lineDir * lineLength;
+        
+        return glm::length(rayPoint - linePoint);
     }
 
     bool GizmoRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,

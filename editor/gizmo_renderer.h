@@ -135,9 +135,14 @@ namespace tremor::editor {
         VkDeviceMemory m_indexBufferMemory;
         uint32_t m_indexCount;
 
-        // Uniform buffer for transforms
+        // Uniform buffer for transforms (vertex markers, triangles)
         VkBuffer m_uniformBuffer;
         VkDeviceMemory m_uniformBufferMemory;
+        
+        // Separate uniform buffer and descriptor set for gizmo transforms
+        VkDescriptorSet m_gizmoDescriptorSet;
+        VkBuffer m_gizmoUniformBuffer;
+        VkDeviceMemory m_gizmoUniformBufferMemory;
 
         // Shader modules
         VkShaderModule m_vertexShader;
@@ -165,15 +170,29 @@ namespace tremor::editor {
         void generateBox(std::vector<GizmoVertex>& vertices, std::vector<uint32_t>& indices,
                         const glm::vec3& position, float size, const glm::vec3& color,
                         uint32_t& vertexOffset);
+        
+        // Ray casting utilities
+        struct Ray {
+            glm::vec3 origin;
+            glm::vec3 direction; // normalized
+        };
+        
+        Ray screenToWorldRay(const glm::vec2& screenPos, const glm::mat4& viewMatrix, 
+                            const glm::mat4& projMatrix, const glm::vec2& viewport);
+        float distanceFromRayToLineSegment(const Ray& ray, const glm::vec3& lineStart, 
+                                          const glm::vec3& lineEnd, float& rayT, float& lineT);
 
         // Transform and rendering helpers
         void updateUniformBuffer(const glm::mat4& mvpMatrix, const glm::vec3& gizmoPos);
+        void updateGizmoUniformBuffer(const glm::mat4& mvpMatrix, const glm::vec3& gizmoPos);
         float calculateScreenSpaceSize(const glm::vec3& worldPos, const glm::mat4& viewMatrix,
                                       const glm::mat4& projMatrix, const glm::vec2& viewport);
 
         // Hit testing helpers
         int hitTestTranslationGizmo(const glm::vec2& screenPos, const glm::vec2& center,
-                                   float screenSize, float tolerance);
+                                   float screenSize, float tolerance, const glm::vec3& gizmoPos,
+                                   const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                   const glm::vec2& viewport);
         int hitTestRotationGizmo(const glm::vec2& screenPos, const glm::vec2& center,
                                 float screenSize, float tolerance);
         int hitTestScaleGizmo(const glm::vec2& screenPos, const glm::vec2& center,

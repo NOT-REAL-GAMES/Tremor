@@ -13,6 +13,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <algorithm>
 
 namespace tremor::gfx {
     class UIRenderer;
@@ -44,10 +45,32 @@ namespace tremor::editor {
         uint32_t meshId = UINT32_MAX;
         uint32_t vertexIndex = UINT32_MAX;
         uint32_t faceIndex = UINT32_MAX;
+        std::vector<uint32_t> customVertexIds;  // Multiple custom vertices for multi-selection
         bool hasMesh() const { return meshId != UINT32_MAX; }
         bool hasVertex() const { return vertexIndex != UINT32_MAX; }
         bool hasFace() const { return faceIndex != UINT32_MAX; }
-        void clear() { meshId = UINT32_MAX; vertexIndex = UINT32_MAX; faceIndex = UINT32_MAX; }
+        bool hasCustomVertices() const { return !customVertexIds.empty(); }
+        bool hasCustomVertex(uint32_t id) const { 
+            return std::find(customVertexIds.begin(), customVertexIds.end(), id) != customVertexIds.end();
+        }
+        void clear() { 
+            meshId = UINT32_MAX; 
+            vertexIndex = UINT32_MAX; 
+            faceIndex = UINT32_MAX; 
+            customVertexIds.clear();
+        }
+        void clearCustomVertices() { customVertexIds.clear(); }
+        void addCustomVertex(uint32_t id) {
+            if (!hasCustomVertex(id)) {
+                customVertexIds.push_back(id);
+            }
+        }
+        void removeCustomVertex(uint32_t id) {
+            auto it = std::find(customVertexIds.begin(), customVertexIds.end(), id);
+            if (it != customVertexIds.end()) {
+                customVertexIds.erase(it);
+            }
+        }
     };
 
     /**
@@ -83,6 +106,7 @@ namespace tremor::editor {
         void clearSelection();
         bool selectMesh(const glm::vec2& screenPos);
         bool selectVertex(const glm::vec2& screenPos);
+        bool selectCustomVertex(const glm::vec2& screenPos);
 
         // Mesh creation
         void addVertexAtScreenPosition(const glm::vec2& screenPos);
@@ -154,6 +178,7 @@ namespace tremor::editor {
         void updateViewport(float deltaTime);
         void updateUI();
         void markModelChanged();
+        void updateGizmoPosition(); // Update gizmo position based on current selection
         bool isViewportHovered(const glm::vec2& mousePos) const;
         glm::vec3 screenToWorld(const glm::vec2& screenPos, float depth = 0.0f) const;
         bool screenToWorldRay(const glm::vec2& screenPos, glm::vec3& rayOrigin, glm::vec3& rayDirection) const;
@@ -289,6 +314,8 @@ namespace tremor::editor {
         const std::vector<CustomVertex>& getCustomVertices() const { return m_customVertices; }
         const std::vector<CustomTriangle>& getCustomTriangles() const { return m_customTriangles; }
         bool getCustomVertexPosition(uint32_t vertexId, glm::vec3& position) const;
+        bool updateCustomVertexPosition(uint32_t vertexId, const glm::vec3& newPosition);
+        void transformCustomVertices(const std::vector<uint32_t>& vertexIds, const glm::mat4& transform);
         uint32_t findCustomVertexAt(const glm::vec3& position, float tolerance = 0.1f) const;
 
         // Upload to renderer
@@ -326,7 +353,14 @@ namespace tremor::editor {
 
         // Gizmo interaction
         bool handleMouseInput(const glm::vec2& mousePos, bool pressed, 
-                             const glm::mat4& viewMatrix, const glm::mat4& projMatrix);
+                             const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                             const glm::vec2& viewport);
+        
+        // Update gizmo position (call this when vertices move)
+        void updateGizmoPosition(const glm::vec3& position);
+        
+        // Get current gizmo position
+        glm::vec3 getGizmoPosition() const { return m_gizmoPosition; }
         
         // Gizmo rendering
         void renderGizmo(VkCommandBuffer commandBuffer, const glm::vec3& position,

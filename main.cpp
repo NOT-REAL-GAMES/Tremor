@@ -583,7 +583,7 @@ public:
             
             // Handle keyboard input for waveform switching
             if (event.type == SDL_KEYDOWN) {
-                switch (event.key.keysym.sym) {
+                /*switch (event.key.keysym.sym) {
                     case SDLK_1:
                         switchWaveform(0); // Sine
                         break;
@@ -699,7 +699,7 @@ public:
                         Logger::get().info("🎵 Loading waveform {} (chunked TAF)...", currentWaveform);
                         switchWaveform(currentWaveform);
                         break;
-                }
+                }*/
             }
         }
 

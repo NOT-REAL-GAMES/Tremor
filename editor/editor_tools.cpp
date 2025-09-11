@@ -34,16 +34,22 @@ namespace tremor::editor {
     }
 
     bool EditorTools::handleMouseInput(const glm::vec2& mousePos, bool pressed, 
-                                      const glm::mat4& viewMatrix, const glm::mat4& projMatrix) {
+                                      const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                      const glm::vec2& viewport) {
         if (pressed) {
             // Start interaction
             if (m_gizmoRenderer) {
-                glm::vec2 viewport(1920, 1080); // TODO: Get actual viewport size
+                // Only log when we actually hit something
+                // Logger::get().info("Testing gizmo hit...");
+                
                 m_activeAxis = m_gizmoRenderer->hitTest(m_currentMode, mousePos, m_gizmoPosition, 
                                                        viewMatrix, projMatrix, viewport);
+                // Hit test logging handled in GizmoRenderer
+                
                 if (m_activeAxis >= 0) {
                     m_isInteracting = true;
                     m_interactionStart = mousePos;
+                    Logger::get().info("Started gizmo interaction on axis {}", m_activeAxis);
                     return true;
                 }
             }
@@ -52,6 +58,7 @@ namespace tremor::editor {
             if (m_isInteracting) {
                 m_isInteracting = false;
                 m_activeAxis = -1;
+                Logger::get().info("Ended gizmo interaction");
                 return true;
             }
         }
@@ -62,10 +69,27 @@ namespace tremor::editor {
     void EditorTools::renderGizmo(VkCommandBuffer commandBuffer, const glm::vec3& position,
                                  const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
                                  const glm::vec2& viewport) {
-        m_gizmoPosition = position;
-
+        // Use the stored position instead of overwriting it
+        glm::vec3 renderPos = m_gizmoPosition;
+        
+        /*
+        
+        Logger::get().info("EditorTools::renderGizmo - stored position: ({:.2f}, {:.2f}, {:.2f}), passed position: ({:.2f}, {:.2f}, {:.2f})",
+                         m_gizmoPosition.x, m_gizmoPosition.y, m_gizmoPosition.z,
+                         position.x, position.y, position.z);
+        
+        */
+        
         if (m_gizmoRenderer && m_currentMode != EditorMode::Select) {
-            m_gizmoRenderer->renderGizmo(commandBuffer, m_currentMode, position, 
+            
+            /*
+            
+            Logger::get().info("Actually rendering gizmo at: ({:.2f}, {:.2f}, {:.2f})", 
+                             renderPos.x, renderPos.y, renderPos.z);
+            
+            */
+            
+            m_gizmoRenderer->renderGizmo(commandBuffer, m_currentMode, renderPos, 
                                        viewMatrix, projMatrix, m_activeAxis);
         }
     }
@@ -73,12 +97,17 @@ namespace tremor::editor {
     glm::vec3 EditorTools::calculateTranslation(const glm::vec2& mouseDelta, 
                                                const glm::mat4& viewMatrix, const glm::mat4& projMatrix) {
         if (!m_isInteracting || m_activeAxis < 0) {
+            Logger::get().info("calculateTranslation: not interacting (interacting={}, axis={})", 
+                             m_isInteracting, m_activeAxis);
             return glm::vec3(0.0f);
         }
 
         // Convert mouse delta to world space movement along the active axis
         float sensitivity = 0.01f;
         glm::vec3 movement(0.0f);
+        
+        Logger::get().info("calculateTranslation: mouseDelta=({:.1f}, {:.1f}), activeAxis={}", 
+                         mouseDelta.x, mouseDelta.y, m_activeAxis);
         
         switch (m_activeAxis) {
             case 0: // X axis
@@ -92,7 +121,13 @@ namespace tremor::editor {
                 break;
         }
 
+        Logger::get().info("calculateTranslation: resulting movement=({:.3f}, {:.3f}, {:.3f})", 
+                         movement.x, movement.y, movement.z);
         return movement;
+    }
+
+    void EditorTools::updateGizmoPosition(const glm::vec3& position) {
+        m_gizmoPosition = position;
     }
 
     glm::vec3 EditorTools::calculateRotation(const glm::vec2& mouseDelta) {

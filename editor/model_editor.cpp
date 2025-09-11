@@ -102,12 +102,18 @@ namespace tremor::editor {
         }
 
         // Render gizmos if we have a selection
-        if (m_selection.hasMesh() && m_tools && m_currentMode != EditorMode::Select) {
-            glm::vec3 gizmoPos(0.0f); // TODO: Get actual selection position
-            m_tools->renderGizmo(commandBuffer, gizmoPos, 
-                               m_viewport->getViewMatrix(), 
-                               m_viewport->getProjectionMatrix(),
-                               m_viewportSize);
+        if (m_tools && (m_currentMode == EditorMode::Move || m_currentMode == EditorMode::Rotate || m_currentMode == EditorMode::Scale)) {
+            bool hasSelection = m_selection.hasCustomVertices() || m_selection.hasMesh();
+            
+            if (hasSelection) {
+                // Use the stored gizmo position from EditorTools (updated by updateGizmoPosition)
+                glm::vec3 gizmoPos = m_tools->getGizmoPosition();
+                
+                m_tools->renderGizmo(commandBuffer, gizmoPos, 
+                                   m_viewport->getViewMatrix(), 
+                                   m_viewport->getProjectionMatrix(),
+                                   m_viewportSize);
+            }
         }
 
         // Render vertex markers for custom vertices
@@ -120,9 +126,15 @@ namespace tremor::editor {
                 positions.reserve(customVertices.size());
                 
                 for (const auto& vertex : customVertices) {
-                    bool isSelected = std::find(m_selectedVerticesForTriangle.begin(), 
-                                              m_selectedVerticesForTriangle.end(), 
-                                              vertex.id) != m_selectedVerticesForTriangle.end();
+                    // Check if vertex is selected for triangle creation
+                    bool isSelectedForTriangle = std::find(m_selectedVerticesForTriangle.begin(), 
+                                                          m_selectedVerticesForTriangle.end(), 
+                                                          vertex.id) != m_selectedVerticesForTriangle.end();
+                    
+                    // Check if vertex is selected for transform operations (move/rotate/scale)
+                    bool isSelectedForTransform = m_selection.hasCustomVertex(vertex.id);
+                    
+                    bool isSelected = isSelectedForTriangle || isSelectedForTransform;
                     
                     if (isSelected) {
                         selectedPositions.push_back(vertex.position);
@@ -200,12 +212,18 @@ namespace tremor::editor {
         if (event.type == SDL_MOUSEBUTTONDOWN) {
             if (event.button.button == SDL_BUTTON_LEFT) {
                 glm::vec2 mousePos(event.button.x, event.button.y);
+                Logger::get().info("Mouse click at ({:.1f}, {:.1f})", mousePos.x, mousePos.y);
                 
                 if (isViewportHovered(mousePos)) {
+                    Logger::get().info("Click is in viewport - mode: {}, has selection: {}", 
+                                     (int)m_currentMode, (m_selection.hasMesh() || m_selection.hasCustomVertices()));
                     if (m_currentMode == EditorMode::Select) {
                         // Selection
                         if (SDL_GetModState() & KMOD_SHIFT) {
-                            selectVertex(mousePos);
+                            // Try to select custom vertex first, then regular mesh vertex
+                            if (!selectCustomVertex(mousePos)) {
+                                selectVertex(mousePos);
+                            }
                         } else {
                             selectMesh(mousePos);
                         }
@@ -216,15 +234,70 @@ namespace tremor::editor {
                         // Select vertex for triangle creation
                         selectVertexForTriangle(mousePos);
                     } else {
-                        // Tool interaction
-                        if (m_tools && m_selection.hasMesh()) {
-                            m_tools->handleMouseInput(mousePos, true,
+                        // Tool interaction for gizmos
+                        if (m_tools && (m_selection.hasMesh() || m_selection.hasCustomVertices())) {
+                            bool hitGizmo = m_tools->handleMouseInput(mousePos, true,
                                                     m_viewport->getViewMatrix(),
-                                                    m_viewport->getProjectionMatrix());
+                                                    m_viewport->getProjectionMatrix(),
+                                                    m_viewportSize);
+                            if (hitGizmo) {
+                                m_isDragging = true;
+                                m_lastMousePos = mousePos;
+                            }
                         }
                     }
                 }
             }
+        }
+        
+        // Mouse button release - for gizmo dragging
+        if (event.type == SDL_MOUSEBUTTONUP) {
+            if (event.button.button == SDL_BUTTON_LEFT) {
+                if (m_tools && (m_selection.hasMesh() || m_selection.hasCustomVertices())) {
+                    glm::vec2 mousePos(event.button.x, event.button.y);
+                    m_tools->handleMouseInput(mousePos, false,
+                                            m_viewport->getViewMatrix(),
+                                            m_viewport->getProjectionMatrix(),
+                                            m_viewportSize);
+                    m_isDragging = false;
+                }
+            }
+        }
+        
+        // Mouse motion - for gizmo dragging
+        if (event.type == SDL_MOUSEMOTION) {
+            glm::vec2 mousePos(event.motion.x, event.motion.y);
+            
+            // If we're dragging a gizmo, update the transform
+            if (m_isDragging && m_tools && (m_selection.hasMesh() || m_selection.hasCustomVertices())) {
+                glm::vec2 mouseDelta = mousePos - m_lastMousePos;
+                Logger::get().info("Mouse dragging with delta ({:.1f}, {:.1f})", mouseDelta.x, mouseDelta.y);
+                
+                // Calculate transform based on current mode and gizmo interaction
+                glm::vec3 delta = m_tools->calculateTranslation(mouseDelta,
+                                                               m_viewport->getViewMatrix(),
+                                                               m_viewport->getProjectionMatrix());
+                
+                if (m_currentMode == EditorMode::Move) {
+                    Logger::get().info("Applying translation: ({:.3f}, {:.3f}, {:.3f})", delta.x, delta.y, delta.z);
+                    translateSelection(delta);
+                    updateGizmoPosition(); // Update gizmo position after transform
+                } else if (m_currentMode == EditorMode::Rotate) {
+                    glm::vec3 rotation = m_tools->calculateRotation(mouseDelta);
+                    if (glm::length(rotation) > 0.0f) {
+                        Logger::get().info("Applying rotation");
+                        rotateSelection(glm::normalize(rotation), glm::length(rotation));
+                        updateGizmoPosition(); // Update gizmo position after transform
+                    }
+                } else if (m_currentMode == EditorMode::Scale) {
+                    glm::vec3 scale = m_tools->calculateScale(mouseDelta);
+                    Logger::get().info("Applying scale");
+                    scaleSelection(glm::vec3(1.0f) + scale);
+                    updateGizmoPosition(); // Update gizmo position after transform
+                }
+            }
+            
+            m_lastMousePos = mousePos;
         }
 
         // Keyboard shortcuts
@@ -342,6 +415,11 @@ namespace tremor::editor {
             
             if (m_tools) {
                 m_tools->setMode(mode);
+            }
+            
+            // Update gizmo position when switching to transform modes
+            if (mode == EditorMode::Move || mode == EditorMode::Rotate || mode == EditorMode::Scale) {
+                updateGizmoPosition();
             }
 
             if (m_ui) {
@@ -470,10 +548,94 @@ namespace tremor::editor {
         return false;
     }
 
+    bool ModelEditor::selectCustomVertex(const glm::vec2& screenPos) {
+        if (!m_model || !m_viewport) {
+            Logger::get().warning("Cannot select custom vertex: model or viewport not available");
+            return false;
+        }
+        // Convert screen position to world ray
+        glm::vec3 rayOrigin, rayDirection;
+        if (!screenToWorldRay(screenPos, rayOrigin, rayDirection)) {
+            Logger::get().error("Failed to calculate world ray from screen position");
+            return false;
+        }
+        // Find closest custom vertex to the ray
+        const auto& vertices = m_model->getCustomVertices();
+        uint32_t closestVertexId = 0;
+        float closestDistance = std::numeric_limits<float>::max();
+        
+        for (const auto& vertex : vertices) {
+            // Calculate distance from ray to vertex
+            glm::vec3 toVertex = vertex.position - rayOrigin;
+            float projectionLength = glm::dot(toVertex, rayDirection);
+            
+            // Only consider vertices in front of the camera
+            if (projectionLength > 0.0f) {
+                glm::vec3 projectedPoint = rayOrigin + rayDirection * projectionLength;
+                float distance = glm::length(vertex.position - projectedPoint);
+                
+                if (distance < closestDistance && distance < m_vertexSelectionRadius) {
+                    closestDistance = distance;
+                    closestVertexId = vertex.id;
+                }
+            }
+        }
+        
+        if (closestVertexId != 0) {
+            // Check if Ctrl is held for multi-selection
+            bool addToSelection = SDL_GetModState() & KMOD_CTRL;
+            
+            if (!addToSelection) {
+                // Clear existing selection if not adding
+                m_selection.clearCustomVertices();
+                m_selection.meshId = UINT32_MAX;
+                m_selection.vertexIndex = UINT32_MAX;
+                m_selection.faceIndex = UINT32_MAX;
+            }
+            
+            // Toggle selection of this vertex
+            if (m_selection.hasCustomVertex(closestVertexId)) {
+                m_selection.removeCustomVertex(closestVertexId);
+                Logger::get().info("Deselected custom vertex {}", closestVertexId);
+            } else {
+                m_selection.addCustomVertex(closestVertexId);
+                Logger::get().info("Selected custom vertex {} ({} total selected)", 
+                                 closestVertexId, m_selection.customVertexIds.size());
+            }
+            
+            // Update gizmo position when selection changes
+            updateGizmoPosition();
+            
+            if (m_ui) {
+                m_ui->onSelectionChanged(m_selection);
+            }
+            if (m_selectionChangedCallback) {
+                m_selectionChangedCallback();
+            }
+            return true;
+        } else {
+            Logger::get().info("No custom vertex found within selection radius at screen pos ({}, {})", 
+                             screenPos.x, screenPos.y);
+            return false;
+        }
+    }
+
     void ModelEditor::translateSelection(const glm::vec3& delta) {
-        if (!m_model || !m_selection.hasMesh()) return;
+        if (!m_model) return;
 
         Logger::get().info("Translating selection by: ({}, {}, {})", delta.x, delta.y, delta.z);
+        
+        // Handle custom vertex selection
+        if (m_selection.hasCustomVertices()) {
+            // Transform all selected custom vertices
+            glm::mat4 transform = glm::translate(glm::mat4(1.0f), delta);
+            m_model->transformCustomVertices(m_selection.customVertexIds, transform);
+            markModelChanged();
+            return;
+        }
+        
+        // Handle mesh vertex/mesh selection
+        if (!m_selection.hasMesh()) return;
         
         glm::mat4 transform = glm::translate(glm::mat4(1.0f), delta);
         
@@ -490,10 +652,37 @@ namespace tremor::editor {
     }
 
     void ModelEditor::rotateSelection(const glm::vec3& axis, float angle) {
-        if (!m_model || !m_selection.hasMesh()) return;
+        if (!m_model) return;
 
         Logger::get().info("Rotating selection by {} degrees around axis ({}, {}, {})", 
                          glm::degrees(angle), axis.x, axis.y, axis.z);
+        
+        // Handle custom vertex selection
+        if (m_selection.hasCustomVertices()) {
+            // Calculate center of selected vertices for rotation pivot
+            glm::vec3 center(0.0f);
+            int count = 0;
+            const auto& vertices = m_model->getCustomVertices();
+            for (const auto& vertex : vertices) {
+                if (m_selection.hasCustomVertex(vertex.id)) {
+                    center += vertex.position;
+                    count++;
+                }
+            }
+            if (count > 0) {
+                center /= static_cast<float>(count);
+                // Rotate around center
+                glm::mat4 transform = glm::translate(glm::mat4(1.0f), center);
+                transform = glm::rotate(transform, angle, axis);
+                transform = glm::translate(transform, -center);
+                m_model->transformCustomVertices(m_selection.customVertexIds, transform);
+                markModelChanged();
+            }
+            return;
+        }
+        
+        // Handle mesh vertex/mesh selection
+        if (!m_selection.hasMesh()) return;
 
         glm::mat4 transform = glm::rotate(glm::mat4(1.0f), angle, axis);
         
@@ -510,9 +699,36 @@ namespace tremor::editor {
     }
 
     void ModelEditor::scaleSelection(const glm::vec3& scale) {
-        if (!m_model || !m_selection.hasMesh()) return;
+        if (!m_model) return;
 
         Logger::get().info("Scaling selection by: ({}, {}, {})", scale.x, scale.y, scale.z);
+        
+        // Handle custom vertex selection
+        if (m_selection.hasCustomVertices()) {
+            // Calculate center of selected vertices for scale pivot
+            glm::vec3 center(0.0f);
+            int count = 0;
+            const auto& vertices = m_model->getCustomVertices();
+            for (const auto& vertex : vertices) {
+                if (m_selection.hasCustomVertex(vertex.id)) {
+                    center += vertex.position;
+                    count++;
+                }
+            }
+            if (count > 0) {
+                center /= static_cast<float>(count);
+                // Scale from center
+                glm::mat4 transform = glm::translate(glm::mat4(1.0f), center);
+                transform = glm::scale(transform, scale);
+                transform = glm::translate(transform, -center);
+                m_model->transformCustomVertices(m_selection.customVertexIds, transform);
+                markModelChanged();
+            }
+            return;
+        }
+        
+        // Handle mesh vertex/mesh selection
+        if (!m_selection.hasMesh()) return;
 
         glm::mat4 transform = glm::scale(glm::mat4(1.0f), scale);
         
@@ -567,6 +783,53 @@ namespace tremor::editor {
         // TODO: Implement proper viewport bounds checking
         // For now, assume viewport covers most of the screen except UI panels
         return mousePos.x > 220.0f; // Leave space for UI panels
+    }
+
+    void ModelEditor::updateGizmoPosition() {
+        if (!m_tools || !m_model) {
+            Logger::get().info("updateGizmoPosition: tools or model is null");
+            return;
+        }
+        
+        Logger::get().info("updateGizmoPosition: called with {} selected vertices", 
+                         m_selection.customVertexIds.size());
+        
+        // Recalculate gizmo position based on current selection
+        glm::vec3 gizmoPos(0.0f);
+        bool hasSelection = false;
+        
+        if (m_selection.hasCustomVertices()) {
+            const auto& vertices = m_model->getCustomVertices();
+            int count = 0;
+            Logger::get().info("Total vertices in model: {}", vertices.size());
+            
+            for (const auto& vertex : vertices) {
+                if (m_selection.hasCustomVertex(vertex.id)) {
+                    Logger::get().info("Adding vertex {} at ({:.2f}, {:.2f}, {:.2f}) to gizmo calculation", 
+                                     vertex.id, vertex.position.x, vertex.position.y, vertex.position.z);
+                    gizmoPos += vertex.position;
+                    count++;
+                }
+            }
+            if (count > 0) {
+                gizmoPos /= static_cast<float>(count);
+                hasSelection = true;
+                Logger::get().info("Calculated average position: ({:.2f}, {:.2f}, {:.2f}) from {} vertices", 
+                                 gizmoPos.x, gizmoPos.y, gizmoPos.z, count);
+            } else {
+                Logger::get().info("Count is 0 - no matching vertices found!");
+            }
+        } else {
+            Logger::get().info("No custom vertices selected");
+        }
+        
+        if (hasSelection) {
+            m_tools->updateGizmoPosition(gizmoPos);
+            Logger::get().info("Updated gizmo position to ({:.2f}, {:.2f}, {:.2f})", 
+                             gizmoPos.x, gizmoPos.y, gizmoPos.z);
+        } else {
+            Logger::get().info("No selection found for gizmo position update");
+        }
     }
 
     glm::vec3 ModelEditor::screenToWorld(const glm::vec2& screenPos, float depth) const {

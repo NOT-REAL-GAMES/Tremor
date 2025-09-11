@@ -383,6 +383,55 @@ namespace tremor::editor {
         return false;
     }
 
+    bool EditableModel::updateCustomVertexPosition(uint32_t vertexId, const glm::vec3& newPosition) {
+        auto it = std::find_if(m_customVertices.begin(), m_customVertices.end(),
+                               [vertexId](const CustomVertex& v) { return v.id == vertexId; });
+        
+        if (it != m_customVertices.end()) {
+            it->position = newPosition;
+            markDirty();
+            Logger::get().info("Updated custom vertex {} position to ({:.2f}, {:.2f}, {:.2f})",
+                             vertexId, newPosition.x, newPosition.y, newPosition.z);
+            return true;
+        }
+        
+        return false;
+    }
+
+    void EditableModel::transformCustomVertices(const std::vector<uint32_t>& vertexIds, const glm::mat4& transform) {
+        Logger::get().info("transformCustomVertices called with {} vertex IDs", vertexIds.size());
+        
+        int transformedCount = 0;
+        for (auto& vertex : m_customVertices) {
+            // Check if this vertex is in the selection
+            if (std::find(vertexIds.begin(), vertexIds.end(), vertex.id) != vertexIds.end()) {
+                // Store old position for logging
+                glm::vec3 oldPos = vertex.position;
+                
+                // Transform the position
+                glm::vec4 pos(vertex.position, 1.0f);
+                pos = transform * pos;
+                vertex.position = glm::vec3(pos);
+                
+                Logger::get().info("Vertex {} transformed: ({:.3f}, {:.3f}, {:.3f}) -> ({:.3f}, {:.3f}, {:.3f})", 
+                                 vertex.id, oldPos.x, oldPos.y, oldPos.z, 
+                                 vertex.position.x, vertex.position.y, vertex.position.z);
+                
+                // Transform the normal (rotation only, no translation)
+                glm::mat3 normalMatrix = glm::mat3(transform);
+                vertex.normal = glm::normalize(normalMatrix * vertex.normal);
+                transformedCount++;
+            }
+        }
+        
+        if (transformedCount > 0) {
+            markDirty();
+            Logger::get().info("Transformed {} custom vertices", transformedCount);
+        } else {
+            Logger::get().warning("No vertices were transformed!");
+        }
+    }
+
     uint32_t EditableModel::findCustomVertexAt(const glm::vec3& position, float tolerance) const {
         for (const auto& vertex : m_customVertices) {
             glm::vec3 diff = vertex.position - position;
