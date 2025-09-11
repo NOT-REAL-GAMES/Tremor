@@ -138,18 +138,18 @@ namespace tremor::editor {
                         m_viewport->getViewMatrix(), 
                         m_viewport->getProjectionMatrix(),
                         glm::vec3(1.0f, 1.0f, 0.0f), // Yellow color
-                        0.15f // Size
+                        0.5f // Larger size for better visibility
                     );
                 }
 
-                // Render selected vertex markers in red
+                // Render selected vertex markers in red using separate buffer
                 if (!selectedPositions.empty()) {
-                    m_tools->getGizmoRenderer()->renderVertexMarkers(
+                    m_tools->getGizmoRenderer()->renderSelectedVertexMarkers(
                         commandBuffer, selectedPositions,
                         m_viewport->getViewMatrix(), 
                         m_viewport->getProjectionMatrix(),
                         glm::vec3(1.0f, 0.3f, 0.3f), // Red color for selected
-                        0.2f // Slightly larger size for selected
+                        0.6f // Larger size for better visibility of selected vertices
                     );
                 }
 

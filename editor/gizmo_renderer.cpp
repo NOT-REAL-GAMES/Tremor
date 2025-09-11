@@ -28,7 +28,15 @@ namespace tremor::editor {
           m_translationVertexCount(0), m_rotationVertexCount(0), m_scaleVertexCount(0),
           m_indexCount(0),
           m_vertexMarkerBuffer(VK_NULL_HANDLE), m_vertexMarkerBufferMemory(VK_NULL_HANDLE),
-          m_vertexMarkerCapacity(0), m_vertexMarkerCount(0) {
+          m_vertexMarkerCapacity(0), m_vertexMarkerCount(0),
+          m_vertexMarkerIndexBuffer(VK_NULL_HANDLE), m_vertexMarkerIndexBufferMemory(VK_NULL_HANDLE),
+          m_vertexMarkerIndexCapacity(0), m_vertexMarkerIndexCount(0),
+          m_triangleEdgeBuffer(VK_NULL_HANDLE), m_triangleEdgeBufferMemory(VK_NULL_HANDLE),
+          m_triangleEdgeCapacity(0), m_triangleEdgeCount(0),
+          m_selectedVertexMarkerBuffer(VK_NULL_HANDLE), m_selectedVertexMarkerBufferMemory(VK_NULL_HANDLE),
+          m_selectedVertexMarkerCapacity(0), m_selectedVertexMarkerCount(0),
+          m_selectedVertexMarkerIndexBuffer(VK_NULL_HANDLE), m_selectedVertexMarkerIndexBufferMemory(VK_NULL_HANDLE),
+          m_selectedVertexMarkerIndexCapacity(0), m_selectedVertexMarkerIndexCount(0) {
     }
 
     GizmoRenderer::~GizmoRenderer() {
@@ -69,6 +77,30 @@ namespace tremor::editor {
             }
             if (m_vertexMarkerBufferMemory != VK_NULL_HANDLE) {
                 vkFreeMemory(m_device, m_vertexMarkerBufferMemory, nullptr);
+            }
+            if (m_vertexMarkerIndexBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(m_device, m_vertexMarkerIndexBuffer, nullptr);
+            }
+            if (m_vertexMarkerIndexBufferMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(m_device, m_vertexMarkerIndexBufferMemory, nullptr);
+            }
+            if (m_triangleEdgeBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(m_device, m_triangleEdgeBuffer, nullptr);
+            }
+            if (m_triangleEdgeBufferMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(m_device, m_triangleEdgeBufferMemory, nullptr);
+            }
+            if (m_selectedVertexMarkerBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(m_device, m_selectedVertexMarkerBuffer, nullptr);
+            }
+            if (m_selectedVertexMarkerBufferMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(m_device, m_selectedVertexMarkerBufferMemory, nullptr);
+            }
+            if (m_selectedVertexMarkerIndexBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(m_device, m_selectedVertexMarkerIndexBuffer, nullptr);
+            }
+            if (m_selectedVertexMarkerIndexBufferMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(m_device, m_selectedVertexMarkerIndexBufferMemory, nullptr);
             }
             if (m_descriptorPool != VK_NULL_HANDLE) {
                 vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
@@ -248,25 +280,130 @@ namespace tremor::editor {
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-        // Draw all vertex markers as lines (wireframe boxes)
+        // Create/update dedicated index buffer for vertex markers
         if (!indices.empty()) {
-            // Create/update index buffer if needed
-            if (m_indexBuffer != VK_NULL_HANDLE) {
-                // Update index buffer with marker indices
-                void* indexData;
-                VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
-                vkMapMemory(m_device, m_indexBufferMemory, 0, indexSize, 0, &indexData);
-                memcpy(indexData, indices.data(), indexSize);
-                vkUnmapMemory(m_device, m_indexBufferMemory);
+            // Check if we need to recreate the index buffer
+            if (m_vertexMarkerIndexBuffer == VK_NULL_HANDLE || indices.size() > m_vertexMarkerIndexCapacity) {
+                // Clean up old buffer if it exists
+                if (m_vertexMarkerIndexBuffer != VK_NULL_HANDLE) {
+                    vkDestroyBuffer(m_device, m_vertexMarkerIndexBuffer, nullptr);
+                    vkFreeMemory(m_device, m_vertexMarkerIndexBufferMemory, nullptr);
+                }
 
-                vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(commandBuffer, indices.size(), 1, 0, 0, 0);
-            } else {
-                // Fallback to drawing without indices
-                vkCmdDraw(commandBuffer, m_vertexMarkerCount, 1, 0, 0);
+                // Create new index buffer with extra capacity
+                m_vertexMarkerIndexCapacity = indices.size() * 2;
+                VkDeviceSize bufferSize = sizeof(uint32_t) * m_vertexMarkerIndexCapacity;
+                
+                if (!createBuffer(bufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                m_vertexMarkerIndexBuffer, m_vertexMarkerIndexBufferMemory)) {
+                    Logger::get().error("Failed to create vertex marker index buffer");
+                    return;
+                }
             }
+
+            // Update index buffer with marker indices
+            void* indexData;
+            VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
+            vkMapMemory(m_device, m_vertexMarkerIndexBufferMemory, 0, indexSize, 0, &indexData);
+            memcpy(indexData, indices.data(), indexSize);
+            vkUnmapMemory(m_device, m_vertexMarkerIndexBufferMemory);
+
+            m_vertexMarkerIndexCount = indices.size();
+
+            // Draw with dedicated index buffer
+            vkCmdBindIndexBuffer(commandBuffer, m_vertexMarkerIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(commandBuffer, m_vertexMarkerIndexCount, 1, 0, 0, 0);
         } else {
+            // Fallback to drawing without indices
             vkCmdDraw(commandBuffer, m_vertexMarkerCount, 1, 0, 0);
+        }
+    }
+
+    void GizmoRenderer::renderSelectedVertexMarkers(VkCommandBuffer commandBuffer, 
+                                                   const std::vector<glm::vec3>& positions,
+                                                   const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                                   const glm::vec3& color, float size) {
+        if (positions.empty() || m_linePipeline == VK_NULL_HANDLE) {
+            return;
+        }
+        // Generate vertex marker geometry (small boxes for each vertex)
+        std::vector<GizmoVertex> vertices;
+        std::vector<uint32_t> indices;
+        uint32_t vertexOffset = 0;
+        // Generate a small box for each vertex position
+        for (const auto& pos : positions) {
+            generateBox(vertices, indices, pos, size, color, vertexOffset);
+        }
+        // Check if we need to recreate the selected vertex buffer
+        if (m_selectedVertexMarkerBuffer == VK_NULL_HANDLE || vertices.size() > m_selectedVertexMarkerCapacity) {
+            // Clean up old buffer if it exists
+            if (m_selectedVertexMarkerBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(m_device, m_selectedVertexMarkerBuffer, nullptr);
+                vkFreeMemory(m_device, m_selectedVertexMarkerBufferMemory, nullptr);
+            }
+            // Create new buffer with extra capacity
+            m_selectedVertexMarkerCapacity = vertices.size() * 2; // Double capacity for growth
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * m_selectedVertexMarkerCapacity;
+            
+            if (!createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            m_selectedVertexMarkerBuffer, m_selectedVertexMarkerBufferMemory)) {
+                Logger::get().error("Failed to create selected vertex marker buffer");
+                return;
+            }
+        }
+        // Update selected vertex buffer with new data
+        void* data;
+        vkMapMemory(m_device, m_selectedVertexMarkerBufferMemory, 0, sizeof(GizmoVertex) * vertices.size(), 0, &data);
+        memcpy(data, vertices.data(), sizeof(GizmoVertex) * vertices.size());
+        vkUnmapMemory(m_device, m_selectedVertexMarkerBufferMemory);
+        m_selectedVertexMarkerCount = vertices.size();
+        // Update uniform buffer
+        glm::mat4 mvpMatrix = projMatrix * viewMatrix;
+        updateUniformBuffer(mvpMatrix, glm::vec3(0.0f)); // No position offset for markers
+        // Bind descriptor sets
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                               m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+        // Bind line pipeline for wireframe boxes
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_linePipeline);
+        // Bind selected vertex buffer
+        VkBuffer vertexBuffers[] = {m_selectedVertexMarkerBuffer};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+        // Create/update dedicated index buffer for selected vertex markers
+        if (!indices.empty()) {
+            // Check if we need to recreate the selected index buffer
+            if (m_selectedVertexMarkerIndexBuffer == VK_NULL_HANDLE || indices.size() > m_selectedVertexMarkerIndexCapacity) {
+                // Clean up old buffer if it exists
+                if (m_selectedVertexMarkerIndexBuffer != VK_NULL_HANDLE) {
+                    vkDestroyBuffer(m_device, m_selectedVertexMarkerIndexBuffer, nullptr);
+                    vkFreeMemory(m_device, m_selectedVertexMarkerIndexBufferMemory, nullptr);
+                }
+                // Create new selected index buffer with extra capacity
+                m_selectedVertexMarkerIndexCapacity = indices.size() * 2;
+                VkDeviceSize bufferSize = sizeof(uint32_t) * m_selectedVertexMarkerIndexCapacity;
+                
+                if (!createBuffer(bufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                m_selectedVertexMarkerIndexBuffer, m_selectedVertexMarkerIndexBufferMemory)) {
+                    Logger::get().error("Failed to create selected vertex marker index buffer");
+                    return;
+                }
+            }
+            // Update selected index buffer with marker indices
+            void* indexData;
+            VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
+            vkMapMemory(m_device, m_selectedVertexMarkerIndexBufferMemory, 0, indexSize, 0, &indexData);
+            memcpy(indexData, indices.data(), indexSize);
+            vkUnmapMemory(m_device, m_selectedVertexMarkerIndexBufferMemory);
+            m_selectedVertexMarkerIndexCount = indices.size();
+            // Draw with dedicated selected index buffer
+            vkCmdBindIndexBuffer(commandBuffer, m_selectedVertexMarkerIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(commandBuffer, m_selectedVertexMarkerIndexCount, 1, 0, 0, 0);
+        } else {
+            // Fallback to drawing without indices
+            vkCmdDraw(commandBuffer, m_selectedVertexMarkerCount, 1, 0, 0);
         }
     }
 
@@ -287,31 +424,32 @@ namespace tremor::editor {
             vertices.push_back({edge.second, color});
         }
 
-        // Use the vertex marker buffer for edge rendering (it's just lines)
-        if (m_vertexMarkerBuffer == VK_NULL_HANDLE || vertices.size() > m_vertexMarkerCapacity) {
+        // Use dedicated triangle edge buffer for edge rendering
+        if (m_triangleEdgeBuffer == VK_NULL_HANDLE || vertices.size() > m_triangleEdgeCapacity) {
             // Clean up old buffer if it exists
-            if (m_vertexMarkerBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_vertexMarkerBuffer, nullptr);
-                vkFreeMemory(m_device, m_vertexMarkerBufferMemory, nullptr);
+            if (m_triangleEdgeBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(m_device, m_triangleEdgeBuffer, nullptr);
+                vkFreeMemory(m_device, m_triangleEdgeBufferMemory, nullptr);
             }
 
             // Create new buffer with extra capacity
-            m_vertexMarkerCapacity = vertices.size() * 2;
-            VkDeviceSize bufferSize = sizeof(GizmoVertex) * m_vertexMarkerCapacity;
+            m_triangleEdgeCapacity = vertices.size() * 2;
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * m_triangleEdgeCapacity;
             
             if (!createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            m_vertexMarkerBuffer, m_vertexMarkerBufferMemory)) {
+                            m_triangleEdgeBuffer, m_triangleEdgeBufferMemory)) {
                 Logger::get().error("Failed to create triangle edge buffer");
                 return;
             }
         }
 
-        // Update vertex buffer
+        // Update triangle edge vertex buffer
         void* data;
-        vkMapMemory(m_device, m_vertexMarkerBufferMemory, 0, sizeof(GizmoVertex) * vertices.size(), 0, &data);
+        vkMapMemory(m_device, m_triangleEdgeBufferMemory, 0, sizeof(GizmoVertex) * vertices.size(), 0, &data);
         memcpy(data, vertices.data(), sizeof(GizmoVertex) * vertices.size());
-        vkUnmapMemory(m_device, m_vertexMarkerBufferMemory);
+        vkUnmapMemory(m_device, m_triangleEdgeBufferMemory);
+        m_triangleEdgeCount = vertices.size();
 
         // Update uniform buffer
         glm::mat4 mvpMatrix = projMatrix * viewMatrix;
@@ -324,13 +462,13 @@ namespace tremor::editor {
         // Bind line pipeline
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_linePipeline);
 
-        // Bind vertex buffer
-        VkBuffer vertexBuffers[] = {m_vertexMarkerBuffer};
+        // Bind triangle edge vertex buffer
+        VkBuffer vertexBuffers[] = {m_triangleEdgeBuffer};
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
         // Draw lines (2 vertices per line)
-        vkCmdDraw(commandBuffer, vertices.size(), 1, 0, 0);
+        vkCmdDraw(commandBuffer, m_triangleEdgeCount, 1, 0, 0);
     }
 
     int GizmoRenderer::hitTest(EditorMode mode, const glm::vec2& screenPos, const glm::vec3& gizmoPos,

@@ -35,6 +35,13 @@ namespace tremor::editor {
                                 const glm::vec3& color = glm::vec3(1.0f, 1.0f, 0.0f),
                                 float size = 0.1f);
 
+        // Render selected vertex markers (uses separate buffer to avoid conflicts)
+        void renderSelectedVertexMarkers(VkCommandBuffer commandBuffer, 
+                                        const std::vector<glm::vec3>& positions,
+                                        const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                        const glm::vec3& color = glm::vec3(1.0f, 0.3f, 0.3f),
+                                        float size = 0.1f);
+
         // Render triangle edges
         void renderTriangleEdges(VkCommandBuffer commandBuffer,
                                 const std::vector<std::pair<glm::vec3, glm::vec3>>& edges,
@@ -98,6 +105,30 @@ namespace tremor::editor {
         VkDeviceMemory m_vertexMarkerBufferMemory;
         uint32_t m_vertexMarkerCapacity;
         uint32_t m_vertexMarkerCount;
+
+        // Dedicated index buffer for vertex markers
+        VkBuffer m_vertexMarkerIndexBuffer;
+        VkDeviceMemory m_vertexMarkerIndexBufferMemory;
+        uint32_t m_vertexMarkerIndexCapacity;
+        uint32_t m_vertexMarkerIndexCount;
+
+        // Dynamic vertex buffer for triangle edges
+        VkBuffer m_triangleEdgeBuffer;
+        VkDeviceMemory m_triangleEdgeBufferMemory;
+        uint32_t m_triangleEdgeCapacity;
+        uint32_t m_triangleEdgeCount;
+
+        // Dynamic vertex buffer for selected vertex markers
+        VkBuffer m_selectedVertexMarkerBuffer;
+        VkDeviceMemory m_selectedVertexMarkerBufferMemory;
+        uint32_t m_selectedVertexMarkerCapacity;
+        uint32_t m_selectedVertexMarkerCount;
+
+        // Dedicated index buffer for selected vertex markers
+        VkBuffer m_selectedVertexMarkerIndexBuffer;
+        VkDeviceMemory m_selectedVertexMarkerIndexBufferMemory;
+        uint32_t m_selectedVertexMarkerIndexCapacity;
+        uint32_t m_selectedVertexMarkerIndexCount;
 
         // Index buffers
         VkBuffer m_indexBuffer;
