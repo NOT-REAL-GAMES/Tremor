@@ -115,6 +115,14 @@ namespace tremor::editor {
                                    m_viewportSize);
             }
         }
+        
+        // Debug: Always render mouse ray visualization
+        if (m_tools && m_tools->getGizmoRenderer()) {
+            m_tools->getGizmoRenderer()->renderMouseRayDebug(commandBuffer, m_lastMousePos,
+                                                            m_viewport->getViewMatrix(),
+                                                            m_viewport->getProjectionMatrix(),
+                                                            m_viewportSize);
+        }
 
         // Render vertex markers for custom vertices
         if (m_model && m_tools) {
@@ -292,7 +300,7 @@ namespace tremor::editor {
                 } else if (m_currentMode == EditorMode::Scale) {
                     glm::vec3 scale = m_tools->calculateScale(mouseDelta);
                     Logger::get().info("Applying scale");
-                    scaleSelection(glm::vec3(1.0f) + scale);
+                    scaleSelection(scale); // scale already includes base 1.0f
                     updateGizmoPosition(); // Update gizmo position after transform
                 }
             }

@@ -37,7 +37,9 @@ namespace tremor::editor {
           m_selectedVertexMarkerBuffer(VK_NULL_HANDLE), m_selectedVertexMarkerBufferMemory(VK_NULL_HANDLE),
           m_selectedVertexMarkerCapacity(0), m_selectedVertexMarkerCount(0),
           m_selectedVertexMarkerIndexBuffer(VK_NULL_HANDLE), m_selectedVertexMarkerIndexBufferMemory(VK_NULL_HANDLE),
-          m_selectedVertexMarkerIndexCapacity(0), m_selectedVertexMarkerIndexCount(0) {
+          m_selectedVertexMarkerIndexCapacity(0), m_selectedVertexMarkerIndexCount(0),
+          m_mouseRayDebugBuffer(VK_NULL_HANDLE), m_mouseRayDebugBufferMemory(VK_NULL_HANDLE),
+          m_mouseRayDebugCapacity(0) {
     }
 
     GizmoRenderer::~GizmoRenderer() {
@@ -108,6 +110,12 @@ namespace tremor::editor {
             }
             if (m_selectedVertexMarkerIndexBufferMemory != VK_NULL_HANDLE) {
                 vkFreeMemory(m_device, m_selectedVertexMarkerIndexBufferMemory, nullptr);
+            }
+            if (m_mouseRayDebugBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(m_device, m_mouseRayDebugBuffer, nullptr);
+            }
+            if (m_mouseRayDebugBufferMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(m_device, m_mouseRayDebugBufferMemory, nullptr);
             }
             if (m_descriptorPool != VK_NULL_HANDLE) {
                 vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
@@ -517,7 +525,8 @@ namespace tremor::editor {
                 result = hitTestRotationGizmo(screenPos, screenCenter, screenSize, hitTolerance);
                 break;
             case EditorMode::Scale:
-                result = hitTestScaleGizmo(screenPos, screenCenter, screenSize, hitTolerance);
+                result = hitTestScaleGizmo(screenPos, screenCenter, screenSize, hitTolerance, 
+                                         gizmoPos, viewMatrix, projMatrix, viewport);
                 break;
             default:
                 result = -1;
@@ -1120,22 +1129,47 @@ namespace tremor::editor {
         // Define 3D arrow line segments (flip X and Z coordinates for ray casting)
         float arrowLength = m_gizmoSize;
         glm::vec3 xEnd = gizmoPos + glm::vec3(arrowLength, 0.0f, 0.0f);
-        glm::vec3 yEnd = gizmoPos + glm::vec3(0.0f, -arrowLength, 0.0f);
+        glm::vec3 yEnd = gizmoPos + glm::vec3(0.0f, arrowLength, 0.0f);
         glm::vec3 zEnd = gizmoPos + glm::vec3(0.0f, 0.0f, arrowLength);
         
         // Convert pixel tolerance to world space tolerance
-        // Use screen-space tolerance scaled by distance to gizmo
+        // Use screen-space tolerance scaled by distance to gizmo (reduced for more precise selection)
         float distanceToGizmo = glm::length(gizmoPos - glm::vec3(glm::inverse(viewMatrix)[3]));
-        float worldTolerance = (tolerance / 100.0f) * distanceToGizmo;
+        float worldTolerance = (tolerance / 400.0f) * distanceToGizmo;
+        // Ensure minimum tolerance to prevent issues at certain viewing angles
+        worldTolerance = std::max(worldTolerance, 0.1f);
         
         // Test ray intersection with each axis line segment
         float rayT, lineT;
-        float xDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, xEnd, rayT, lineT);
-        float yDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, yEnd, rayT, lineT);
-        float zDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, zEnd, rayT, lineT);
+        float xRayT, xLineT, yRayT, yLineT, zRayT, zLineT;
+        float xDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, xEnd, xRayT, xLineT);
+        float yDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, yEnd, yRayT, yLineT);
+        float zDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, zEnd, zRayT, zLineT);
 
         // Find the closest axis
         float minDist = std::min({xDist, yDist, zDist});
+        
+        // Debug: Log the closest point on the ray for visualization
+        if (minDist <= worldTolerance) {
+            float closestRayT = 0.0f;
+            glm::vec3 closestLineStart, closestLineEnd;
+            if (minDist == xDist) {
+                closestRayT = xRayT;
+                closestLineStart = gizmoPos;
+                closestLineEnd = xEnd;
+            } else if (minDist == yDist) {
+                closestRayT = yRayT;
+                closestLineStart = gizmoPos;
+                closestLineEnd = yEnd;
+            } else {
+                closestRayT = zRayT;
+                closestLineStart = gizmoPos;
+                closestLineEnd = zEnd;
+            }
+            glm::vec3 rayPoint = mouseRay.origin + closestRayT * mouseRay.direction;
+            Logger::get().info("Mouse ray hit point: ({:.2f}, {:.2f}, {:.2f}) at distance {:.3f}", 
+                             rayPoint.x, rayPoint.y, rayPoint.z, minDist);
+        }
         if (minDist > worldTolerance) {
             return -1;
         }
@@ -1143,7 +1177,9 @@ namespace tremor::editor {
         // Return the correct axis (coordinates are already flipped in ray casting)
         if (minDist == xDist) return 0; // X axis
         if (minDist == yDist) return 1; // Y axis
-        return 2; // Z axis
+        if (minDist == zDist) return 2; // Z axis
+
+        return -1;
     }
 
     int GizmoRenderer::hitTestRotationGizmo(const glm::vec2& screenPos, const glm::vec2& center,
@@ -1160,27 +1196,50 @@ namespace tremor::editor {
     }
 
     int GizmoRenderer::hitTestScaleGizmo(const glm::vec2& screenPos, const glm::vec2& center,
-                                        float screenSize, float tolerance) {
-        // Similar to translation gizmo but also check center box for uniform scaling
-        float centerDist = glm::length(screenPos - center);
-        if (centerDist < tolerance) return 3; // Uniform scale
-
-        // TODO: Update this to use proper 3D projection like translation gizmo
-        // For now, use simplified approach for scale gizmo
-        glm::vec2 xEnd = center + glm::vec2(screenSize, 0.0f);
-        glm::vec2 yEnd = center + glm::vec2(0.0f, -screenSize);
-        glm::vec2 zEnd = center + glm::vec2(screenSize * 0.7f, screenSize * 0.7f);
+                                        float screenSize, float tolerance, const glm::vec3& gizmoPos,
+                                        const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                        const glm::vec2& viewport) {
+        // Generate mouse ray from screen position
+        Ray mouseRay = screenToWorldRay(screenPos, viewMatrix, projMatrix, viewport);
         
-        float xDist = distanceToLine(screenPos, center, xEnd);
-        float yDist = distanceToLine(screenPos, center, yEnd);
-        float zDist = distanceToLine(screenPos, center, zEnd);
+        // Check for uniform scale first (center sphere)
+        float centerRadius = m_gizmoSize * 0.3f; // Smaller center sphere
+        glm::vec3 centerToRayOrigin = mouseRay.origin - gizmoPos;
+        float rayDotDir = glm::dot(centerToRayOrigin, mouseRay.direction);
+        glm::vec3 closestPointOnRay = mouseRay.origin + (-rayDotDir) * mouseRay.direction;
+        float centerDist = glm::length(closestPointOnRay - gizmoPos);
         
+        if (centerDist < centerRadius) {
+            return 3; // Uniform scale
+        }
+        
+        // Define 3D scale handle line segments (same as translation but shorter)
+        float handleLength = m_gizmoSize * 0.8f; // Shorter than translation handles
+        glm::vec3 xEnd = gizmoPos + glm::vec3(handleLength, 0.0f, 0.0f);
+        glm::vec3 yEnd = gizmoPos + glm::vec3(0.0f, handleLength, 0.0f);
+        glm::vec3 zEnd = gizmoPos + glm::vec3(0.0f, 0.0f, handleLength);
+        
+        // Convert pixel tolerance to world space tolerance
+        float distanceToGizmo = glm::length(gizmoPos - glm::vec3(glm::inverse(viewMatrix)[3]));
+        float worldTolerance = (tolerance / 400.0f) * distanceToGizmo;
+        worldTolerance = std::max(worldTolerance, 0.1f);
+        
+        // Test ray intersection with each axis line segment
+        float xRayT, xLineT, yRayT, yLineT, zRayT, zLineT;
+        float xDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, xEnd, xRayT, xLineT);
+        float yDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, yEnd, yRayT, yLineT);
+        float zDist = distanceFromRayToLineSegment(mouseRay, gizmoPos, zEnd, zRayT, zLineT);
+        
+        // Find the closest axis
         float minDist = std::min({xDist, yDist, zDist});
-        if (minDist > tolerance) return -1;
-        
-        if (xDist <= yDist && xDist <= zDist) return 0;
-        if (yDist <= zDist) return 1;
-        return 2;
+        if (minDist > worldTolerance) {
+            return -1;
+        }
+
+        // Return the closest axis
+        if (minDist == xDist) return 0; // X axis
+        if (minDist == yDist) return 1; // Y axis
+        return 2; // Z axis
     }
 
     float GizmoRenderer::distanceToLine(const glm::vec2& point, const glm::vec2& lineStart, 
@@ -1199,6 +1258,74 @@ namespace tremor::editor {
         return glm::length(point - center) <= radius;
     }
     
+    void GizmoRenderer::renderMouseRayDebug(VkCommandBuffer commandBuffer, const glm::vec2& screenPos,
+                                           const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                           const glm::vec2& viewport) {
+        // Generate the mouse ray
+        Ray mouseRay = screenToWorldRay(screenPos, viewMatrix, projMatrix, viewport);
+        
+        // Create vertices for ray visualization
+        std::vector<GizmoVertex> vertices;
+        
+        // Line along ray (yellow)
+        vertices.push_back({mouseRay.origin, glm::vec3(1.0f, 1.0f, 0.0f)});
+        vertices.push_back({mouseRay.origin + mouseRay.direction * 10.0f, glm::vec3(1.0f, 1.0f, 0.0f)});
+        
+        // Marker sphere at fixed distance (magenta)
+        float markerDistance = 5.0f;
+        glm::vec3 markerPos = mouseRay.origin + mouseRay.direction * markerDistance;
+        float markerSize = 0.2f;
+        
+        // Add a small cross at the marker position
+        vertices.push_back({markerPos - glm::vec3(markerSize, 0, 0), glm::vec3(1.0f, 0.0f, 1.0f)});
+        vertices.push_back({markerPos + glm::vec3(markerSize, 0, 0), glm::vec3(1.0f, 0.0f, 1.0f)});
+        vertices.push_back({markerPos - glm::vec3(0, markerSize, 0), glm::vec3(1.0f, 0.0f, 1.0f)});
+        vertices.push_back({markerPos + glm::vec3(0, markerSize, 0), glm::vec3(1.0f, 0.0f, 1.0f)});
+        vertices.push_back({markerPos - glm::vec3(0, 0, markerSize), glm::vec3(1.0f, 0.0f, 1.0f)});
+        vertices.push_back({markerPos + glm::vec3(0, 0, markerSize), glm::vec3(1.0f, 0.0f, 1.0f)});
+        
+        // Ensure buffer exists and is large enough
+        if (m_mouseRayDebugBuffer == VK_NULL_HANDLE || m_mouseRayDebugCapacity < vertices.size()) {
+            // Clean up old buffer if it exists
+            if (m_mouseRayDebugBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(m_device, m_mouseRayDebugBuffer, nullptr);
+                vkFreeMemory(m_device, m_mouseRayDebugBufferMemory, nullptr);
+            }
+            
+            // Create new buffer
+            m_mouseRayDebugCapacity = std::max(size_t(100), vertices.size() * 2);
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * m_mouseRayDebugCapacity;
+            
+            createBuffer(bufferSize, 
+                        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        m_mouseRayDebugBuffer, m_mouseRayDebugBufferMemory);
+        }
+        
+        // Upload vertices
+        void* data;
+        vkMapMemory(m_device, m_mouseRayDebugBufferMemory, 0, sizeof(GizmoVertex) * vertices.size(), 0, &data);
+        memcpy(data, vertices.data(), sizeof(GizmoVertex) * vertices.size());
+        vkUnmapMemory(m_device, m_mouseRayDebugBufferMemory);
+        
+        // Update uniform buffer
+        glm::mat4 mvpMatrix = projMatrix * viewMatrix;
+        updateUniformBuffer(mvpMatrix, glm::vec3(0.0f));
+        
+        // Bind pipeline and descriptor set
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_linePipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, 
+                              m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+        
+        // Bind vertex buffer
+        VkBuffer vertexBuffers[] = {m_mouseRayDebugBuffer};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+        
+        // Draw lines
+        vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
+    }
+
     // ================================================================================================
     // Ray Casting Implementation
     // ================================================================================================
@@ -1208,7 +1335,7 @@ namespace tremor::editor {
         // Convert screen coordinates to NDC
         glm::vec2 ndc = glm::vec2(
             (2.0f * screenPos.x) / viewport.x - 1.0f,
-            1.0f - (2.0f * screenPos.y) / viewport.y
+            (2.0f * screenPos.y) / viewport.y - 1.0f
         );
         
         // Create points at near and far planes in NDC

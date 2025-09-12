@@ -52,6 +52,11 @@ namespace tremor::editor {
         int hitTest(EditorMode mode, const glm::vec2& screenPos, const glm::vec3& gizmoPos,
                    const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
                    const glm::vec2& viewport);
+        
+        // Debug: Render a marker at mouse ray position
+        void renderMouseRayDebug(VkCommandBuffer commandBuffer, const glm::vec2& screenPos,
+                                const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                const glm::vec2& viewport);
 
         // Configuration
         void setGizmoSize(float size) { m_gizmoSize = size; }
@@ -129,6 +134,11 @@ namespace tremor::editor {
         VkDeviceMemory m_selectedVertexMarkerIndexBufferMemory;
         uint32_t m_selectedVertexMarkerIndexCapacity;
         uint32_t m_selectedVertexMarkerIndexCount;
+        
+        // Dedicated buffer for mouse ray debug visualization
+        VkBuffer m_mouseRayDebugBuffer;
+        VkDeviceMemory m_mouseRayDebugBufferMemory;
+        uint32_t m_mouseRayDebugCapacity;
 
         // Index buffers
         VkBuffer m_indexBuffer;
@@ -196,7 +206,9 @@ namespace tremor::editor {
         int hitTestRotationGizmo(const glm::vec2& screenPos, const glm::vec2& center,
                                 float screenSize, float tolerance);
         int hitTestScaleGizmo(const glm::vec2& screenPos, const glm::vec2& center,
-                             float screenSize, float tolerance);
+                             float screenSize, float tolerance, const glm::vec3& gizmoPos,
+                             const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                             const glm::vec2& viewport);
         float distanceToLine(const glm::vec2& point, const glm::vec2& lineStart, 
                            const glm::vec2& lineEnd);
         bool pointInCircle(const glm::vec2& point, const glm::vec2& center, float radius);

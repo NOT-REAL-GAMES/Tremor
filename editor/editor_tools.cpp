@@ -159,8 +159,8 @@ namespace tremor::editor {
             return glm::vec3(1.0f);
         }
 
-        // Convert mouse delta to scale factor
-        float sensitivity = 0.01f;
+        // Convert mouse delta to scale factor (increased sensitivity)
+        float sensitivity = 0.05f; // 5x more sensitive than before
         float scaleDelta = mouseDelta.x * sensitivity;
         glm::vec3 scale(1.0f);
         
