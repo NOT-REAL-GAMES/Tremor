@@ -443,7 +443,7 @@ namespace tremor::editor {
         m_selection.clear();
         
         if (m_ui) {
-            m_ui->onSelectionChanged(m_selection);
+            m_ui->onSelectionChanged(m_selection, m_model.get());
         }
 
         if (m_selectionChangedCallback) {

@@ -9,6 +9,131 @@
 namespace tremor::editor {
 
     // =============================================================================
+    // GizmoBuffer Implementation  
+    // =============================================================================
+
+    GizmoBuffer::GizmoBuffer(VkDevice device, VkPhysicalDevice physicalDevice)
+        : m_device(device), m_physicalDevice(physicalDevice),
+          m_buffer(VK_NULL_HANDLE), m_memory(VK_NULL_HANDLE), 
+          m_size(0), m_capacity(0), m_count(0) {
+    }
+
+    GizmoBuffer::~GizmoBuffer() {
+        cleanup();
+    }
+
+    GizmoBuffer::GizmoBuffer(GizmoBuffer&& other) noexcept
+        : m_device(other.m_device), m_physicalDevice(other.m_physicalDevice),
+          m_buffer(other.m_buffer), m_memory(other.m_memory),
+          m_size(other.m_size), m_capacity(other.m_capacity), 
+          m_count(other.m_count), m_name(std::move(other.m_name)) {
+        other.m_buffer = VK_NULL_HANDLE;
+        other.m_memory = VK_NULL_HANDLE;
+        other.m_size = 0;
+        other.m_capacity = 0;
+        other.m_count = 0;
+    }
+
+    GizmoBuffer& GizmoBuffer::operator=(GizmoBuffer&& other) noexcept {
+        if (this != &other) {
+            cleanup();
+            m_device = other.m_device;
+            m_physicalDevice = other.m_physicalDevice;
+            m_buffer = other.m_buffer;
+            m_memory = other.m_memory;
+            m_size = other.m_size;
+            m_capacity = other.m_capacity;
+            m_count = other.m_count;
+            m_name = std::move(other.m_name);
+            
+            other.m_buffer = VK_NULL_HANDLE;
+            other.m_memory = VK_NULL_HANDLE;
+            other.m_size = 0;
+            other.m_capacity = 0;
+            other.m_count = 0;
+        }
+        return *this;
+    }
+
+    bool GizmoBuffer::create(VkDeviceSize size, VkBufferUsageFlags usage,
+                            VkMemoryPropertyFlags properties, const std::string& name) {
+        cleanup();
+        
+        m_name = name;
+        m_size = size;
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = size;
+        bufferInfo.usage = usage;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(m_device, &bufferInfo, nullptr, &m_buffer) != VK_SUCCESS) {
+            Logger::get().error("Failed to create buffer: {}", name);
+            return false;
+        }
+
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(m_device, m_buffer, &memRequirements);
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+
+        if (vkAllocateMemory(m_device, &allocInfo, nullptr, &m_memory) != VK_SUCCESS) {
+            Logger::get().error("Failed to allocate buffer memory: {}", name);
+            cleanup();
+            return false;
+        }
+
+        vkBindBufferMemory(m_device, m_buffer, m_memory, 0);
+        return true;
+    }
+
+    bool GizmoBuffer::updateData(const void* data, VkDeviceSize size, VkDeviceSize offset) {
+        if (!isValid() || offset + size > m_size) {
+            return false;
+        }
+
+        void* mappedData;
+        vkMapMemory(m_device, m_memory, offset, size, 0, &mappedData);
+        memcpy(mappedData, data, size);
+        vkUnmapMemory(m_device, m_memory);
+        return true;
+    }
+
+    void GizmoBuffer::cleanup() {
+        if (m_device != VK_NULL_HANDLE) {
+            if (m_buffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(m_device, m_buffer, nullptr);
+                m_buffer = VK_NULL_HANDLE;
+            }
+            if (m_memory != VK_NULL_HANDLE) {
+                vkFreeMemory(m_device, m_memory, nullptr);
+                m_memory = VK_NULL_HANDLE;
+            }
+        }
+        m_size = 0;
+        m_capacity = 0;
+        m_count = 0;
+    }
+
+    uint32_t GizmoBuffer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+        VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProperties);
+
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+            if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                return i;
+            }
+        }
+
+        Logger::get().error("Failed to find suitable memory type for buffer: {}", m_name);
+        return 0;
+    }
+
+    // =============================================================================
     // GizmoRenderer Implementation
     // =============================================================================
 
@@ -19,104 +144,25 @@ namespace tremor::editor {
           m_linePipeline(VK_NULL_HANDLE), m_trianglePipeline(VK_NULL_HANDLE),
           m_pipelineLayout(VK_NULL_HANDLE), m_descriptorSetLayout(VK_NULL_HANDLE),
           m_descriptorPool(VK_NULL_HANDLE), m_descriptorSet(VK_NULL_HANDLE),
-          m_translationVertexBuffer(VK_NULL_HANDLE), m_translationVertexBufferMemory(VK_NULL_HANDLE),
-          m_rotationVertexBuffer(VK_NULL_HANDLE), m_rotationVertexBufferMemory(VK_NULL_HANDLE),
-          m_scaleVertexBuffer(VK_NULL_HANDLE), m_scaleVertexBufferMemory(VK_NULL_HANDLE),
-          m_indexBuffer(VK_NULL_HANDLE), m_indexBufferMemory(VK_NULL_HANDLE),
-          m_uniformBuffer(VK_NULL_HANDLE), m_uniformBufferMemory(VK_NULL_HANDLE),
-          m_gizmoDescriptorSet(VK_NULL_HANDLE), m_gizmoUniformBuffer(VK_NULL_HANDLE), m_gizmoUniformBufferMemory(VK_NULL_HANDLE),
-          m_vertexShader(VK_NULL_HANDLE), m_fragmentShader(VK_NULL_HANDLE),
-          m_translationVertexCount(0), m_rotationVertexCount(0), m_scaleVertexCount(0),
-          m_indexCount(0),
-          m_vertexMarkerBuffer(VK_NULL_HANDLE), m_vertexMarkerBufferMemory(VK_NULL_HANDLE),
-          m_vertexMarkerCapacity(0), m_vertexMarkerCount(0),
-          m_vertexMarkerIndexBuffer(VK_NULL_HANDLE), m_vertexMarkerIndexBufferMemory(VK_NULL_HANDLE),
-          m_vertexMarkerIndexCapacity(0), m_vertexMarkerIndexCount(0),
-          m_triangleEdgeBuffer(VK_NULL_HANDLE), m_triangleEdgeBufferMemory(VK_NULL_HANDLE),
-          m_triangleEdgeCapacity(0), m_triangleEdgeCount(0),
-          m_selectedVertexMarkerBuffer(VK_NULL_HANDLE), m_selectedVertexMarkerBufferMemory(VK_NULL_HANDLE),
-          m_selectedVertexMarkerCapacity(0), m_selectedVertexMarkerCount(0),
-          m_selectedVertexMarkerIndexBuffer(VK_NULL_HANDLE), m_selectedVertexMarkerIndexBufferMemory(VK_NULL_HANDLE),
-          m_selectedVertexMarkerIndexCapacity(0), m_selectedVertexMarkerIndexCount(0),
-          m_mouseRayDebugBuffer(VK_NULL_HANDLE), m_mouseRayDebugBufferMemory(VK_NULL_HANDLE),
-          m_mouseRayDebugCapacity(0) {
+          m_translationVertexBuffer(device, physicalDevice),
+          m_rotationVertexBuffer(device, physicalDevice),
+          m_scaleVertexBuffer(device, physicalDevice),
+          m_vertexMarkerBuffer(device, physicalDevice),
+          m_vertexMarkerIndexBuffer(device, physicalDevice),
+          m_triangleEdgeBuffer(device, physicalDevice),
+          m_selectedVertexMarkerBuffer(device, physicalDevice),
+          m_selectedVertexMarkerIndexBuffer(device, physicalDevice),
+          m_mouseRayDebugBuffer(device, physicalDevice),
+          m_indexBuffer(device, physicalDevice),
+          m_uniformBuffer(device, physicalDevice),
+          m_gizmoUniformBuffer(device, physicalDevice),
+          m_gizmoDescriptorSet(VK_NULL_HANDLE),
+          m_vertexShader(VK_NULL_HANDLE), m_fragmentShader(VK_NULL_HANDLE) {
     }
 
     GizmoRenderer::~GizmoRenderer() {
         if (m_device != VK_NULL_HANDLE) {
-            // Clean up Vulkan resources
-            if (m_translationVertexBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_translationVertexBuffer, nullptr);
-            }
-            if (m_translationVertexBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_translationVertexBufferMemory, nullptr);
-            }
-            if (m_rotationVertexBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_rotationVertexBuffer, nullptr);
-            }
-            if (m_rotationVertexBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_rotationVertexBufferMemory, nullptr);
-            }
-            if (m_scaleVertexBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_scaleVertexBuffer, nullptr);
-            }
-            if (m_scaleVertexBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_scaleVertexBufferMemory, nullptr);
-            }
-            if (m_indexBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_indexBuffer, nullptr);
-            }
-            if (m_indexBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_indexBufferMemory, nullptr);
-            }
-            if (m_uniformBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_uniformBuffer, nullptr);
-            }
-            if (m_uniformBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_uniformBufferMemory, nullptr);
-            }
-            if (m_gizmoUniformBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_gizmoUniformBuffer, nullptr);
-            }
-            if (m_gizmoUniformBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_gizmoUniformBufferMemory, nullptr);
-            }
-            if (m_vertexMarkerBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_vertexMarkerBuffer, nullptr);
-            }
-            if (m_vertexMarkerBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_vertexMarkerBufferMemory, nullptr);
-            }
-            if (m_vertexMarkerIndexBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_vertexMarkerIndexBuffer, nullptr);
-            }
-            if (m_vertexMarkerIndexBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_vertexMarkerIndexBufferMemory, nullptr);
-            }
-            if (m_triangleEdgeBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_triangleEdgeBuffer, nullptr);
-            }
-            if (m_triangleEdgeBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_triangleEdgeBufferMemory, nullptr);
-            }
-            if (m_selectedVertexMarkerBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_selectedVertexMarkerBuffer, nullptr);
-            }
-            if (m_selectedVertexMarkerBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_selectedVertexMarkerBufferMemory, nullptr);
-            }
-            if (m_selectedVertexMarkerIndexBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_selectedVertexMarkerIndexBuffer, nullptr);
-            }
-            if (m_selectedVertexMarkerIndexBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_selectedVertexMarkerIndexBufferMemory, nullptr);
-            }
-            if (m_mouseRayDebugBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_mouseRayDebugBuffer, nullptr);
-            }
-            if (m_mouseRayDebugBufferMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(m_device, m_mouseRayDebugBufferMemory, nullptr);
-            }
+            // Clean up non-buffer Vulkan resources (buffers are handled by RAII GizmoBuffer)
             if (m_descriptorPool != VK_NULL_HANDLE) {
                 vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
             }
@@ -194,8 +240,8 @@ namespace tremor::editor {
 
         switch (mode) {
             case EditorMode::Move:
-                vertexBuffer = m_translationVertexBuffer;
-                vertexCount = m_translationVertexCount;
+                vertexBuffer = m_translationVertexBuffer.getBuffer();
+                vertexCount = m_translationVertexBuffer.getCount();
                 pipeline = m_linePipeline; // Translation gizmo uses lines
                 /*
                 
@@ -206,19 +252,23 @@ namespace tremor::editor {
                 
                 break;
             case EditorMode::Rotate:
-                vertexBuffer = m_rotationVertexBuffer;
-                vertexCount = m_rotationVertexCount;
+                vertexBuffer = m_rotationVertexBuffer.getBuffer();
+                vertexCount = m_rotationVertexBuffer.getCount();
                 pipeline = m_linePipeline; // Rotation gizmo uses line circles
                 break;
             case EditorMode::Scale:
-                vertexBuffer = m_scaleVertexBuffer;
-                vertexCount = m_scaleVertexCount;
+                vertexBuffer = m_scaleVertexBuffer.getBuffer();
+                vertexCount = m_scaleVertexBuffer.getCount();
                 pipeline = m_linePipeline; // Scale gizmo uses lines with boxes
                 break;
             default:
                 return; // No gizmo for select mode
         }
 
+        if (!m_translationVertexBuffer.isValid() && !m_rotationVertexBuffer.isValid() && !m_scaleVertexBuffer.isValid()) {
+            return;
+        }
+        
         if (vertexBuffer == VK_NULL_HANDLE || vertexCount == 0) {
             return;
         }
@@ -232,10 +282,10 @@ namespace tremor::editor {
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
         // Draw gizmo
-        if (m_indexCount > 0) {
-            //Logger::get().info("GIZMO DEBUG: Drawing with indices - indexCount={}", m_indexCount);
-            vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
+        if (m_indexBuffer.getCount() > 0) {
+            //Logger::get().info("GIZMO DEBUG: Drawing with indices - indexCount={}", m_indexBuffer.getCount());
+            vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(commandBuffer, m_indexBuffer.getCount(), 1, 0, 0, 0);
         } else {
             //Logger::get().info("GIZMO DEBUG: Drawing vertices - vertexCount={}", vertexCount);
             vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
@@ -261,32 +311,28 @@ namespace tremor::editor {
         }
 
         // Check if we need to recreate the vertex buffer
-        if (m_vertexMarkerBuffer == VK_NULL_HANDLE || vertices.size() > m_vertexMarkerCapacity) {
-            // Clean up old buffer if it exists
-            if (m_vertexMarkerBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_vertexMarkerBuffer, nullptr);
-                vkFreeMemory(m_device, m_vertexMarkerBufferMemory, nullptr);
-            }
-
+        if (!m_vertexMarkerBuffer.isValid() || vertices.size() > m_vertexMarkerBuffer.getCapacity()) {
             // Create new buffer with extra capacity
-            m_vertexMarkerCapacity = vertices.size() * 2; // Double capacity for growth
-            VkDeviceSize bufferSize = sizeof(GizmoVertex) * m_vertexMarkerCapacity;
+            uint32_t newCapacity = vertices.size() * 2; // Double capacity for growth
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
             
-            if (!createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            if (!m_vertexMarkerBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            m_vertexMarkerBuffer, m_vertexMarkerBufferMemory)) {
+                            "vertex_marker_buffer")) {
                 Logger::get().error("Failed to create vertex marker buffer");
                 return;
             }
+            
+            m_vertexMarkerBuffer.setCapacity(newCapacity);
         }
 
         // Update vertex buffer with new data
-        void* data;
-        vkMapMemory(m_device, m_vertexMarkerBufferMemory, 0, sizeof(GizmoVertex) * vertices.size(), 0, &data);
-        memcpy(data, vertices.data(), sizeof(GizmoVertex) * vertices.size());
-        vkUnmapMemory(m_device, m_vertexMarkerBufferMemory);
-
-        m_vertexMarkerCount = vertices.size();
+        if (!m_vertexMarkerBuffer.updateData(vertices.data(), sizeof(GizmoVertex) * vertices.size())) {
+            Logger::get().error("Failed to update vertex marker buffer data");
+            return;
+        }
+        
+        m_vertexMarkerBuffer.setCount(vertices.size());
 
         // Update uniform buffer
         glm::mat4 mvpMatrix = projMatrix * viewMatrix;
@@ -300,47 +346,42 @@ namespace tremor::editor {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_linePipeline);
 
         // Bind vertex buffer
-        VkBuffer vertexBuffers[] = {m_vertexMarkerBuffer};
+        VkBuffer vertexBuffers[] = {m_vertexMarkerBuffer.getBuffer()};
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
         // Create/update dedicated index buffer for vertex markers
         if (!indices.empty()) {
             // Check if we need to recreate the index buffer
-            if (m_vertexMarkerIndexBuffer == VK_NULL_HANDLE || indices.size() > m_vertexMarkerIndexCapacity) {
-                // Clean up old buffer if it exists
-                if (m_vertexMarkerIndexBuffer != VK_NULL_HANDLE) {
-                    vkDestroyBuffer(m_device, m_vertexMarkerIndexBuffer, nullptr);
-                    vkFreeMemory(m_device, m_vertexMarkerIndexBufferMemory, nullptr);
-                }
-
+            if (!m_vertexMarkerIndexBuffer.isValid() || indices.size() > m_vertexMarkerIndexBuffer.getCapacity()) {
                 // Create new index buffer with extra capacity
-                m_vertexMarkerIndexCapacity = indices.size() * 2;
-                VkDeviceSize bufferSize = sizeof(uint32_t) * m_vertexMarkerIndexCapacity;
+                uint32_t newCapacity = indices.size() * 2;
+                VkDeviceSize bufferSize = sizeof(uint32_t) * newCapacity;
                 
-                if (!createBuffer(bufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                if (!m_vertexMarkerIndexBuffer.create(bufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                m_vertexMarkerIndexBuffer, m_vertexMarkerIndexBufferMemory)) {
+                                "vertex_marker_index_buffer")) {
                     Logger::get().error("Failed to create vertex marker index buffer");
                     return;
                 }
+                
+                m_vertexMarkerIndexBuffer.setCapacity(newCapacity);
             }
 
             // Update index buffer with marker indices
-            void* indexData;
-            VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
-            vkMapMemory(m_device, m_vertexMarkerIndexBufferMemory, 0, indexSize, 0, &indexData);
-            memcpy(indexData, indices.data(), indexSize);
-            vkUnmapMemory(m_device, m_vertexMarkerIndexBufferMemory);
+            if (!m_vertexMarkerIndexBuffer.updateData(indices.data(), sizeof(uint32_t) * indices.size())) {
+                Logger::get().error("Failed to update vertex marker index buffer data");
+                return;
+            }
 
-            m_vertexMarkerIndexCount = indices.size();
+            m_vertexMarkerIndexBuffer.setCount(indices.size());
 
             // Draw with dedicated index buffer
-            vkCmdBindIndexBuffer(commandBuffer, m_vertexMarkerIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(commandBuffer, m_vertexMarkerIndexCount, 1, 0, 0, 0);
+            vkCmdBindIndexBuffer(commandBuffer, m_vertexMarkerIndexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(commandBuffer, m_vertexMarkerIndexBuffer.getCount(), 1, 0, 0, 0);
         } else {
             // Fallback to drawing without indices
-            vkCmdDraw(commandBuffer, m_vertexMarkerCount, 1, 0, 0);
+            vkCmdDraw(commandBuffer, m_vertexMarkerBuffer.getCount(), 1, 0, 0);
         }
     }
 
@@ -360,29 +401,27 @@ namespace tremor::editor {
             generateBox(vertices, indices, pos, size, color, vertexOffset);
         }
         // Check if we need to recreate the selected vertex buffer
-        if (m_selectedVertexMarkerBuffer == VK_NULL_HANDLE || vertices.size() > m_selectedVertexMarkerCapacity) {
-            // Clean up old buffer if it exists
-            if (m_selectedVertexMarkerBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_selectedVertexMarkerBuffer, nullptr);
-                vkFreeMemory(m_device, m_selectedVertexMarkerBufferMemory, nullptr);
-            }
+        if (!m_selectedVertexMarkerBuffer.isValid() || vertices.size() > m_selectedVertexMarkerBuffer.getCapacity()) {
             // Create new buffer with extra capacity
-            m_selectedVertexMarkerCapacity = vertices.size() * 2; // Double capacity for growth
-            VkDeviceSize bufferSize = sizeof(GizmoVertex) * m_selectedVertexMarkerCapacity;
+            uint32_t newCapacity = vertices.size() * 2; // Double capacity for growth
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
             
-            if (!createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            if (!m_selectedVertexMarkerBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            m_selectedVertexMarkerBuffer, m_selectedVertexMarkerBufferMemory)) {
+                            "selected_vertex_marker_buffer")) {
                 Logger::get().error("Failed to create selected vertex marker buffer");
                 return;
             }
+            
+            m_selectedVertexMarkerBuffer.setCapacity(newCapacity);
         }
         // Update selected vertex buffer with new data
-        void* data;
-        vkMapMemory(m_device, m_selectedVertexMarkerBufferMemory, 0, sizeof(GizmoVertex) * vertices.size(), 0, &data);
-        memcpy(data, vertices.data(), sizeof(GizmoVertex) * vertices.size());
-        vkUnmapMemory(m_device, m_selectedVertexMarkerBufferMemory);
-        m_selectedVertexMarkerCount = vertices.size();
+        if (!m_selectedVertexMarkerBuffer.updateData(vertices.data(), sizeof(GizmoVertex) * vertices.size())) {
+            Logger::get().error("Failed to update selected vertex marker buffer data");
+            return;
+        }
+        
+        m_selectedVertexMarkerBuffer.setCount(vertices.size());
         // Update uniform buffer
         glm::mat4 mvpMatrix = projMatrix * viewMatrix;
         updateUniformBuffer(mvpMatrix, glm::vec3(0.0f)); // No position offset for markers
@@ -392,42 +431,39 @@ namespace tremor::editor {
         // Bind line pipeline for wireframe boxes
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_linePipeline);
         // Bind selected vertex buffer
-        VkBuffer vertexBuffers[] = {m_selectedVertexMarkerBuffer};
+        VkBuffer vertexBuffers[] = {m_selectedVertexMarkerBuffer.getBuffer()};
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
         // Create/update dedicated index buffer for selected vertex markers
         if (!indices.empty()) {
             // Check if we need to recreate the selected index buffer
-            if (m_selectedVertexMarkerIndexBuffer == VK_NULL_HANDLE || indices.size() > m_selectedVertexMarkerIndexCapacity) {
-                // Clean up old buffer if it exists
-                if (m_selectedVertexMarkerIndexBuffer != VK_NULL_HANDLE) {
-                    vkDestroyBuffer(m_device, m_selectedVertexMarkerIndexBuffer, nullptr);
-                    vkFreeMemory(m_device, m_selectedVertexMarkerIndexBufferMemory, nullptr);
-                }
+            if (!m_selectedVertexMarkerIndexBuffer.isValid() || indices.size() > m_selectedVertexMarkerIndexBuffer.getCapacity()) {
                 // Create new selected index buffer with extra capacity
-                m_selectedVertexMarkerIndexCapacity = indices.size() * 2;
-                VkDeviceSize bufferSize = sizeof(uint32_t) * m_selectedVertexMarkerIndexCapacity;
+                uint32_t newCapacity = indices.size() * 2;
+                VkDeviceSize bufferSize = sizeof(uint32_t) * newCapacity;
                 
-                if (!createBuffer(bufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                if (!m_selectedVertexMarkerIndexBuffer.create(bufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                m_selectedVertexMarkerIndexBuffer, m_selectedVertexMarkerIndexBufferMemory)) {
+                                "selected_vertex_marker_index_buffer")) {
                     Logger::get().error("Failed to create selected vertex marker index buffer");
                     return;
                 }
+                
+                m_selectedVertexMarkerIndexBuffer.setCapacity(newCapacity);
             }
             // Update selected index buffer with marker indices
-            void* indexData;
-            VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
-            vkMapMemory(m_device, m_selectedVertexMarkerIndexBufferMemory, 0, indexSize, 0, &indexData);
-            memcpy(indexData, indices.data(), indexSize);
-            vkUnmapMemory(m_device, m_selectedVertexMarkerIndexBufferMemory);
-            m_selectedVertexMarkerIndexCount = indices.size();
+            if (!m_selectedVertexMarkerIndexBuffer.updateData(indices.data(), sizeof(uint32_t) * indices.size())) {
+                Logger::get().error("Failed to update selected vertex marker index buffer data");
+                return;
+            }
+            
+            m_selectedVertexMarkerIndexBuffer.setCount(indices.size());
             // Draw with dedicated selected index buffer
-            vkCmdBindIndexBuffer(commandBuffer, m_selectedVertexMarkerIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(commandBuffer, m_selectedVertexMarkerIndexCount, 1, 0, 0, 0);
+            vkCmdBindIndexBuffer(commandBuffer, m_selectedVertexMarkerIndexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(commandBuffer, m_selectedVertexMarkerIndexBuffer.getCount(), 1, 0, 0, 0);
         } else {
             // Fallback to drawing without indices
-            vkCmdDraw(commandBuffer, m_selectedVertexMarkerCount, 1, 0, 0);
+            vkCmdDraw(commandBuffer, m_selectedVertexMarkerBuffer.getCount(), 1, 0, 0);
         }
     }
 
@@ -449,31 +485,28 @@ namespace tremor::editor {
         }
 
         // Use dedicated triangle edge buffer for edge rendering
-        if (m_triangleEdgeBuffer == VK_NULL_HANDLE || vertices.size() > m_triangleEdgeCapacity) {
-            // Clean up old buffer if it exists
-            if (m_triangleEdgeBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_triangleEdgeBuffer, nullptr);
-                vkFreeMemory(m_device, m_triangleEdgeBufferMemory, nullptr);
-            }
-
+        if (!m_triangleEdgeBuffer.isValid() || vertices.size() > m_triangleEdgeBuffer.getCapacity()) {
             // Create new buffer with extra capacity
-            m_triangleEdgeCapacity = vertices.size() * 2;
-            VkDeviceSize bufferSize = sizeof(GizmoVertex) * m_triangleEdgeCapacity;
+            uint32_t newCapacity = vertices.size() * 2;
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
             
-            if (!createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            if (!m_triangleEdgeBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            m_triangleEdgeBuffer, m_triangleEdgeBufferMemory)) {
+                            "triangle_edge_buffer")) {
                 Logger::get().error("Failed to create triangle edge buffer");
                 return;
             }
+            
+            m_triangleEdgeBuffer.setCapacity(newCapacity);
         }
 
         // Update triangle edge vertex buffer
-        void* data;
-        vkMapMemory(m_device, m_triangleEdgeBufferMemory, 0, sizeof(GizmoVertex) * vertices.size(), 0, &data);
-        memcpy(data, vertices.data(), sizeof(GizmoVertex) * vertices.size());
-        vkUnmapMemory(m_device, m_triangleEdgeBufferMemory);
-        m_triangleEdgeCount = vertices.size();
+        if (!m_triangleEdgeBuffer.updateData(vertices.data(), sizeof(GizmoVertex) * vertices.size())) {
+            Logger::get().error("Failed to update triangle edge buffer data");
+            return;
+        }
+        
+        m_triangleEdgeBuffer.setCount(vertices.size());
 
         // Update uniform buffer
         glm::mat4 mvpMatrix = projMatrix * viewMatrix;
@@ -487,12 +520,12 @@ namespace tremor::editor {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_linePipeline);
 
         // Bind triangle edge vertex buffer
-        VkBuffer vertexBuffers[] = {m_triangleEdgeBuffer};
+        VkBuffer vertexBuffers[] = {m_triangleEdgeBuffer.getBuffer()};
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
         // Draw lines (2 vertices per line)
-        vkCmdDraw(commandBuffer, m_triangleEdgeCount, 1, 0, 0);
+        vkCmdDraw(commandBuffer, m_triangleEdgeBuffer.getCount(), 1, 0, 0);
     }
 
     int GizmoRenderer::hitTest(EditorMode mode, const glm::vec2& screenPos, const glm::vec3& gizmoPos,
@@ -522,7 +555,8 @@ namespace tremor::editor {
                                                  gizmoPos, viewMatrix, projMatrix, viewport);
                 break;
             case EditorMode::Rotate:
-                result = hitTestRotationGizmo(screenPos, screenCenter, screenSize, hitTolerance);
+                result = hitTestRotationGizmo(screenPos, screenCenter, screenSize, hitTolerance,
+                                            gizmoPos, viewMatrix, projMatrix, viewport);
                 break;
             case EditorMode::Scale:
                 result = hitTestScaleGizmo(screenPos, screenCenter, screenSize, hitTolerance, 
@@ -804,71 +838,72 @@ namespace tremor::editor {
 
         // Create translation vertex buffer
         if (!translationVertices.empty()) {
-            m_translationVertexCount = static_cast<uint32_t>(translationVertices.size());
             VkDeviceSize bufferSize = sizeof(GizmoVertex) * translationVertices.size();
 
-            if (createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            if (m_translationVertexBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                           m_translationVertexBuffer, m_translationVertexBufferMemory)) {
+                           "translation_vertex_buffer")) {
                 
-                void* data;
-                vkMapMemory(m_device, m_translationVertexBufferMemory, 0, bufferSize, 0, &data);
-                memcpy(data, translationVertices.data(), bufferSize);
-                vkUnmapMemory(m_device, m_translationVertexBufferMemory);
+                m_translationVertexBuffer.setCount(static_cast<uint32_t>(translationVertices.size()));
+                m_translationVertexBuffer.setCapacity(static_cast<uint32_t>(translationVertices.size()));
+                m_translationVertexBuffer.updateData(translationVertices.data(), bufferSize);
             }
         }
 
         // Create rotation vertex buffer
         if (!rotationVertices.empty()) {
-            m_rotationVertexCount = static_cast<uint32_t>(rotationVertices.size());
             VkDeviceSize bufferSize = sizeof(GizmoVertex) * rotationVertices.size();
 
-            if (createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            if (m_rotationVertexBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                           m_rotationVertexBuffer, m_rotationVertexBufferMemory)) {
+                           "rotation_vertex_buffer")) {
                 
-                void* data;
-                vkMapMemory(m_device, m_rotationVertexBufferMemory, 0, bufferSize, 0, &data);
-                memcpy(data, rotationVertices.data(), bufferSize);
-                vkUnmapMemory(m_device, m_rotationVertexBufferMemory);
+                m_rotationVertexBuffer.setCount(static_cast<uint32_t>(rotationVertices.size()));
+                m_rotationVertexBuffer.setCapacity(static_cast<uint32_t>(rotationVertices.size()));
+                m_rotationVertexBuffer.updateData(rotationVertices.data(), bufferSize);
             }
         }
 
         // Create scale vertex buffer
         if (!scaleVertices.empty()) {
-            m_scaleVertexCount = static_cast<uint32_t>(scaleVertices.size());
             VkDeviceSize bufferSize = sizeof(GizmoVertex) * scaleVertices.size();
 
-            if (createBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            if (m_scaleVertexBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                           m_scaleVertexBuffer, m_scaleVertexBufferMemory)) {
+                           "scale_vertex_buffer")) {
                 
-                void* data;
-                vkMapMemory(m_device, m_scaleVertexBufferMemory, 0, bufferSize, 0, &data);
-                memcpy(data, scaleVertices.data(), bufferSize);
-                vkUnmapMemory(m_device, m_scaleVertexBufferMemory);
+                m_scaleVertexBuffer.setCount(static_cast<uint32_t>(scaleVertices.size()));
+                m_scaleVertexBuffer.setCapacity(static_cast<uint32_t>(scaleVertices.size()));
+                m_scaleVertexBuffer.updateData(scaleVertices.data(), bufferSize);
             }
         }
 
         Logger::get().info("Created gizmo vertex buffers: translation={}, rotation={}, scale={}",
-                         m_translationVertexCount, m_rotationVertexCount, m_scaleVertexCount);
+                         m_translationVertexBuffer.getCount(), m_rotationVertexBuffer.getCount(), m_scaleVertexBuffer.getCount());
 
         return true;
     }
 
     bool GizmoRenderer::createUniformBuffer() {
-        VkDeviceSize bufferSize = sizeof(glm::mat4) + sizeof(glm::vec3); // MVP matrix + gizmo position
+        // Define the uniform data structure to get proper alignment
+        struct UniformData {
+            glm::mat4 mvp;
+            glm::vec3 position;
+            float padding; // Align to 16 bytes
+        };
+        
+        VkDeviceSize bufferSize = sizeof(UniformData); // Properly aligned size
 
-        if (!createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        if (!m_uniformBuffer.create(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                         m_uniformBuffer, m_uniformBufferMemory)) {
+                         "gizmo_uniform_buffer")) {
             Logger::get().error("Failed to create gizmo uniform buffer");
             return false;
         }
 
         // Update descriptor set
         VkDescriptorBufferInfo bufferInfo{};
-        bufferInfo.buffer = m_uniformBuffer;
+        bufferInfo.buffer = m_uniformBuffer.getBuffer();
         bufferInfo.offset = 0;
         bufferInfo.range = bufferSize;
 
@@ -884,16 +919,16 @@ namespace tremor::editor {
         vkUpdateDescriptorSets(m_device, 1, &descriptorWrite, 0, nullptr);
         
         // Create second uniform buffer for gizmo transforms
-        if (!createBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        if (!m_gizmoUniformBuffer.create(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                         m_gizmoUniformBuffer, m_gizmoUniformBufferMemory)) {
+                         "gizmo_transform_uniform_buffer")) {
             Logger::get().error("Failed to create gizmo transform uniform buffer");
             return false;
         }
         
         // Update gizmo descriptor set
         VkDescriptorBufferInfo gizmoBufferInfo{};
-        gizmoBufferInfo.buffer = m_gizmoUniformBuffer;
+        gizmoBufferInfo.buffer = m_gizmoUniformBuffer.getBuffer();
         gizmoBufferInfo.offset = 0;
         gizmoBufferInfo.range = bufferSize;
         
@@ -1068,6 +1103,11 @@ namespace tremor::editor {
     }
 
     void GizmoRenderer::updateUniformBuffer(const glm::mat4& mvpMatrix, const glm::vec3& gizmoPos) {
+        // Check if buffer is valid before updating
+        if (!m_uniformBuffer.isValid()) {
+            return; // Buffer not yet created, skip update
+        }
+        
         struct UniformData {
             glm::mat4 mvp;
             glm::vec3 position;
@@ -1088,13 +1128,15 @@ namespace tremor::editor {
         
         */
 
-        void* mappedData;
-        vkMapMemory(m_device, m_uniformBufferMemory, 0, sizeof(data), 0, &mappedData);
-        memcpy(mappedData, &data, sizeof(data));
-        vkUnmapMemory(m_device, m_uniformBufferMemory);
+        m_uniformBuffer.updateData(&data, sizeof(data));
     }
     
     void GizmoRenderer::updateGizmoUniformBuffer(const glm::mat4& mvpMatrix, const glm::vec3& gizmoPos) {
+        // Check if buffer is valid before updating
+        if (!m_gizmoUniformBuffer.isValid()) {
+            return; // Buffer not yet created, skip update
+        }
+        
         struct UniformData {
             glm::mat4 mvp;
             glm::vec3 position;
@@ -1106,10 +1148,7 @@ namespace tremor::editor {
         data.position = gizmoPos;
         data.padding = 0.0f;
 
-        void* mappedData;
-        vkMapMemory(m_device, m_gizmoUniformBufferMemory, 0, sizeof(data), 0, &mappedData);
-        memcpy(mappedData, &data, sizeof(data));
-        vkUnmapMemory(m_device, m_gizmoUniformBufferMemory);
+        m_gizmoUniformBuffer.updateData(&data, sizeof(data));
     }
 
     float GizmoRenderer::calculateScreenSpaceSize(const glm::vec3& worldPos, const glm::mat4& viewMatrix,
@@ -1183,16 +1222,41 @@ namespace tremor::editor {
     }
 
     int GizmoRenderer::hitTestRotationGizmo(const glm::vec2& screenPos, const glm::vec2& center,
-                                           float screenSize, float tolerance) {
-        float distance = glm::length(screenPos - center);
-        float radius = screenSize;
-
-        // Check if we're near the circle radius
-        if (abs(distance - radius) > tolerance) return -1;
-
-        // For rotation gizmos, we could distinguish between X/Y/Z rings based on position
-        // For simplicity, return the closest ring (implementation needed)
-        return 1; // Y axis (most common)
+                                           float screenSize, float tolerance, const glm::vec3& gizmoPos,
+                                           const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                           const glm::vec2& viewport) {
+        // Generate mouse ray from screen position
+        Ray mouseRay = screenToWorldRay(screenPos, viewMatrix, projMatrix, viewport);
+        
+        float radius = m_gizmoSize;
+        float hitTolerance = m_gizmoSize * 0.1f; // 3D tolerance
+        
+        // Test against each rotation circle (X, Y, Z)
+        float minDistance = std::numeric_limits<float>::max();
+        int closestAxis = -1;
+        
+        // X-axis circle (rotation around X, circle lies in YZ plane)
+        float xDistance = distanceFromRayToCircle(mouseRay, gizmoPos, glm::vec3(1.0f, 0.0f, 0.0f), radius);
+        if (xDistance < minDistance && xDistance < hitTolerance) {
+            minDistance = xDistance;
+            closestAxis = 0; // X axis
+        }
+        
+        // Y-axis circle (rotation around Y, circle lies in XZ plane)  
+        float yDistance = distanceFromRayToCircle(mouseRay, gizmoPos, glm::vec3(0.0f, 1.0f, 0.0f), radius);
+        if (yDistance < minDistance && yDistance < hitTolerance) {
+            minDistance = yDistance;
+            closestAxis = 1; // Y axis
+        }
+        
+        // Z-axis circle (rotation around Z, circle lies in XY plane)
+        float zDistance = distanceFromRayToCircle(mouseRay, gizmoPos, glm::vec3(0.0f, 0.0f, 1.0f), radius);
+        if (zDistance < minDistance && zDistance < hitTolerance) {
+            minDistance = zDistance;
+            closestAxis = 2; // Z axis
+        }
+        
+        return closestAxis;
     }
 
     int GizmoRenderer::hitTestScaleGizmo(const glm::vec2& screenPos, const glm::vec2& center,
@@ -1285,28 +1349,29 @@ namespace tremor::editor {
         vertices.push_back({markerPos + glm::vec3(0, 0, markerSize), glm::vec3(1.0f, 0.0f, 1.0f)});
         
         // Ensure buffer exists and is large enough
-        if (m_mouseRayDebugBuffer == VK_NULL_HANDLE || m_mouseRayDebugCapacity < vertices.size()) {
-            // Clean up old buffer if it exists
-            if (m_mouseRayDebugBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(m_device, m_mouseRayDebugBuffer, nullptr);
-                vkFreeMemory(m_device, m_mouseRayDebugBufferMemory, nullptr);
-            }
-            
+        if (!m_mouseRayDebugBuffer.isValid() || m_mouseRayDebugBuffer.getCapacity() < vertices.size()) {
             // Create new buffer
-            m_mouseRayDebugCapacity = std::max(size_t(100), vertices.size() * 2);
-            VkDeviceSize bufferSize = sizeof(GizmoVertex) * m_mouseRayDebugCapacity;
+            uint32_t newCapacity = std::max(size_t(100), vertices.size() * 2);
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
             
-            createBuffer(bufferSize, 
+            if (!m_mouseRayDebugBuffer.create(bufferSize, 
                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                        m_mouseRayDebugBuffer, m_mouseRayDebugBufferMemory);
+                        "mouse_ray_debug_buffer")) {
+                Logger::get().error("Failed to create mouse ray debug buffer");
+                return;
+            }
+            
+            m_mouseRayDebugBuffer.setCapacity(newCapacity);
         }
         
         // Upload vertices
-        void* data;
-        vkMapMemory(m_device, m_mouseRayDebugBufferMemory, 0, sizeof(GizmoVertex) * vertices.size(), 0, &data);
-        memcpy(data, vertices.data(), sizeof(GizmoVertex) * vertices.size());
-        vkUnmapMemory(m_device, m_mouseRayDebugBufferMemory);
+        if (!m_mouseRayDebugBuffer.updateData(vertices.data(), sizeof(GizmoVertex) * vertices.size())) {
+            Logger::get().error("Failed to update mouse ray debug buffer data");
+            return;
+        }
+        
+        m_mouseRayDebugBuffer.setCount(vertices.size());
         
         // Update uniform buffer
         glm::mat4 mvpMatrix = projMatrix * viewMatrix;
@@ -1318,7 +1383,7 @@ namespace tremor::editor {
                               m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
         
         // Bind vertex buffer
-        VkBuffer vertexBuffers[] = {m_mouseRayDebugBuffer};
+        VkBuffer vertexBuffers[] = {m_mouseRayDebugBuffer.getBuffer()};
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
         
@@ -1404,47 +1469,55 @@ namespace tremor::editor {
         return glm::length(rayPoint - linePoint);
     }
 
-    bool GizmoRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                                    VkMemoryPropertyFlags properties, VkBuffer& buffer,
-                                    VkDeviceMemory& bufferMemory) {
-        VkBufferCreateInfo bufferInfo{};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = size;
-        bufferInfo.usage = usage;
-        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-        if (vkCreateBuffer(m_device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
-            return false;
+    float GizmoRenderer::distanceFromRayToCircle(const Ray& ray, const glm::vec3& circleCenter,
+                                                 const glm::vec3& circleNormal, float circleRadius) {
+        // Project the ray onto the plane containing the circle
+        float denom = glm::dot(circleNormal, ray.direction);
+        
+        if (abs(denom) < 0.001f) {
+            // Ray is parallel to the circle plane
+            return std::numeric_limits<float>::max();
         }
-
-        VkMemoryRequirements memRequirements;
-        vkGetBufferMemoryRequirements(m_device, buffer, &memRequirements);
-
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = memRequirements.size;
-        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
-
-        if (vkAllocateMemory(m_device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
-            vkDestroyBuffer(m_device, buffer, nullptr);
-            return false;
+        
+        // Find intersection of ray with the circle's plane
+        float t = glm::dot(circleNormal, circleCenter - ray.origin) / denom;
+        if (t < 0.0f) {
+            // Intersection is behind the ray origin
+            return std::numeric_limits<float>::max();
         }
-
-        vkBindBufferMemory(m_device, buffer, bufferMemory, 0);
-        return true;
-    }
-
-    uint32_t GizmoRenderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
-        VkPhysicalDeviceMemoryProperties memProperties;
-        vkGetPhysicalDeviceMemoryProperties(m_physicalDevice, &memProperties);
-
-        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-            if ((typeFilter & (1 << i)) && 
-                (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-                return i;
+        
+        // Point where ray intersects the plane
+        glm::vec3 planePoint = ray.origin + t * ray.direction;
+        
+        // Distance from plane intersection point to circle center
+        float distToCenter = glm::length(planePoint - circleCenter);
+        
+        // Find closest point on the circle to the plane intersection point
+        glm::vec3 toPoint = planePoint - circleCenter;
+        if (glm::length(toPoint) < 0.001f) {
+            // Point is at circle center, pick any point on circle
+            // Find a vector perpendicular to the normal
+            glm::vec3 perpendicular;
+            if (abs(circleNormal.x) < 0.9f) {
+                perpendicular = glm::cross(circleNormal, glm::vec3(1.0f, 0.0f, 0.0f));
+            } else {
+                perpendicular = glm::cross(circleNormal, glm::vec3(0.0f, 1.0f, 0.0f));
             }
+            toPoint = glm::normalize(perpendicular) * circleRadius;
+        } else {
+            // Normalize and scale to circle radius
+            toPoint = glm::normalize(toPoint) * circleRadius;
         }
-        return 0;
+        
+        glm::vec3 closestCirclePoint = circleCenter + toPoint;
+        
+        // Return distance from ray to closest point on circle
+        glm::vec3 rayToCircle = closestCirclePoint - ray.origin;
+        float rayProjection = glm::dot(rayToCircle, ray.direction);
+        glm::vec3 closestRayPoint = ray.origin + std::max(0.0f, rayProjection) * ray.direction;
+        
+        return glm::length(closestRayPoint - closestCirclePoint);
     }
+
 
 } // namespace tremor::editor

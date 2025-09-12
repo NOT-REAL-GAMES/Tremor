@@ -4,6 +4,7 @@
 #include "../gfx.h"
 #include "sdf_text_renderer.h"
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <SDL2/SDL.h>
 #include <string>
 #include <vector>
@@ -40,6 +41,9 @@ namespace tremor::gfx {
         bool visible = true;
         bool enabled = true;
         uint32_t id;
+        
+        // Transform matrix for this element
+        glm::mat4 transform = glm::mat4(1.0f); // Identity matrix by default
         
         // Visual properties
         uint32_t backgroundColor = 0x202020FF;
@@ -97,7 +101,7 @@ namespace tremor::gfx {
         // Element management
         uint32_t addButton(const std::string& text, glm::vec2 position, glm::vec2 size,
                           std::function<void()> onClick = nullptr);
-        uint32_t addLabel(const std::string& text, glm::vec2 position, uint32_t color = 0xFFFFFFFF);
+        uint32_t addLabel(const std::string& text, glm::vec2 position, uint32_t color = 0xFFFFFFFF, float scale = 1.0f);
         
         void removeElement(uint32_t id);
         void clearElements();
@@ -111,9 +115,33 @@ namespace tremor::gfx {
         
         // Get/Set element properties
         UIElement* getElement(uint32_t id);
+        const UIElement* getElement(uint32_t id) const;
         void setElementVisible(uint32_t id, bool visible);
         void setElementEnabled(uint32_t id, bool enabled);
+        void setElementText(uint32_t id, const std::string& text);
+        
+        // Per-element transform controls
+        void setElementTransform(uint32_t id, const glm::mat4& transform);
+        void setElementScale(uint32_t id, float scale);
+        void setElementScale(uint32_t id, float scaleX, float scaleY);
         void setElementPosition(uint32_t id, glm::vec2 position);
+        void setElementRotation(uint32_t id, float angleRadians);
+        void resetElementTransform(uint32_t id);
+        const glm::mat4* getElementTransform(uint32_t id) const;
+        
+        // Per-element transform component getters
+        glm::vec2 getElementPosition(uint32_t id) const;
+        glm::vec2 getElementScale(uint32_t id) const;
+        float getElementRotation(uint32_t id) const;
+        
+        // Global UI renderer transform controls (for entire UI)
+        void setTransform(const glm::mat4& transform);
+        void setScale(float scale);
+        void setScale(float scaleX, float scaleY);
+        void setPosition(float x, float y);
+        void setRotation(float angleRadians);
+        void resetTransform();
+        const glm::mat4& getTransform() const { return m_transform; }
         
     private:
         // Vertex structure for UI quads
@@ -145,6 +173,9 @@ namespace tremor::gfx {
         
         // Text renderer reference
         SDFTextRenderer* m_textRenderer = nullptr;
+        
+        // Transform matrix for the entire UI
+        glm::mat4 m_transform = glm::mat4(1.0f); // Identity matrix by default
         
         // Dirty flags for optimization
         bool m_textDirty = true;  // True when text needs to be regenerated

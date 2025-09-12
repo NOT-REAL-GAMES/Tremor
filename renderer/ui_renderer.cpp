@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <fstream>
 #include <array>
+#include <glm/gtx/matrix_decompose.hpp>
 
 namespace tremor::gfx {
 
@@ -440,17 +441,20 @@ namespace tremor::gfx {
         return buttonId;
     }
 
-    uint32_t UIRenderer::addLabel(const std::string& text, glm::vec2 position, uint32_t color) {
+    uint32_t UIRenderer::addLabel(const std::string& text, glm::vec2 position, uint32_t color, float scale) {
         auto label = std::make_unique<UILabel>();
         label->id = m_nextElementId++;
         label->text = text;
-        label->position = position;
         label->textColor = color;
         label->size = glm::vec2(0, 0); // Labels don't have explicit size
         
         auto lb = label->id;
         m_elements.push_back(std::move(label));
         
+        setElementPosition(lb,position);
+        setElementScale(lb,scale);
+
+
         return lb;
     }
 
@@ -610,23 +614,17 @@ namespace tremor::gfx {
         
         // Skip text rendering if no text renderer is set
         if (!m_textRenderer) {
-            // Logger::get().info("UI rendering without text (no font loaded)");
+            Logger::get().warning("UI rendering without text (no font loaded) - text renderer is null!");
             return;
         }
         
         // Track if any text colors changed (which happens with hover)
         bool textColorsChanged = false;
         
-        // Only rebuild text if UI has changed
-        if (m_textDirty) {
-            // Clear text renderer for this frame
-            m_textRenderer->clearText();
-            m_textDirty = false;
-        } else {
-            // Skip text processing if nothing changed
-            // Don't render here - let the main renderer handle it
-            return;
-        }
+        // Always rebuild text since we clear it every frame
+        // Clear text renderer for this frame
+        m_textRenderer->clearText();
+        m_textDirty = false;
         
         // Process all elements
         for (const auto& elem : m_elements) {
@@ -702,10 +700,31 @@ namespace tremor::gfx {
 
                     textColor = (r << 24) | (g << 16) | (b << 8) | a;                        
 
+                    // Apply transforms to the calculated text position within the button
+                    // Since elem->transform already includes the button position, we apply it to the relative text offset
+                    glm::vec2 relativeTextPos = textPos - button->position;  // Get text offset from button position
+                    glm::vec4 elementTransformedPos = elem->transform * glm::vec4(relativeTextPos.x, relativeTextPos.y, 0.0f, 1.0f);
+                    glm::vec4 finalTransformedPos = m_transform * elementTransformedPos;
+                    
+                    // Extract scale from both transforms for text scaling
+                    glm::vec3 elementScale, elementTranslation, elementSkew;
+                    glm::vec4 elementPerspective;
+                    glm::quat elementRotation;
+                    glm::decompose(elem->transform, elementScale, elementRotation, elementTranslation, elementSkew, elementPerspective);
+                    float elementAvgScale = (elementScale.x + elementScale.y) * 0.5f;
+                    
+                    glm::vec3 globalScale, globalTranslation, globalSkew;
+                    glm::vec4 globalPerspective;
+                    glm::quat globalRotation;
+                    glm::decompose(m_transform, globalScale, globalRotation, globalTranslation, globalSkew, globalPerspective);
+                    float globalAvgScale = (globalScale.x + globalScale.y) * 0.5f;
+                    
+                    float combinedScale = elementAvgScale * globalAvgScale;
+                    
                     // Add text to renderer
                     TextInstance textInst;
-                    textInst.position = textPos;
-                    textInst.scale = dynamicTextScale;  // Use dynamic scale instead of fixed
+                    textInst.position = glm::vec2(finalTransformedPos.x, finalTransformedPos.y);
+                    textInst.scale = dynamicTextScale * combinedScale;  // Apply combined transform scaling
                     textInst.font_spacing = 1.0f;
                     textInst.color = textColor;
                     textInst.text = displayText;
@@ -713,22 +732,55 @@ namespace tremor::gfx {
                     
                     m_textRenderer->addText(textInst);
                     
-                    // Debug output removed - was causing log spam
+                    // Debug: log when we add text
+                    static int debugCount = 0;
+                    if (debugCount < 20) {
+                        Logger::get().info("Adding button text '{}' at ({}, {}) scale={}", 
+                                         textInst.text, textInst.position.x, textInst.position.y, textInst.scale);
+                        debugCount++;
+                    }
                     break;
                 }
                 
                 case UIElementType::Label: {
                     const UILabel* label = static_cast<const UILabel*>(elem.get());
                     
+                    // Apply transforms to origin since transform matrix already contains position
+                    glm::vec4 elementTransformedPos = label->transform * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+                    glm::vec4 finalTransformedPos = m_transform * elementTransformedPos;
+                    
+                    // Extract scale from both transforms for text scaling
+                    glm::vec3 elementScale, elementTranslation, elementSkew;
+                    glm::vec4 elementPerspective;
+                    glm::quat elementRotation;
+                    glm::decompose(label->transform, elementScale, elementRotation, elementTranslation, elementSkew, elementPerspective);
+                    float elementAvgScale = (elementScale.x + elementScale.y) * 0.5f;
+                    
+                    glm::vec3 globalScale, globalTranslation, globalSkew;
+                    glm::vec4 globalPerspective;
+                    glm::quat globalRotation;
+                    glm::decompose(m_transform, globalScale, globalRotation, globalTranslation, globalSkew, globalPerspective);
+                    float globalAvgScale = (globalScale.x + globalScale.y) * 0.5f;
+                    
+                    float combinedScale = elementAvgScale * globalAvgScale;
+                    
                     TextInstance textInst;
-                    textInst.position = label->position;
-                    textInst.scale = label->textScale;
+                    textInst.position = glm::vec2(finalTransformedPos.x, finalTransformedPos.y);
+                    textInst.scale = label->textScale * combinedScale;  // Apply combined transform scaling
                     textInst.font_spacing = 1.0f;
                     textInst.color = label->textColor;
                     textInst.text = label->text;
                     textInst.flags = 0;
                     
                     m_textRenderer->addText(textInst);
+                    
+                    // Debug: log when we add label text
+                    static int labelDebugCount = 0;
+                    if (labelDebugCount < 20) {
+                        Logger::get().info("Adding label text '{}' at ({}, {}) scale={}", 
+                                         textInst.text, textInst.position.x, textInst.position.y, textInst.scale);
+                        labelDebugCount++;
+                    }
                     break;
                 }
                 
@@ -743,6 +795,15 @@ namespace tremor::gfx {
 
     UIElement* UIRenderer::getElement(uint32_t id) {
         for (auto& elem : m_elements) {
+            if (elem->id == id) {
+                return elem.get();
+            }
+        }
+        return nullptr;
+    }
+    
+    const UIElement* UIRenderer::getElement(uint32_t id) const {
+        for (const auto& elem : m_elements) {
             if (elem->id == id) {
                 return elem.get();
             }
@@ -769,11 +830,25 @@ namespace tremor::gfx {
         }
     }
 
-    void UIRenderer::setElementPosition(uint32_t id, glm::vec2 position) {
+    void UIRenderer::setElementText(uint32_t id, const std::string& text) {
         if (UIElement* elem = getElement(id)) {
-            elem->position = position;
+            // Cast to appropriate text-containing type and update
+            if (elem->type == UIElementType::Label) {
+                UILabel* label = static_cast<UILabel*>(elem);
+                if (label->text != text) {
+                    label->text = text;
+                    m_textDirty = true; // Mark text as needing regeneration
+                }
+            } else if (elem->type == UIElementType::Button) {
+                UIButton* button = static_cast<UIButton*>(elem);
+                if (button->text != text) {
+                    button->text = text;
+                    m_textDirty = true; // Mark text as needing regeneration
+                }
+            }
         }
     }
+
 
     uint32_t UIRenderer::getElementColor(const UIElement* element) const {
         switch (element->state) {
@@ -824,15 +899,21 @@ namespace tremor::gfx {
                 float x2 = button->position.x + button->size.x;
                 float y2 = button->position.y + button->size.y;
                 
+                // Apply element transform to all corners
+                glm::vec4 corner1 = button->transform * glm::vec4(x1, y1, 0.0f, 1.0f);
+                glm::vec4 corner2 = button->transform * glm::vec4(x2, y1, 0.0f, 1.0f);
+                glm::vec4 corner3 = button->transform * glm::vec4(x2, y2, 0.0f, 1.0f);
+                glm::vec4 corner4 = button->transform * glm::vec4(x1, y2, 0.0f, 1.0f);
+                
                 // Triangle 1
-                m_quadVertices.push_back({{x1, y1}, {0, 0}, bgColor});
-                m_quadVertices.push_back({{x2, y1}, {1, 0}, bgColor});
-                m_quadVertices.push_back({{x2, y2}, {1, 1}, bgColor});
+                m_quadVertices.push_back({{corner1.x, corner1.y}, {0, 0}, bgColor});
+                m_quadVertices.push_back({{corner2.x, corner2.y}, {1, 0}, bgColor});
+                m_quadVertices.push_back({{corner3.x, corner3.y}, {1, 1}, bgColor});
                 
                 // Triangle 2
-                m_quadVertices.push_back({{x1, y1}, {0, 0}, bgColor});
-                m_quadVertices.push_back({{x2, y2}, {1, 1}, bgColor});
-                m_quadVertices.push_back({{x1, y2}, {0, 1}, bgColor});
+                m_quadVertices.push_back({{corner1.x, corner1.y}, {0, 0}, bgColor});
+                m_quadVertices.push_back({{corner3.x, corner3.y}, {1, 1}, bgColor});
+                m_quadVertices.push_back({{corner4.x, corner4.y}, {0, 1}, bgColor});
             }
         }
         
@@ -860,10 +941,11 @@ namespace tremor::gfx {
             return;
         }
         
-        // Update uniform buffer with projection matrix
+        // Update uniform buffer with projection * transform matrix
+        glm::mat4 finalMatrix = projection * m_transform;
         void* data;
         vkMapMemory(m_device, m_uniformBufferMemory, 0, sizeof(glm::mat4), 0, &data);
-        memcpy(data, &projection, sizeof(glm::mat4));
+        memcpy(data, &finalMatrix, sizeof(glm::mat4));
         vkUnmapMemory(m_device, m_uniformBufferMemory);
         
         // Bind pipeline and descriptor sets
@@ -893,6 +975,178 @@ namespace tremor::gfx {
         
         // Draw
         vkCmdDraw(commandBuffer, static_cast<uint32_t>(m_quadVertices.size()), 1, 0, 0);
+    }
+
+    // Per-element transform manipulation methods
+    void UIRenderer::setElementTransform(uint32_t id, const glm::mat4& transform) {
+        UIElement* elem = getElement(id);
+        if (elem) {
+            elem->transform = transform;
+            m_quadsDirty = true;  // Mark quads as needing regeneration
+            m_textDirty = true;   // Mark text as needing regeneration
+        }
+    }
+    
+    void UIRenderer::setElementScale(uint32_t id, float scale) {
+        UIElement* elem = getElement(id);
+        if (elem) {
+            // Get current position and rotation to preserve them
+            glm::vec2 currentPosition = getElementPosition(id);
+            float currentRotation = getElementRotation(id);
+            
+            // Build new transform matrix: Translation * Rotation * Scale (applied right-to-left)
+            glm::mat4 newTransform = glm::mat4(1.0f);
+            newTransform = glm::translate(newTransform, glm::vec3(currentPosition, 0.0f));
+            newTransform = glm::rotate(newTransform, currentRotation, glm::vec3(0.0f, 0.0f, 1.0f));
+            newTransform = glm::scale(newTransform, glm::vec3(scale, scale, 1.0f));
+            
+            elem->transform = newTransform;
+            m_quadsDirty = true;
+            m_textDirty = true;
+        }
+    }
+    
+    void UIRenderer::setElementScale(uint32_t id, float scaleX, float scaleY) {
+        UIElement* elem = getElement(id);
+        if (elem) {
+            // Get current position and rotation to preserve them
+            glm::vec2 currentPosition = getElementPosition(id);
+            float currentRotation = getElementRotation(id);
+            
+            // Build new transform matrix: Translation * Rotation * Scale (applied right-to-left)
+            glm::mat4 newTransform = glm::mat4(1.0f);
+            newTransform = glm::translate(newTransform, glm::vec3(currentPosition, 0.0f));
+            newTransform = glm::rotate(newTransform, currentRotation, glm::vec3(0.0f, 0.0f, 1.0f));
+            newTransform = glm::scale(newTransform, glm::vec3(scaleX, scaleY, 1.0f));
+            
+            elem->transform = newTransform;
+            m_quadsDirty = true;
+            m_textDirty = true;
+        }
+    }
+    
+    void UIRenderer::setElementPosition(uint32_t id, glm::vec2 position) {
+        UIElement* elem = getElement(id);
+        if (elem) {
+            // Get current scale and rotation to preserve them
+            glm::vec2 currentScale = getElementScale(id);
+            float currentRotation = getElementRotation(id);
+            
+            // Build new transform matrix: Translation * Rotation * Scale (applied right-to-left)
+            // Use position directly without compensation - matrix operations should handle this correctly
+            glm::mat4 newTransform = glm::mat4(1.0f);
+            newTransform = glm::translate(newTransform, glm::vec3(position, 0.0f));
+            newTransform = glm::rotate(newTransform, currentRotation, glm::vec3(0.0f, 0.0f, 1.0f));
+            newTransform = glm::scale(newTransform, glm::vec3(currentScale.x, currentScale.y, 1.0f));
+            
+            elem->transform = newTransform;
+            m_quadsDirty = true;
+            m_textDirty = true;
+        }
+    }
+    
+    void UIRenderer::setElementRotation(uint32_t id, float angleRadians) {
+        UIElement* elem = getElement(id);
+        if (elem) {
+            // Get current scale and position to preserve them  
+            glm::vec2 currentScale = getElementScale(id);
+            glm::vec2 currentPosition = getElementPosition(id);
+            
+            // Build new transform matrix: Translation * Rotation * Scale (applied right-to-left)
+            glm::mat4 newTransform = glm::mat4(1.0f);
+            newTransform = glm::translate(newTransform, glm::vec3(currentPosition, 0.0f));
+            newTransform = glm::rotate(newTransform, angleRadians, glm::vec3(0.0f, 0.0f, 1.0f));
+            newTransform = glm::scale(newTransform, glm::vec3(currentScale.x, currentScale.y, 1.0f));
+            
+            elem->transform = newTransform;
+            m_quadsDirty = true;
+            m_textDirty = true;
+        }
+    }
+    
+    void UIRenderer::resetElementTransform(uint32_t id) {
+        UIElement* elem = getElement(id);
+        if (elem) {
+            elem->transform = glm::mat4(1.0f);
+            m_quadsDirty = true;
+            m_textDirty = true;
+        }
+    }
+    
+    const glm::mat4* UIRenderer::getElementTransform(uint32_t id) const {
+        for (const auto& elem : m_elements) {
+            if (elem->id == id) {
+                return &elem->transform;
+            }
+        }
+        return nullptr;
+    }
+    
+    glm::vec2 UIRenderer::getElementPosition(uint32_t id) const {
+        const UIElement* elem = getElement(id);
+        if (elem) {
+            // Extract position from transform matrix
+            glm::vec3 scale, translation, skew;
+            glm::vec4 perspective;
+            glm::quat rotation;
+            glm::decompose(elem->transform, scale, rotation, translation, skew, perspective);
+            return glm::vec2(translation.x, translation.y);
+        }
+        return glm::vec2(0.0f, 0.0f);
+    }
+    
+    glm::vec2 UIRenderer::getElementScale(uint32_t id) const {
+        const UIElement* elem = getElement(id);
+        if (elem) {
+            // Extract scale from transform matrix
+            glm::vec3 scale, translation, skew;
+            glm::vec4 perspective;
+            glm::quat rotation;
+            glm::decompose(elem->transform, scale, rotation, translation, skew, perspective);
+            return glm::vec2(scale.x, scale.y);
+        }
+        return glm::vec2(1.0f, 1.0f);
+    }
+    
+    float UIRenderer::getElementRotation(uint32_t id) const {
+        const UIElement* elem = getElement(id);
+        if (elem) {
+            // Extract rotation from transform matrix
+            glm::vec3 scale, translation, skew;
+            glm::vec4 perspective;
+            glm::quat rotation;
+            glm::decompose(elem->transform, scale, rotation, translation, skew, perspective);
+            
+            // Convert quaternion to angle around Z axis
+            float angle = 2.0f * atan2(rotation.z, rotation.w);
+            return angle;
+        }
+        return 0.0f;
+    }
+
+    // Global transform manipulation methods
+    void UIRenderer::setTransform(const glm::mat4& transform) {
+        m_transform = transform;
+    }
+    
+    void UIRenderer::setScale(float scale) {
+        m_transform = glm::scale(glm::mat4(1.0f), glm::vec3(scale, scale, 1.0f));
+    }
+    
+    void UIRenderer::setScale(float scaleX, float scaleY) {
+        m_transform = glm::scale(glm::mat4(1.0f), glm::vec3(scaleX, scaleY, 1.0f));
+    }
+    
+    void UIRenderer::setPosition(float x, float y) {
+        m_transform = glm::translate(glm::mat4(1.0f), glm::vec3(x, y, 0.0f));
+    }
+    
+    void UIRenderer::setRotation(float angleRadians) {
+        m_transform = glm::rotate(glm::mat4(1.0f), angleRadians, glm::vec3(0.0f, 0.0f, 1.0f));
+    }
+    
+    void UIRenderer::resetTransform() {
+        m_transform = glm::mat4(1.0f);
     }
 
 } // namespace tremor::gfx

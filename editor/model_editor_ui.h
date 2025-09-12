@@ -68,7 +68,7 @@ namespace tremor::editor {
 
         // Update UI state based on editor state
         void onModeChanged(EditorMode mode);
-        void onSelectionChanged(const Selection& selection);
+        void onSelectionChanged(const Selection& selection, EditableModel* model = nullptr);
         void onModelChanged();
 
     private:
@@ -125,9 +125,9 @@ namespace tremor::editor {
         static constexpr float TOOLS_PANEL_X = 10.0f;
         static constexpr float TOOLS_PANEL_Y = 10.0f;
         static constexpr float PROPERTIES_PANEL_X = 10.0f;
-        static constexpr float PROPERTIES_PANEL_Y = 200.0f;
+        static constexpr float PROPERTIES_PANEL_Y = 300.0f;
         static constexpr float FILE_PANEL_X = 10.0f;
-        static constexpr float FILE_PANEL_Y = 400.0f;
+        static constexpr float FILE_PANEL_Y = 500.0f;
 
         // Colors
         static constexpr uint32_t PANEL_BG_COLOR = 0x2A2A2AE0;

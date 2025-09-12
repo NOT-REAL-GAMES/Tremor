@@ -48,13 +48,42 @@ namespace tremor::editor {
         updateButtonState(m_toolsPanel.createTriangleButtonId, mode == EditorMode::CreateTriangle);
     }
 
-    void ModelEditorUI::onSelectionChanged(const Selection& selection) {
+    void ModelEditorUI::onSelectionChanged(const Selection& selection, EditableModel* model) {
+        Logger::get().info("🎯 onSelectionChanged called - updating UI labels");
+        
         // Update properties panel with selection info
         std::string selectionInfo = getSelectionInfo(selection);
+        Logger::get().info("Selection info: {}", selectionInfo);
         updateLabelText(m_propertiesPanel.meshInfoLabelId, selectionInfo);
 
-        // TODO: Update position/rotation/scale labels with actual values
-        if (selection.hasMesh()) {
+        // Calculate average position for selected vertices
+        if (selection.hasCustomVertices() && model) {
+            glm::vec3 averagePos(0.0f);
+            int count = 0;
+            
+            const auto& vertices = model->getCustomVertices();
+            for (const auto& vertex : vertices) {
+                if (selection.hasCustomVertex(vertex.id)) {
+                    averagePos += vertex.position;
+                    count++;
+                }
+            }
+            
+            if (count > 0) {
+                averagePos /= static_cast<float>(count);
+                std::string posText = "Pos: " + formatVector3(averagePos);
+                updateLabelText(m_propertiesPanel.positionLabelId, posText);
+                Logger::get().info("Updated position label: {}", posText);
+            } else {
+                updateLabelText(m_propertiesPanel.positionLabelId, "Pos: (0.0, 0.0, 0.0)");
+            }
+            
+            // TODO: Add rotation calculation for custom vertices if needed
+            updateLabelText(m_propertiesPanel.rotationLabelId, "Rot: (0.0, 0.0, 0.0)");
+            updateLabelText(m_propertiesPanel.scaleLabelId, "Scale: (1.0, 1.0, 1.0)");
+            
+        } else if (selection.hasMesh()) {
+            // Handle mesh selections (non-custom vertices)
             updateLabelText(m_propertiesPanel.positionLabelId, "Pos: (0.0, 0.0, 0.0)");
             updateLabelText(m_propertiesPanel.rotationLabelId, "Rot: (0.0, 0.0, 0.0)");
             updateLabelText(m_propertiesPanel.scaleLabelId, "Scale: (1.0, 1.0, 1.0)");
@@ -73,18 +102,10 @@ namespace tremor::editor {
     void ModelEditorUI::createToolsPanel() {
         Logger::get().info("Creating tools panel with UIRenderer");
 
-        // Panel background
-        m_toolsPanel.backgroundId = m_uiRenderer.addLabel("", 
-            glm::vec2(TOOLS_PANEL_X, TOOLS_PANEL_Y), PANEL_BG_COLOR);
-        auto* bgElement = m_uiRenderer.getElement(m_toolsPanel.backgroundId);
-        if (bgElement) {
-            bgElement->size = glm::vec2(PANEL_WIDTH, 250.0f); // Increased height for mesh creation buttons
-        }
-
         // Title
         m_toolsPanel.titleLabelId = m_uiRenderer.addLabel("Tools", 
             glm::vec2(TOOLS_PANEL_X + PANEL_PADDING, TOOLS_PANEL_Y + PANEL_PADDING), 
-            TITLE_COLOR);
+            TITLE_COLOR, 0.7f);
 
         float buttonY = TOOLS_PANEL_Y + 40.0f;
 
@@ -131,18 +152,10 @@ namespace tremor::editor {
     void ModelEditorUI::createPropertiesPanel() {
         Logger::get().debug("Creating properties panel");
 
-        // Panel background  
-        m_propertiesPanel.backgroundId = m_uiRenderer.addLabel("",
-            glm::vec2(PROPERTIES_PANEL_X, PROPERTIES_PANEL_Y), PANEL_BG_COLOR);
-        auto* bgElement = m_uiRenderer.getElement(m_propertiesPanel.backgroundId);
-        if (bgElement) {
-            bgElement->size = glm::vec2(PANEL_WIDTH, 240.0f); // Increased height for selection radius controls
-        }
-
         // Title
         m_propertiesPanel.titleLabelId = m_uiRenderer.addLabel("Properties",
             glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, PROPERTIES_PANEL_Y + PANEL_PADDING),
-            TITLE_COLOR);
+            TITLE_COLOR, 0.75f);
 
         float labelY = PROPERTIES_PANEL_Y + 40.0f;
         const float labelHeight = 20.0f;
@@ -150,24 +163,24 @@ namespace tremor::editor {
 
         // Property labels
         m_propertiesPanel.meshInfoLabelId = m_uiRenderer.addLabel("Selection: None",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR);
+            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR, 0.4f);
 
         labelY += labelHeight + labelSpacing;
         m_propertiesPanel.positionLabelId = m_uiRenderer.addLabel("Pos: -",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR);
+            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR, 0.3f);
 
         labelY += labelHeight + labelSpacing;
         m_propertiesPanel.rotationLabelId = m_uiRenderer.addLabel("Rot: -",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR);
+            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR, 0.3f);
 
         labelY += labelHeight + labelSpacing;
         m_propertiesPanel.scaleLabelId = m_uiRenderer.addLabel("Scale: -",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR);
+            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR, 0.3f);
 
         // Selection radius controls
         labelY += labelHeight + labelSpacing + 10.0f; // Extra spacing
-        m_propertiesPanel.selectionRadiusLabelId = m_uiRenderer.addLabel("Vertex Radius: 0.50",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR);
+        m_propertiesPanel.selectionRadiusLabelId = m_uiRenderer.addLabel("Vertex Radius: 0.25",
+            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR, 0.2f);
 
         labelY += labelHeight + labelSpacing;
         m_propertiesPanel.selectionRadiusButtonId = m_uiRenderer.addButton("Adjust",
@@ -176,20 +189,12 @@ namespace tremor::editor {
     }
 
     void ModelEditorUI::createFilePanel() {
-        Logger::get().debug("Creating file panel");
-
-        // Panel background
-        m_filePanel.backgroundId = m_uiRenderer.addLabel("",
-            glm::vec2(FILE_PANEL_X, FILE_PANEL_Y), PANEL_BG_COLOR);
-        auto* bgElement = m_uiRenderer.getElement(m_filePanel.backgroundId);
-        if (bgElement) {
-            bgElement->size = glm::vec2(PANEL_WIDTH, 200.0f);
-        }
+        Logger::get().debug("Creating file panel");        
 
         // Title
         m_filePanel.titleLabelId = m_uiRenderer.addLabel("File",
             glm::vec2(FILE_PANEL_X + PANEL_PADDING, FILE_PANEL_Y + PANEL_PADDING),
-            TITLE_COLOR);
+            TITLE_COLOR, 0.4f);
 
         float buttonY = FILE_PANEL_Y + 40.0f;
 
@@ -219,7 +224,7 @@ namespace tremor::editor {
 
         buttonY += BUTTON_HEIGHT + BUTTON_SPACING + 10.0f;
         m_filePanel.statusLabelId = m_uiRenderer.addLabel("Status: Ready",
-            glm::vec2(FILE_PANEL_X + PANEL_PADDING, buttonY), TEXT_COLOR);
+            glm::vec2(FILE_PANEL_X + PANEL_PADDING, buttonY), TEXT_COLOR, 0.2f);
     }
 
     void ModelEditorUI::onSelectModeClicked() {
@@ -333,9 +338,8 @@ namespace tremor::editor {
     }
 
     void ModelEditorUI::updateLabelText(uint32_t labelId, const std::string& text) {
-        // TODO: Implement text update for UI labels
-        // This requires extending the UIRenderer to support text updates
-        Logger::get().debug("Would update label {} with text: {}", labelId, text);
+        Logger::get().debug("updateLabelText called: labelId={}, text='{}'", labelId, text);
+        m_uiRenderer.setElementText(labelId, text);
     }
 
     std::string ModelEditorUI::formatVector3(const glm::vec3& vec) {
@@ -346,22 +350,30 @@ namespace tremor::editor {
     }
 
     std::string ModelEditorUI::getSelectionInfo(const Selection& selection) {
-        if (!selection.hasMesh()) {
-            return "Selection: None";
-        }
-
         std::ostringstream oss;
-        oss << "Mesh: " << selection.meshId;
         
-        if (selection.hasVertex()) {
-            oss << ", Vertex: " << selection.vertexIndex;
+        // Handle custom vertex selections
+        if (selection.hasCustomVertices()) {
+            oss << "Custom Vertices: ";
+            const auto& customVertices = selection.customVertexIds;
+            for (size_t i = 0; i < customVertices.size(); ++i) {
+                if (i > 0) oss << ", ";
+                oss << customVertices[i];
+            }
+            return oss.str();
         }
         
-        if (selection.hasFace()) {
-            oss << ", Face: " << selection.faceIndex;
+        // Handle mesh selections  
+        if (selection.hasMesh()) {
+            oss << "Mesh: " << selection.meshId;
+            
+            if (selection.hasVertex()) {
+                oss << ", Vertex: " << selection.vertexIndex;
+            }
+            return oss.str();
         }
-
-        return oss.str();
+        
+        return "Selection: None";
     }
 
     void ModelEditorUI::onSelectionRadiusClicked() {

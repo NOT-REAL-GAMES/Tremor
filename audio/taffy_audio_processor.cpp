@@ -340,36 +340,36 @@ namespace tremor::audio {
 
             samples_.push_back(sample);
             
-            std::cout << "   Sample " << i << ": hash=0x" << std::hex << wavetable.name_hash << std::dec
+            /*std::cout << "   Sample " << i << ": hash=0x" << std::hex << wavetable.name_hash << std::dec
                       << ", " << totalSamples << " samples, " << wavetable.channel_count << " channels, "
                       << wavetable.bit_depth << "-bit" << std::endl;
             std::cout << "   Sample rate: " << sample.sampleRate << " Hz" << std::endl;
             std::cout << "   Base frequency: " << sample.baseFrequency << " Hz" << std::endl;
             std::cout << "   Has loop: " << (sample.hasLoop ? "yes" : "no") << std::endl;
-            
+            */
             // Debug: Show first few samples and raw bytes
             if (sample.data.size() > 0) {
-                std::cout << "   First 10 samples: ";
+                //std::cout << "   First 10 samples: ";
                 for (size_t j = 0; j < std::min(size_t(10), sample.data.size()); ++j) {
-                    std::cout << sample.data[j] << " ";
+                    //std::cout << sample.data[j] << " ";
                 }
-                std::cout << std::endl;
+                //std::cout << std::endl;
                 
                 // Also show raw bytes for debugging
-                std::cout << "   First 20 raw bytes: ";
+                //std::cout << "   First 20 raw bytes: ";
                 const uint8_t* rawPtr = chunkStart + wavetable.data_offset;
                 for (size_t j = 0; j < std::min(size_t(20), size_t(wavetable.data_size)); ++j) {
-                    std::cout << std::hex << static_cast<int>(rawPtr[j]) << " ";
+                    //std::cout << std::hex << static_cast<int>(rawPtr[j]) << " ";
                 }
-                std::cout << std::dec << std::endl;
+                //std::cout << std::dec << std::endl;
             }
         }
         
         // Read streaming audio info
-        std::cout << "🎵 Reading " << header_.streaming_count << " streaming audio entries..." << std::endl;
-        std::cout << "   Current ptr offset: " << (ptr - audioData.data()) << " bytes from start" << std::endl;
-        std::cout << "   Total chunk size: " << audioData.size() << " bytes" << std::endl;
-        std::cout << "   Expected streaming info at offset: " << (ptr - audioData.data()) << std::endl;
+        //std::cout << "🎵 Reading " << header_.streaming_count << " streaming audio entries..." << std::endl;
+        //std::cout << "   Current ptr offset: " << (ptr - audioData.data()) << " bytes from start" << std::endl;
+        //std::cout << "   Total chunk size: " << audioData.size() << " bytes" << std::endl;
+        //std::cout << "   Expected streaming info at offset: " << (ptr - audioData.data()) << std::endl;
         for (uint32_t i = 0; i < header_.streaming_count; ++i) {
             // Check if we have enough data
             if (ptr + sizeof(Taffy::AudioChunk::StreamingAudio) > audioData.data() + audioData.size()) {
@@ -428,8 +428,8 @@ namespace tremor::audio {
                            audioData.data() + stream.dataOffset, 
                            stream.embeddedDataSize);
                 stream.embeddedData = stream.embeddedDataCopy.data();
-                std::cout << "   📦 Found embedded audio data at offset " << stream.dataOffset 
-                          << ", size: " << stream.embeddedDataSize << " bytes" << std::endl;
+                //std::cout << "   📦 Found embedded audio data at offset " << stream.dataOffset 
+                //          << ", size: " << stream.embeddedDataSize << " bytes" << std::endl;
             } else {
                 std::cerr << "   ⚠️ Data offset " << stream.dataOffset 
                           << " is beyond chunk size " << audioData.size() << std::endl;
@@ -459,13 +459,14 @@ namespace tremor::audio {
                 streamingAudios_.push_back(stream);
             }
             
-            std::cout << "   Streaming Audio " << i << ": hash=0x" << std::hex << streamInfo.name_hash << std::dec
+            /*std::cout << "   Streaming Audio " << i << ": hash=0x" << std::hex << streamInfo.name_hash << std::dec
                       << ", " << streamInfo.total_samples << " samples, " << streamInfo.channel_count << " channels, "
                       << streamInfo.bit_depth << "-bit" << std::endl;
             std::cout << "   Sample rate: " << streamInfo.sample_rate << " Hz" << std::endl;
             std::cout << "   Chunk size: " << streamInfo.chunk_size << " samples" << std::endl;
             std::cout << "   Total chunks: " << streamInfo.chunk_count << std::endl;
             std::cout << "   Data offset in TAF: " << streamInfo.data_offset << std::endl;
+            */
         }
 
         std::cout << "✅ Audio chunk loaded successfully!" << std::endl;

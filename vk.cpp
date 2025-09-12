@@ -6462,12 +6462,13 @@ namespace tremor::gfx {
             // Initialize text renderer
             m_textRenderer = std::make_unique<tremor::gfx::SDFTextRenderer>(
                 device, physicalDevice, m_commandPool->handle(), graphicsQueue);
-            if (!m_textRenderer->initialize(
+            bool textRendererInitialized = m_textRenderer->initialize(
                 vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
                 vkSwapchain->imageFormat(),
-                m_msaaSamples)) {
-                //Logger::get().error("Failed to initialize SDF text renderer");
-                // Continue anyway - text rendering is optional
+                m_msaaSamples);
+            if (!textRendererInitialized) {
+                Logger::get().warning("Failed to initialize SDF text renderer - text will not be rendered");
+                m_textRenderer.reset(); // Clear the unusable text renderer
             }
 
             // Initialize UI renderer
@@ -6480,8 +6481,13 @@ namespace tremor::gfx {
                 Logger::get().error("Failed to initialize UI renderer");
                 // Continue anyway - UI is optional
             } else {
-                // Set text renderer for the UI
-                m_uiRenderer->setTextRenderer(m_textRenderer.get());
+                // Set text renderer for the UI only if it was successfully initialized
+                if (m_textRenderer) {
+                    m_uiRenderer->setTextRenderer(m_textRenderer.get());
+                    Logger::get().info("Text renderer successfully linked to UI renderer");
+                } else {
+                    Logger::get().warning("No text renderer available - UI text will not render");
+                }
                 
                 // Add some test buttons
                 /*m_uiRenderer->addButton("Reload Assets", glm::vec2(20, 100), glm::vec2(160, 40),
@@ -6567,17 +6573,14 @@ namespace tremor::gfx {
         void VulkanBackend::shutdown() {};
         
         void VulkanBackend::handleInput(const SDL_Event& event) {
-            // Pass input to model editor first (it may consume the event)
-            if (m_editorIntegration) {
-                m_editorIntegration->handleInput(event);
-                if (m_editorIntegration->isEditorEnabled()) {
-                    return; // Editor consumed the event
-                }
-            }
-            
-            // Pass input to UI renderer
+            // Pass input to UI renderer first (UI elements take priority)
             if (m_uiRenderer) {
                 m_uiRenderer->updateInput(event);
+            }
+            
+            // Then pass input to model editor 
+            if (m_editorIntegration) {
+                m_editorIntegration->handleInput(event);
             }
         }
         

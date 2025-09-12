@@ -11,6 +11,55 @@ namespace tremor::editor {
     enum class EditorMode;
 
     /**
+     * RAII wrapper for Vulkan buffer management in gizmos
+     */
+    class GizmoBuffer {
+    public:
+        GizmoBuffer(VkDevice device, VkPhysicalDevice physicalDevice);
+        ~GizmoBuffer();
+        
+        // Non-copyable but movable
+        GizmoBuffer(const GizmoBuffer&) = delete;
+        GizmoBuffer& operator=(const GizmoBuffer&) = delete;
+        GizmoBuffer(GizmoBuffer&& other) noexcept;
+        GizmoBuffer& operator=(GizmoBuffer&& other) noexcept;
+        
+        // Create buffer with specified size and usage
+        bool create(VkDeviceSize size, VkBufferUsageFlags usage, 
+                   VkMemoryPropertyFlags properties, const std::string& name = "");
+        
+        // Update buffer data
+        bool updateData(const void* data, VkDeviceSize size, VkDeviceSize offset = 0);
+        
+        // Getters
+        VkBuffer getBuffer() const { return m_buffer; }
+        VkDeviceMemory getMemory() const { return m_memory; }
+        VkDeviceSize getSize() const { return m_size; }
+        uint32_t getCapacity() const { return m_capacity; }
+        uint32_t getCount() const { return m_count; }
+        
+        // Setters for count tracking
+        void setCapacity(uint32_t capacity) { m_capacity = capacity; }
+        void setCount(uint32_t count) { m_count = count; }
+        
+        // Check if buffer is valid
+        bool isValid() const { return m_buffer != VK_NULL_HANDLE; }
+        
+    private:
+        VkDevice m_device;
+        VkPhysicalDevice m_physicalDevice;
+        VkBuffer m_buffer;
+        VkDeviceMemory m_memory;
+        VkDeviceSize m_size;
+        uint32_t m_capacity;
+        uint32_t m_count;
+        std::string m_name;
+        
+        void cleanup();
+        uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
+    };
+
+    /**
      * Renders transform gizmos (move, rotate, scale) in the editor viewport
      */
     class GizmoRenderer {
@@ -92,67 +141,26 @@ namespace tremor::editor {
         VkDescriptorPool m_descriptorPool;
         VkDescriptorSet m_descriptorSet;
 
-        // Vertex buffers for different gizmo types
-        VkBuffer m_translationVertexBuffer;
-        VkDeviceMemory m_translationVertexBufferMemory;
-        uint32_t m_translationVertexCount;
+        // RAII buffer management for different gizmo types
+        GizmoBuffer m_translationVertexBuffer;
+        GizmoBuffer m_rotationVertexBuffer; 
+        GizmoBuffer m_scaleVertexBuffer;
 
-        VkBuffer m_rotationVertexBuffer;
-        VkDeviceMemory m_rotationVertexBufferMemory;
-        uint32_t m_rotationVertexCount;
+        // Dynamic buffers for markers and edges
+        GizmoBuffer m_vertexMarkerBuffer;
+        GizmoBuffer m_vertexMarkerIndexBuffer;
+        GizmoBuffer m_triangleEdgeBuffer;
+        GizmoBuffer m_selectedVertexMarkerBuffer;
+        GizmoBuffer m_selectedVertexMarkerIndexBuffer;
+        GizmoBuffer m_mouseRayDebugBuffer;
 
-        VkBuffer m_scaleVertexBuffer;
-        VkDeviceMemory m_scaleVertexBufferMemory;
-        uint32_t m_scaleVertexCount;
+        // Index and uniform buffers
+        GizmoBuffer m_indexBuffer;
+        GizmoBuffer m_uniformBuffer;
+        GizmoBuffer m_gizmoUniformBuffer;
 
-        // Dynamic vertex buffer for markers
-        VkBuffer m_vertexMarkerBuffer;
-        VkDeviceMemory m_vertexMarkerBufferMemory;
-        uint32_t m_vertexMarkerCapacity;
-        uint32_t m_vertexMarkerCount;
-
-        // Dedicated index buffer for vertex markers
-        VkBuffer m_vertexMarkerIndexBuffer;
-        VkDeviceMemory m_vertexMarkerIndexBufferMemory;
-        uint32_t m_vertexMarkerIndexCapacity;
-        uint32_t m_vertexMarkerIndexCount;
-
-        // Dynamic vertex buffer for triangle edges
-        VkBuffer m_triangleEdgeBuffer;
-        VkDeviceMemory m_triangleEdgeBufferMemory;
-        uint32_t m_triangleEdgeCapacity;
-        uint32_t m_triangleEdgeCount;
-
-        // Dynamic vertex buffer for selected vertex markers
-        VkBuffer m_selectedVertexMarkerBuffer;
-        VkDeviceMemory m_selectedVertexMarkerBufferMemory;
-        uint32_t m_selectedVertexMarkerCapacity;
-        uint32_t m_selectedVertexMarkerCount;
-
-        // Dedicated index buffer for selected vertex markers
-        VkBuffer m_selectedVertexMarkerIndexBuffer;
-        VkDeviceMemory m_selectedVertexMarkerIndexBufferMemory;
-        uint32_t m_selectedVertexMarkerIndexCapacity;
-        uint32_t m_selectedVertexMarkerIndexCount;
-        
-        // Dedicated buffer for mouse ray debug visualization
-        VkBuffer m_mouseRayDebugBuffer;
-        VkDeviceMemory m_mouseRayDebugBufferMemory;
-        uint32_t m_mouseRayDebugCapacity;
-
-        // Index buffers
-        VkBuffer m_indexBuffer;
-        VkDeviceMemory m_indexBufferMemory;
-        uint32_t m_indexCount;
-
-        // Uniform buffer for transforms (vertex markers, triangles)
-        VkBuffer m_uniformBuffer;
-        VkDeviceMemory m_uniformBufferMemory;
-        
-        // Separate uniform buffer and descriptor set for gizmo transforms
+        // Separate descriptor set for gizmo transforms  
         VkDescriptorSet m_gizmoDescriptorSet;
-        VkBuffer m_gizmoUniformBuffer;
-        VkDeviceMemory m_gizmoUniformBufferMemory;
 
         // Shader modules
         VkShaderModule m_vertexShader;
@@ -191,6 +199,8 @@ namespace tremor::editor {
                             const glm::mat4& projMatrix, const glm::vec2& viewport);
         float distanceFromRayToLineSegment(const Ray& ray, const glm::vec3& lineStart, 
                                           const glm::vec3& lineEnd, float& rayT, float& lineT);
+        float distanceFromRayToCircle(const Ray& ray, const glm::vec3& circleCenter,
+                                     const glm::vec3& circleNormal, float circleRadius);
 
         // Transform and rendering helpers
         void updateUniformBuffer(const glm::mat4& mvpMatrix, const glm::vec3& gizmoPos);
@@ -204,7 +214,9 @@ namespace tremor::editor {
                                    const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
                                    const glm::vec2& viewport);
         int hitTestRotationGizmo(const glm::vec2& screenPos, const glm::vec2& center,
-                                float screenSize, float tolerance);
+                                float screenSize, float tolerance, const glm::vec3& gizmoPos,
+                                const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                const glm::vec2& viewport);
         int hitTestScaleGizmo(const glm::vec2& screenPos, const glm::vec2& center,
                              float screenSize, float tolerance, const glm::vec3& gizmoPos,
                              const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
@@ -212,12 +224,6 @@ namespace tremor::editor {
         float distanceToLine(const glm::vec2& point, const glm::vec2& lineStart, 
                            const glm::vec2& lineEnd);
         bool pointInCircle(const glm::vec2& point, const glm::vec2& center, float radius);
-
-        // Vulkan helper functions
-        bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                         VkMemoryPropertyFlags properties, VkBuffer& buffer,
-                         VkDeviceMemory& bufferMemory);
-        uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
     };
 
 } // namespace tremor::editor

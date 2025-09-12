@@ -202,7 +202,6 @@ public:
 
         // Initialize audio
         Logger::get().critical("About to initialize audio...");
-        initializeAudio();
         Logger::get().critical("Audio initialization complete. Device ID: {}", audioDevice);
         
         // Set up sequencer callback to trigger drum sample
@@ -214,7 +213,6 @@ public:
                 // Make sure we're on the kick drum sample
                 if (currentWaveform != 17) {
                     currentWaveform = 17;  // Kick drum
-                    loadTestAudioAsset();
                 }
                 
                 // With polyphonic processor, just trigger the gate
@@ -275,298 +273,18 @@ public:
             return;
         }
 
-        Logger::get().info("✅ Audio device opened (ID: {})", audioDevice);
-        Logger::get().info("   Sample rate: {} Hz", obtained.freq);
-        Logger::get().info("   Channels: {}", obtained.channels);
-        Logger::get().info("   Buffer size: {} samples", obtained.samples);
-        Logger::get().info("   Format: 0x{:04X} (AUDIO_F32SYS = 0x{:04X})", obtained.format, AUDIO_F32SYS);
-        Logger::get().info("   Size per sample: {} bytes", obtained.size);
-        Logger::get().info("   Silence value: {}", obtained.silence);
-        
-        // Check device status
-        SDL_AudioStatus status = SDL_GetAudioDeviceStatus(audioDevice);
-        const char* statusStr = (status == SDL_AUDIO_STOPPED) ? "STOPPED" :
-                               (status == SDL_AUDIO_PLAYING) ? "PLAYING" : 
-                               (status == SDL_AUDIO_PAUSED) ? "PAUSED" : "UNKNOWN";
-        Logger::get().info("   Initial status: {}", statusStr);
-        
-        Logger::get().info("🎹 Keyboard controls:");
-        Logger::get().info("   1-5: Waveforms (Sine, Square, Saw, Triangle, Noise)");
-        Logger::get().info("   6-7: Mixer/ADSR demos");
-        Logger::get().info("   8-0: Filters (Low/High/Band-pass)");
-        Logger::get().info("   Q-Y: Distortion effects");
-        Logger::get().info("   U: Imported sample (Toggle bit crusher with B)");
-        Logger::get().info("   I-P: Drum samples (Kick, Hi-hat, Pad loop)");
-        Logger::get().info("   B: Toggle bit crusher effect");
-
-        // Load a test audio asset
-        loadTestAudioAsset();
 
         // Start audio playback
         SDL_PauseAudioDevice(audioDevice, 0);
         
-        // Verify audio is playing
-        SDL_AudioStatus finalStatus = SDL_GetAudioDeviceStatus(audioDevice);
-        const char* finalStatusStr = (finalStatus == SDL_AUDIO_STOPPED) ? "STOPPED" :
-                                    (finalStatus == SDL_AUDIO_PLAYING) ? "PLAYING" : 
-                                    (finalStatus == SDL_AUDIO_PAUSED) ? "PAUSED" : "UNKNOWN";
-        Logger::get().info("   Audio playback status: {}", finalStatusStr);
     }
 
-    void switchWaveform(int waveform) {
-        if (waveform >= 0 && waveform <= 22) {
-            currentWaveform = waveform;
-            const char* waveform_names[] = {
-                "Sine", "Square", "Saw", "Triangle", "Noise", "Mixer Demo", "ADSR Demo", 
-                "Lowpass Filter", "Highpass Filter", "Bandpass Filter",
-                "Hard Clip Distortion", "Soft Clip Distortion", "Foldback Distortion",
-                "Bit Crush Distortion", "Overdrive Distortion", "ZX Spectrum Beeper",
-                "Imported Sample", "Kick Drum", "Hi-Hat", "Pad Loop", "Bit-Crushed Import",
-                "Streaming Import", "Streaming Test"
-            };
-            Logger::get().info("🎵 Switching to {}", waveform_names[waveform]);
-            
-            // For streaming audio, don't pause - just load new audio
-            // Pausing/resuming can cause additional hitches
-            if (waveform == 21 || waveform == 22) {
-                Logger::get().info("🎵 Loading streaming audio without pausing...");
-                // For chunked TAFs, pause audio to ensure clean switch
-                if (waveform == 21) {
-                    SDL_PauseAudioDevice(audioDevice, 1);
-                }
-                loadTestAudioAsset();
-                if (waveform == 21) {
-                    SDL_PauseAudioDevice(audioDevice, 0);
-                }
-            } else {
-                // Pause audio during switch for non-streaming
-                SDL_PauseAudioDevice(audioDevice, 1);
-                
-                // Reload with new waveform
-                loadTestAudioAsset();
-                
-                // Resume audio
-                SDL_PauseAudioDevice(audioDevice, 0);
-            }
-        }
-    }
 
-    void loadTestAudioAsset() {
-        // Try different waveforms based on command line or default to sine
-        const char* waveform_files[] = {
-            "assets/audio/sine_wave.taf",
-            "assets/audio/square_wave.taf", 
-            "assets/audio/saw_wave.taf",
-            "assets/audio/triangle_wave.taf",
-            "assets/audio/noise_wave.taf",
-            "assets/audio/mixer_demo.taf",
-            "assets/audio/adsr_demo.taf",
-            "assets/audio/filter_lowpass.taf",
-            "assets/audio/filter_highpass.taf",
-            "assets/audio/filter_bandpass.taf",
-            "assets/audio/distortion_hardclip.taf",
-            "assets/audio/distortion_softclip.taf",
-            "assets/audio/distortion_foldback.taf",
-            "assets/audio/distortion_bitcrush.taf",
-            "assets/audio/distortion_overdrive.taf",
-            "assets/audio/distortion_beeper.taf",
-            "assets/audio/imported_sample.taf",
-            "assets/audio/kick_drum.taf",
-            "assets/audio/hihat.taf",
-            "assets/audio/pad_loop.taf",
-            "assets/audio/imported_bitcrushed.taf",
-            "assets/audio/imported_sample.taf",
-            "streaming_drum.taf"
-        };
-        
-        // Use current waveform selection
-        int waveform_index = currentWaveform;
-        
-        // Also check for old filename for backward compatibility
-        std::string audioPath = waveform_files[waveform_index];
-        Logger::get().info("Checking for audio file: {}", audioPath);
-        
-        // Check if file exists, especially important for streaming audio
-        if (!std::filesystem::exists(audioPath)) {
-            Logger::get().error("❌ File not found: {}", audioPath);
-            // For streaming audio, try to create it if it doesn't exist
-            if (waveform_index == 22) {
-                Logger::get().info("📁 Streaming TAF not found, creating it first...");
-                // Try to use an existing WAV file
-                std::string inputWav = "assets/audio/imported_sample.wav";
-                if (!std::filesystem::exists(inputWav)) {
-                    Logger::get().error("❌ No WAV file found to create streaming TAF");
-                    return;
-                }
-                
-                if (tremor::taffy::tools::createStreamingAudioAsset(inputWav, audioPath, 10000)) {
-                    Logger::get().info("✅ Created streaming TAF from WAV, continuing with load...");
-                } else {
-                    Logger::get().error("❌ Failed to create streaming TAF from WAV");
-                    return;
-                }
-            } else {
-                Logger::get().warning("File not found: {}, falling back to sine_440hz.taf", audioPath);
-                audioPath = "assets/audio/sine_440hz.taf"; // Legacy filename
-            }
-        } else {
-            Logger::get().info("✅ File exists: {}", audioPath);
-        }
-
-        // For chunked TAFs (waveform 21), use StreamingTaffyLoader to get metadata
-        if (waveform_index == 21) {
-            Logger::get().info("🎵 Loading chunked TAF with StreamingTaffyLoader...");
-            
-            // IMPORTANT: Pause audio to prevent race conditions
-            SDL_PauseAudioDevice(audioDevice, 1);
-            // Audio thread will stop on next callback
-            
-            auto loader = std::make_shared<Taffy::StreamingTaffyLoader>();
-            if (loader->open(audioPath)) {
-                Logger::get().info("✅ Opened TAF for streaming, {} chunks", loader->getChunkCount());
-                
-                // Load the metadata chunk (chunk 0)
-                auto metadataChunk = loader->loadChunk(0);
-                if (!metadataChunk.empty()) {
-                    Logger::get().info("📦 Loaded metadata chunk, size: {} bytes", metadataChunk.size());
-                    
-                    // Load into audio processor
-                    if (audioProcessor->loadAudioChunk(metadataChunk)) {
-                        Logger::get().info("✅ Metadata loaded into processor");
-                        
-                        // Set the streaming loader
-                        Logger::get().info("🔧 About to set streaming TAF loader...");
-                        audioProcessor->setStreamingTafLoader(loader);
-                        Logger::get().info("✅ Set up chunked TAF streaming loader");
-                    } else {
-                        Logger::get().error("❌ Failed to load metadata into processor");
-                    }
-                } else {
-                    Logger::get().error("❌ Failed to load metadata chunk");
-                }
-            } else {
-                Logger::get().error("❌ Failed to open TAF for streaming");
-            }
-            
-            // Resume audio after loading
-            // Background loader will preload chunks
-            SDL_PauseAudioDevice(audioDevice, 0);
-        } else {
-            // Original loading code for non-chunked TAFs
-            Taffy::Asset audioAsset;
-            if (audioAsset.load_from_file_safe(audioPath)) {
-                Logger::get().info("✅ Loaded audio asset: {}", audioPath);
-                
-                // Get the audio chunk
-                auto audioData = audioAsset.get_chunk_data(Taffy::ChunkType::AUDI);
-                if (audioData) {
-                    Logger::get().info("📦 Found audio chunk, size: {} bytes", audioData->size());
-                    
-                    // For streaming audio, we need to handle it differently
-                    if (waveform_index == 22) {
-                    // For streaming, only load the metadata, not the actual audio data
-                    // The audio data will be streamed from disk
-                    Logger::get().info("🎵 Loading streaming audio metadata only...");
-                    
-                    // Calculate how much of the chunk is metadata vs audio data
-                    // Parse the header to get exact sizes
-                    const uint8_t* ptr = audioData->data();
-                    Taffy::AudioChunk header;
-                    std::memcpy(&header, ptr, sizeof(Taffy::AudioChunk));
-                    
-                    size_t metadataSize = sizeof(Taffy::AudioChunk);
-                    metadataSize += header.node_count * sizeof(Taffy::AudioChunk::Node);
-                    metadataSize += header.connection_count * sizeof(Taffy::AudioChunk::Connection);
-                    metadataSize += header.pattern_count * sizeof(Taffy::AudioChunk::Pattern);
-                    metadataSize += header.sample_count * sizeof(Taffy::AudioChunk::WaveTable);
-                    metadataSize += header.parameter_count * sizeof(Taffy::AudioChunk::Parameter);
-                    metadataSize += header.streaming_count * sizeof(Taffy::AudioChunk::StreamingAudio);
-                    
-                    Logger::get().info("📊 Metadata size: {} bytes, Total chunk: {} bytes", 
-                                     metadataSize, audioData->size());
-                    
-                    // Load the entire TAF chunk, including embedded audio data
-                    if (audioProcessor->loadAudioChunk(*audioData)) {
-                        if (header.streaming_count > 0 && audioData->size() > metadataSize) {
-                            Logger::get().info("✅ Streaming audio loaded with {} MB of embedded data", 
-                                             (audioData->size() - metadataSize) / (1024.0 * 1024.0));
-                            // No need to set external file path - audio is embedded in TAF
-                        } else {
-                            Logger::get().info("✅ Streaming audio metadata loaded");
-                            
-                            // Check if this is a chunked TAF
-                            if (header.streaming_count > 0) {
-                                // Parse streaming info to check chunk count
-                                const uint8_t* ptr = audioData->data() + metadataSize - 
-                                                   (header.streaming_count * sizeof(Taffy::AudioChunk::StreamingAudio));
-                                Taffy::AudioChunk::StreamingAudio streamInfo;
-                                std::memcpy(&streamInfo, ptr, sizeof(streamInfo));
-                                
-                                if (streamInfo.chunk_count > 0 && streamInfo.data_offset == 0) {
-                                    Logger::get().info("🔄 Detected chunked TAF with {} chunks", streamInfo.chunk_count);
-                                    Logger::get().info("   Total samples: {}", streamInfo.total_samples);
-                                    Logger::get().info("   Sample rate: {} Hz", streamInfo.sample_rate);
-                                    Logger::get().info("   Chunk size: {} samples", streamInfo.chunk_size);
-                                    
-                                    // Create streaming TAF loader
-                                    auto loader = std::make_shared<Taffy::StreamingTaffyLoader>();
-                                    if (loader->open(audioPath)) {
-                                        audioProcessor->setStreamingTafLoader(loader);
-                                        Logger::get().info("✅ Set up chunked TAF streaming loader");
-                                        Logger::get().info("   Loader reports {} chunks", loader->getChunkCount());
-                                    } else {
-                                        Logger::get().error("❌ Failed to open TAF for streaming");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Non-streaming audio, load the entire chunk
-                    if (audioProcessor->loadAudioChunk(*audioData)) {
-                        Logger::get().info("✅ Audio chunk loaded into processor");
-                        Logger::get().info("🎵 Playing waveform type {}", waveform_index);
-                    }
-                }
-            } else {
-                Logger::get().error("No AUDI chunk found in asset");
-            }
-        } else {
-            Logger::get().error("Failed to load audio asset: {}", audioPath);
-            Logger::get().info("💡 Tip: Run test_waveforms to generate audio assets");
-        }
-        }
-        
-        // Disabled gate triggering to debug hanging issue
-        // // For sample-based assets (16-22), trigger the gate parameter
-        // // This is outside the loading logic so it works for both regular and chunked TAFs
-        // if (waveform_index >= 16 && waveform_index <= 22) {
-        //     // Set gate parameter to 1 to trigger sample playback
-        //     uint64_t gateHash = Taffy::fnv1a_hash("gate");
-        //     audioProcessor->setParameter(gateHash, 1.0f);
-        //     Logger::get().info("🎯 Triggered sample playback (gate=1) for waveform {}", waveform_index);
-        //     
-        //     // Also debug what parameters exist
-        //     Logger::get().info("   Setting gate parameter with hash: 0x{:x}", gateHash);
-        //     
-        //     // Reset gate after 100 audio callbacks (about 1 second at typical buffer sizes)
-        //     gateResetCounter = 100;
-        //     
-        //     // Check audio device status
-        //     SDL_AudioStatus status = SDL_GetAudioDeviceStatus(audioDevice);
-        //     const char* statusStr = (status == SDL_AUDIO_STOPPED) ? "STOPPED" :
-        //                            (status == SDL_AUDIO_PLAYING) ? "PLAYING" : 
-        //                            (status == SDL_AUDIO_PAUSED) ? "PAUSED" : "UNKNOWN";
-        //     Logger::get().info("   Audio device status: {}", statusStr);
-        // }
-    }
-
+  
     bool Loop() {
 #if defined(USING_VULKAN)
         static int loopCount = 0;
-        if (loopCount < 10) {
-            Logger::get().info("Loop() called, count: {}", loopCount++);
-        }
+        
         
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
