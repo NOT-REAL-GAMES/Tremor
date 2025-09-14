@@ -300,6 +300,15 @@ namespace tremor::gfx {
         colorBlending.attachmentCount = 1;
         colorBlending.pAttachments = &colorBlendAttachment;
         
+        // Depth stencil - disable depth testing completely for UI (always on top)
+        VkPipelineDepthStencilStateCreateInfo depthStencil{};
+        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depthStencil.depthTestEnable = VK_FALSE; // Disable depth test - UI always on top
+        depthStencil.depthWriteEnable = VK_FALSE; // Don't write depth values
+        depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS; // Always pass
+        depthStencil.depthBoundsTestEnable = VK_FALSE;
+        depthStencil.stencilTestEnable = VK_FALSE;
+        
         // Dynamic state
         std::vector<VkDynamicState> dynamicStates = {
             VK_DYNAMIC_STATE_VIEWPORT,
@@ -321,11 +330,12 @@ namespace tremor::gfx {
         pipelineInfo.pViewportState = &viewportState;
         pipelineInfo.pRasterizationState = &rasterizer;
         pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pDepthStencilState = &depthStencil;
         pipelineInfo.pColorBlendState = &colorBlending;
         pipelineInfo.pDynamicState = &dynamicState;
         pipelineInfo.layout = m_pipelineLayout;
         pipelineInfo.renderPass = renderPass;
-        pipelineInfo.subpass = 0;
+        pipelineInfo.subpass = 1; // UI renders in subpass 1
         
         if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline) != VK_SUCCESS) {
             Logger::get().error("Failed to create graphics pipeline");
@@ -424,13 +434,15 @@ namespace tremor::gfx {
         auto button = std::make_unique<UIButton>();
         button->id = m_nextElementId++;
         button->text = text;
-        button->position = position;
+        button->position = glm::vec2(0.0f,0.0f);
         button->size = size;
         button->onClick = onClick;
         
         uint32_t buttonId = button->id;  // Store ID before moving
         m_elements.push_back(std::move(button));
         
+        setElementPosition(buttonId,position);
+
         // Mark both as dirty since we added a new element
         m_textDirty = true;
         m_quadsDirty = true;
@@ -456,6 +468,30 @@ namespace tremor::gfx {
 
 
         return lb;
+    }
+
+    uint32_t UIRenderer::addRect(glm::vec2 position, glm::vec2 size, uint32_t fillColor,
+                                uint32_t borderColor, float borderWidth) {
+        auto rect = std::make_unique<UIRect>();
+        rect->id = m_nextElementId++;
+        rect->position = glm::vec2(0.0f, 0.0f);
+        rect->size = size;
+        rect->fillColor = fillColor;
+        rect->borderColor = borderColor;
+        rect->borderWidth = borderWidth;
+        
+        uint32_t rectId = rect->id;
+        m_elements.push_back(std::move(rect));
+        
+        setElementPosition(rectId, position);
+        
+        // Mark quads as dirty since we added a new rectangle
+        m_quadsDirty = true;
+        
+        /*Logger::get().info("Added rectangle at ({}, {}) with size ({}, {})", 
+                          position.x, position.y, size.x, size.y);
+        */
+        return rectId;
     }
 
     void UIRenderer::removeElement(uint32_t id) {
@@ -658,12 +694,13 @@ namespace tremor::gfx {
                     }
                     
                     // Center horizontally, but for vertical we need to account for baseline
+                    // Since button position is now in the transform, calculate relative to 0,0
                     glm::vec2 textPos;
-                    textPos.x = button->position.x + (button->size.x - textSize.x) * 0.5f;
+                    textPos.x = (button->size.x - textSize.x) * 0.5f;
                     
                     // For vertical: position at center, then add half the text height to move baseline to center
                     // Since text is rendered from baseline, we need to push it down
-                    textPos.y = button->position.y + (button->size.y * 0.125f);
+                    textPos.y = (button->size.y * 0.125f);
                     
                     // Determine text color based on element state
                     uint32_t textColor = button->textColor;
@@ -677,7 +714,7 @@ namespace tremor::gfx {
                             r = 255;//(textColor >> 24) & 0xFF;
                             g = 0;//(textColor >> 16) & 0xFF;
                             b = 80;//(textColor >> 8) & 0xFF;
-                            a = textColor & 0xFF;
+                            a = 255; // Force full opacity to block grid
                                                     
                             break;
                         
@@ -685,7 +722,7 @@ namespace tremor::gfx {
                             r = 63;//(textColor >> 24) & 0xFF;
                             g = 0;//(textColor >> 16) & 0xFF;
                             b = 20;//(textColor >> 8) & 0xFF;
-                            a = textColor & 0xFF;
+                            a = 255; // Force full opacity to block grid
                                                     
                             break;
                         
@@ -693,7 +730,7 @@ namespace tremor::gfx {
                             r = 255;//(textColor >> 24) & 0xFF;
                             g = 255;//(textColor >> 16) & 0xFF;
                             b = 255;//(textColor >> 8) & 0xFF;
-                            a = textColor & 0xFF;
+                            a = 255; // Force full opacity to block grid
                                                     
                             break;
                     }
@@ -701,9 +738,8 @@ namespace tremor::gfx {
                     textColor = (r << 24) | (g << 16) | (b << 8) | a;                        
 
                     // Apply transforms to the calculated text position within the button
-                    // Since elem->transform already includes the button position, we apply it to the relative text offset
-                    glm::vec2 relativeTextPos = textPos - button->position;  // Get text offset from button position
-                    glm::vec4 elementTransformedPos = elem->transform * glm::vec4(relativeTextPos.x, relativeTextPos.y, 0.0f, 1.0f);
+                    // Since button->position is now (0,0) and position is in transform, textPos is already relative
+                    glm::vec4 elementTransformedPos = elem->transform * glm::vec4(textPos.x, textPos.y, 0.0f, 1.0f);
                     glm::vec4 finalTransformedPos = m_transform * elementTransformedPos;
                     
                     // Extract scale from both transforms for text scaling
@@ -781,6 +817,55 @@ namespace tremor::gfx {
                                          textInst.text, textInst.position.x, textInst.position.y, textInst.scale);
                         labelDebugCount++;
                     }
+                    break;
+                }
+                
+                case UIElementType::Rectangle: {
+                    const UIRect* rect = static_cast<const UIRect*>(elem.get());
+                    
+                    // Apply transforms to get final position and scale
+                    glm::vec4 elementTransformedPos = rect->transform * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+                    glm::vec4 finalTransformedPos = m_transform * elementTransformedPos;
+                    
+                    // Extract scale from both transforms
+                    glm::vec3 elementScale, elementTranslation, elementSkew;
+                    glm::vec4 elementPerspective;
+                    glm::quat elementRotation;
+                    glm::decompose(rect->transform, elementScale, elementRotation, elementTranslation, elementSkew, elementPerspective);
+                    
+                    glm::vec3 globalScale, globalTranslation, globalSkew;
+                    glm::vec4 globalPerspective;
+                    glm::quat globalRotation;
+                    glm::decompose(m_transform, globalScale, globalRotation, globalTranslation, globalSkew, globalPerspective);
+                    
+                    // Calculate final transformed size
+                    glm::vec2 finalSize = glm::vec2(rect->size.x * elementScale.x * globalScale.x,
+                                                   rect->size.y * elementScale.y * globalScale.y);
+                    
+                    // Add rectangle quad to vertex buffer for rendering
+                    glm::vec2 finalPos = glm::vec2(finalTransformedPos.x, finalTransformedPos.y);
+                    
+                    // Create quad vertices for the rectangle
+                    UIVertex rectVerts[6]; // 2 triangles = 6 vertices
+                    
+                    // Triangle 1: Top-left, bottom-left, top-right
+                    rectVerts[0] = {{finalPos.x, finalPos.y}, {0.0f, 0.0f}, rect->fillColor};
+                    rectVerts[1] = {{finalPos.x, finalPos.y + finalSize.y}, {0.0f, 1.0f}, rect->fillColor};
+                    rectVerts[2] = {{finalPos.x + finalSize.x, finalPos.y}, {1.0f, 0.0f}, rect->fillColor};
+                    
+                    // Triangle 2: Bottom-left, bottom-right, top-right  
+                    rectVerts[3] = {{finalPos.x, finalPos.y + finalSize.y}, {0.0f, 1.0f}, rect->fillColor};
+                    rectVerts[4] = {{finalPos.x + finalSize.x, finalPos.y + finalSize.y}, {1.0f, 1.0f}, rect->fillColor};
+                    rectVerts[5] = {{finalPos.x + finalSize.x, finalPos.y}, {1.0f, 0.0f}, rect->fillColor};
+                    
+                    // Add vertices to the quad buffer
+                    for (int i = 0; i < 6; i++) {
+                        m_quadVertices.push_back(rectVerts[i]);
+                    }
+                    
+                    /*Logger::get().info("Added rectangle quad at ({}, {}) size ({}, {})", 
+                                      finalPos.x, finalPos.y, finalSize.x, finalSize.y);
+                    */
                     break;
                 }
                 
@@ -873,31 +958,32 @@ namespace tremor::gfx {
             if (elem->type == UIElementType::Button) {
                 const UIButton* button = static_cast<const UIButton*>(elem.get());
                 
-                // Calculate color with alpha based on state
+                // Calculate color with alpha based on state - use higher opacity to block grid
                 uint32_t bgColor;
                 switch (elem->state) {
                     case UIElementState::Normal:
-                        bgColor = 0x00000020; // Black with 25% opacity (64/255)
+                        bgColor = 0x0000003F; // Black with 25% opacity (63/255)
                         break;
                     case UIElementState::Hovered:
-                        bgColor = 0x00000020; // Black with ~31% opacity (80/255)
+                        bgColor = 0x0000004F; // Black with 31% opacity (79/255)
                         break;
                     case UIElementState::Pressed:
-                        bgColor = 0x00000040; // Black with ~33% opacity (85/255)
+                        bgColor = 0x0000002F; // Black with 18% opacity (47/255)
                         break;
                     case UIElementState::Disabled:
-                        bgColor = 0x00000020; // Black with ~12% opacity (32/255)
+                        bgColor = 0x0000001F; // Black with 12% opacity (31/255)
                         break;
                     default:
-                        bgColor = 0x00000040;
+                        bgColor = 0x0000003F; // Black with 25% opacity (63/255)
                         break;
                 }
                 
                 // Create a quad (2 triangles, 6 vertices)
-                float x1 = button->position.x;
-                float y1 = button->position.y;
-                float x2 = button->position.x + button->size.x;
-                float y2 = button->position.y + button->size.y;
+                // Since position is stored in the transform, use 0,0 as the base
+                float x1 = 0.0f;
+                float y1 = 0.0f;
+                float x2 = button->size.x;
+                float y2 = button->size.y;
                 
                 // Apply element transform to all corners
                 glm::vec4 corner1 = button->transform * glm::vec4(x1, y1, 0.0f, 1.0f);
@@ -958,23 +1044,46 @@ namespace tremor::gfx {
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
         
-        // Set viewport and scissor
+        // Set viewport and scissor using current extent
         VkViewport viewport{};
         viewport.x = 0.0f;
         viewport.y = 0.0f;
-        viewport.width = 1280.0f; // TODO: Get actual window size
-        viewport.height = 720.0f;
+        viewport.width = static_cast<float>(m_currentExtent.width);
+        viewport.height = static_cast<float>(m_currentExtent.height);
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
         
         VkRect2D scissor{};
         scissor.offset = {0, 0};
-        scissor.extent = {1280, 720}; // TODO: Get actual window size
+        scissor.extent = m_currentExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
         
         // Draw
         vkCmdDraw(commandBuffer, static_cast<uint32_t>(m_quadVertices.size()), 1, 0, 0);
+    }
+    
+    void UIRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& projection, VkExtent2D extent) {
+        //Logger::get().info("🟦 UI: Starting render at {}x{} with {} elements", extent.width, extent.height, m_elements.size());
+        // Store extent for use in renderQuads
+        m_currentExtent = extent;
+        
+        // IMMEDIATELY set viewport and scissor to override any previous settings
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(extent.width);
+        viewport.height = static_cast<float>(extent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        
+        VkRect2D scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = extent;
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        
+        render(commandBuffer, projection);
     }
 
     // Per-element transform manipulation methods

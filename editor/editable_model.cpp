@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
+#include <array>
 
 namespace tremor::editor {
 
@@ -330,6 +331,13 @@ namespace tremor::editor {
     }
 
     uint32_t EditableModel::addCustomTriangle(uint32_t vertexId1, uint32_t vertexId2, uint32_t vertexId3) {
+        // Check for degenerate triangles (same vertex used multiple times)
+        if (vertexId1 == vertexId2 || vertexId2 == vertexId3 || vertexId1 == vertexId3) {
+            Logger::get().error("Cannot create degenerate triangle: vertices must be unique ({}, {}, {})", 
+                               vertexId1, vertexId2, vertexId3);
+            return 0;
+        }
+        
         // Verify all vertices exist
         auto hasVertex = [this](uint32_t id) {
             return std::any_of(m_customVertices.begin(), m_customVertices.end(),
@@ -339,6 +347,13 @@ namespace tremor::editor {
         if (!hasVertex(vertexId1) || !hasVertex(vertexId2) || !hasVertex(vertexId3)) {
             Logger::get().error("Cannot create triangle: one or more vertices not found ({}, {}, {})", 
                                vertexId1, vertexId2, vertexId3);
+            return 0;
+        }
+        
+        // Check for duplicate triangles
+        if (hasDuplicateTriangle(vertexId1, vertexId2, vertexId3)) {
+            Logger::get().warning("Triangle with vertices ({}, {}, {}) already exists", 
+                                 vertexId1, vertexId2, vertexId3);
             return 0;
         }
         
@@ -368,6 +383,28 @@ namespace tremor::editor {
         }
         
         Logger::get().warning("Custom triangle {} not found", triangleId);
+        return false;
+    }
+
+    bool EditableModel::hasDuplicateTriangle(uint32_t vertexId1, uint32_t vertexId2, uint32_t vertexId3) const {
+        // Sort the new triangle's vertex IDs to handle different winding orders
+        std::array<uint32_t, 3> sortedNew = {vertexId1, vertexId2, vertexId3};
+        std::sort(sortedNew.begin(), sortedNew.end());
+        
+        // Check against all existing triangles
+        for (const auto& triangle : m_customTriangles) {
+            std::array<uint32_t, 3> sortedExisting = {
+                triangle.vertexIds[0], 
+                triangle.vertexIds[1], 
+                triangle.vertexIds[2]
+            };
+            std::sort(sortedExisting.begin(), sortedExisting.end());
+            
+            if (sortedNew == sortedExisting) {
+                return true;
+            }
+        }
+        
         return false;
     }
 
@@ -440,6 +477,182 @@ namespace tremor::editor {
             }
         }
         return 0; // 0 means not found
+    }
+    
+    bool EditableModel::getTriangle(uint32_t meshIndex, uint32_t triangleIndex,
+                                   glm::vec3& v0, glm::vec3& v1, glm::vec3& v2) const {
+        if (meshIndex >= m_meshes.size()) {
+            return false;
+        }
+        
+        const auto& mesh = m_meshes[meshIndex];
+        const auto& indices = mesh->get_indices();
+        const auto& vertices = mesh->get_vertices();
+        
+        // Each triangle consists of 3 indices
+        uint32_t baseIdx = triangleIndex * 3;
+        if (baseIdx + 2 >= indices.size()) {
+            return false;
+        }
+        
+        uint32_t idx0 = indices[baseIdx];
+        uint32_t idx1 = indices[baseIdx + 1];
+        uint32_t idx2 = indices[baseIdx + 2];
+        
+        if (idx0 >= vertices.size() || idx1 >= vertices.size() || idx2 >= vertices.size()) {
+            return false;
+        }
+        
+        v0 = vertices[idx0].position.toFloat();
+        v1 = vertices[idx1].position.toFloat();
+        v2 = vertices[idx2].position.toFloat();
+        
+        return true;
+    }
+    
+    bool EditableModel::reverseTriangleWinding(uint32_t meshIndex, uint32_t triangleIndex) {
+        if (meshIndex >= m_meshes.size()) {
+            Logger::get().error("Invalid mesh index: {}", meshIndex);
+            return false;
+        }
+        
+        // Note: This would require making the indices mutable in TaffyMesh
+        // For now, we'll log the operation
+        Logger::get().info("Would reverse winding order for triangle {} in mesh {}",
+                         triangleIndex, meshIndex);
+        
+        // In a real implementation:
+        // auto& mesh = m_meshes[meshIndex];
+        // auto& indices = mesh->get_mutable_indices();
+        // uint32_t baseIdx = triangleIndex * 3;
+        // if (baseIdx + 2 < indices.size()) {
+        //     std::swap(indices[baseIdx + 1], indices[baseIdx + 2]);
+        //     markDirty();
+        //     return true;
+        // }
+        
+        markDirty();
+        return true;
+    }
+    
+    uint32_t EditableModel::getTriangleCount(uint32_t meshIndex) const {
+        if (meshIndex >= m_meshes.size()) {
+            return 0;
+        }
+        
+        const auto& mesh = m_meshes[meshIndex];
+        return mesh->get_index_count() / 3;  // 3 indices per triangle
+    }
+    
+    void EditableModel::renderMeshPreview(VkCommandBuffer commandBuffer,
+                                         const glm::mat4& viewMatrix,
+                                         const glm::mat4& projMatrix,
+                                         bool wireframe,
+                                         const std::vector<uint32_t>& selectedTriangles) {
+        // This would require implementing a mesh preview renderer
+        // For now, we'll use the existing gizmo renderer to draw edges
+        
+        // Collect all triangles from loaded meshes
+        std::vector<std::pair<glm::vec3, glm::vec3>> edges;
+        std::vector<glm::vec3> selectedVerts;
+        std::vector<uint32_t> selectedIndices;
+        
+        for (uint32_t meshIdx = 0; meshIdx < m_meshes.size(); ++meshIdx) {
+            const auto& mesh = m_meshes[meshIdx];
+            const auto& vertices = mesh->get_vertices();
+            const auto& indices = mesh->get_indices();
+            
+            for (uint32_t i = 0; i < indices.size(); i += 3) {
+                if (i + 2 < indices.size()) {
+                    glm::vec3 v0 = vertices[indices[i]].position.toFloat();
+                    glm::vec3 v1 = vertices[indices[i + 1]].position.toFloat();
+                    glm::vec3 v2 = vertices[indices[i + 2]].position.toFloat();
+                    
+                    uint32_t triIdx = i / 3;
+                    uint32_t combinedIdx = (meshIdx << 16) | triIdx;
+                    
+                    bool isSelected = std::find(selectedTriangles.begin(), 
+                                               selectedTriangles.end(), 
+                                               combinedIdx) != selectedTriangles.end();
+                    
+                    if (isSelected) {
+                        // Add to selected triangles for filled rendering
+                        uint32_t baseIdx = selectedVerts.size();
+                        selectedVerts.push_back(v0);
+                        selectedVerts.push_back(v1);
+                        selectedVerts.push_back(v2);
+                        selectedIndices.push_back(baseIdx);
+                        selectedIndices.push_back(baseIdx + 1);
+                        selectedIndices.push_back(baseIdx + 2);
+                    }
+                    
+                    if (wireframe || isSelected) {
+                        // Add edges for wireframe rendering
+                        edges.emplace_back(v0, v1);
+                        edges.emplace_back(v1, v2);
+                        edges.emplace_back(v2, v0);
+                    }
+                }
+            }
+        }
+        
+        // Note: This would need access to a GizmoRenderer instance
+        // The actual rendering would be done by the ModelEditor's tools
+        Logger::get().debug("Would render {} edges and {} selected triangles",
+                          edges.size(), selectedIndices.size() / 3);
+    }
+    
+    void EditableModel::createPreviewBuffers(VkDevice device, VkPhysicalDevice physicalDevice,
+                                           VkCommandPool commandPool, VkQueue graphicsQueue) {
+        // Clean up existing buffers
+        cleanupPreviewBuffers(device);
+        
+        // Calculate total vertices and indices needed
+        uint32_t totalVertices = 0;
+        uint32_t totalIndices = 0;
+        
+        for (const auto& mesh : m_meshes) {
+            totalVertices += mesh->get_vertex_count();
+            totalIndices += mesh->get_index_count();
+        }
+        
+        // Add custom geometry
+        totalVertices += m_customVertices.size();
+        totalIndices += m_customTriangles.size() * 3;
+        
+        if (totalVertices == 0 || totalIndices == 0) {
+            return;
+        }
+        
+        // TODO: Create Vulkan buffers for preview rendering
+        // This would involve creating vertex and index buffers
+        // and uploading the mesh data
+        
+        m_previewIndexCount = totalIndices;
+    }
+    
+    void EditableModel::cleanupPreviewBuffers(VkDevice device) {
+        if (m_previewVertexBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, m_previewVertexBuffer, nullptr);
+            m_previewVertexBuffer = VK_NULL_HANDLE;
+        }
+        
+        if (m_previewVertexMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, m_previewVertexMemory, nullptr);
+            m_previewVertexMemory = VK_NULL_HANDLE;
+        }
+        
+        if (m_previewIndexBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, m_previewIndexBuffer, nullptr);
+            m_previewIndexBuffer = VK_NULL_HANDLE;
+        }
+        
+        if (m_previewIndexMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, m_previewIndexMemory, nullptr);
+            m_previewIndexMemory = VK_NULL_HANDLE;
+        }
+        
+        m_previewIndexCount = 0;
     }
 
 } // namespace tremor::editor

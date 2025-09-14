@@ -10,6 +10,9 @@ namespace tremor::editor {
     // GridRenderer Implementation
     // =============================================================================
 
+    // Static member definition
+    bool GridRenderer::s_globalRenderingBlocked = false;
+
     GridRenderer::GridRenderer(VkDevice device, VkPhysicalDevice physicalDevice,
                               VkCommandPool commandPool, VkQueue graphicsQueue)
         : m_device(device), m_physicalDevice(physicalDevice),
@@ -94,6 +97,14 @@ namespace tremor::editor {
 
     void GridRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& viewMatrix, 
                              const glm::mat4& projMatrix, VkExtent2D viewportExtent, VkExtent2D scissorExtent) {
+        // Check if grid rendering is globally blocked (e.g., during UI rendering)
+        if (s_globalRenderingBlocked) {
+            Logger::get().info("🚫 GRID: Rendering blocked by global flag");
+            return;
+        }
+        //Logger::get().info("🟩 GRID: Rendering grid at {}x{}", viewportExtent.width, viewportExtent.height);
+        
+        // Logger::get().info("🟫 GRID RENDERER: About to render grid - CALL STACK TRACE");
         if (m_vertexCount == 0) return;
         
         // Check if pipeline is valid before rendering
@@ -137,6 +148,14 @@ namespace tremor::editor {
         // Draw grid lines
         vkCmdDraw(commandBuffer, m_vertexCount, 1, 0, 0);
     }
+    
+    void GridRenderer::setGlobalRenderingBlocked(bool blocked) {
+        s_globalRenderingBlocked = blocked;
+    }
+    
+    bool GridRenderer::isGlobalRenderingBlocked() {
+        return s_globalRenderingBlocked;
+    }
 
     bool GridRenderer::createShaders() {
         // Simple vertex shader for grid lines
@@ -154,6 +173,8 @@ namespace tremor::editor {
 
             void main() {
                 gl_Position = ubo.mvp * vec4(inPosition, 1.0);
+                // Force grid to far plane in inverse Z (0.0 = far, 1.0 = near)
+                gl_Position.z = 0.0 * gl_Position.w;
                 fragColor = inColor;
             }
         )";
@@ -282,12 +303,12 @@ namespace tremor::editor {
         multisampling.sampleShadingEnable = VK_FALSE;
         multisampling.rasterizationSamples = m_sampleCount;
 
-        // Depth stencil
+        // Depth stencil - use inverse Z depth testing for proper depth sorting
         VkPipelineDepthStencilStateCreateInfo depthStencil{};
         depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
         depthStencil.depthTestEnable = VK_TRUE;
-        depthStencil.depthWriteEnable = VK_FALSE; // Don't write to depth buffer
-        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        depthStencil.depthWriteEnable = VK_TRUE; 
+        depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; // Inverse Z: greater = closer
 
         // Color blending
         VkPipelineColorBlendAttachmentState colorBlendAttachment{};

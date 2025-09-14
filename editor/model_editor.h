@@ -46,20 +46,27 @@ namespace tremor::editor {
         uint32_t vertexIndex = UINT32_MAX;
         uint32_t faceIndex = UINT32_MAX;
         std::vector<uint32_t> customVertexIds;  // Multiple custom vertices for multi-selection
+        std::vector<uint32_t> selectedTriangles;  // Selected triangles for winding order operations
         bool hasMesh() const { return meshId != UINT32_MAX; }
         bool hasVertex() const { return vertexIndex != UINT32_MAX; }
         bool hasFace() const { return faceIndex != UINT32_MAX; }
         bool hasCustomVertices() const { return !customVertexIds.empty(); }
+        bool hasSelectedTriangles() const { return !selectedTriangles.empty(); }
         bool hasCustomVertex(uint32_t id) const { 
             return std::find(customVertexIds.begin(), customVertexIds.end(), id) != customVertexIds.end();
+        }
+        bool hasTriangle(uint32_t triangleIdx) const {
+            return std::find(selectedTriangles.begin(), selectedTriangles.end(), triangleIdx) != selectedTriangles.end();
         }
         void clear() { 
             meshId = UINT32_MAX; 
             vertexIndex = UINT32_MAX; 
             faceIndex = UINT32_MAX; 
             customVertexIds.clear();
+            selectedTriangles.clear();
         }
         void clearCustomVertices() { customVertexIds.clear(); }
+        void clearTriangles() { selectedTriangles.clear(); }
         void addCustomVertex(uint32_t id) {
             if (!hasCustomVertex(id)) {
                 customVertexIds.push_back(id);
@@ -69,6 +76,17 @@ namespace tremor::editor {
             auto it = std::find(customVertexIds.begin(), customVertexIds.end(), id);
             if (it != customVertexIds.end()) {
                 customVertexIds.erase(it);
+            }
+        }
+        void addTriangle(uint32_t triangleIdx) {
+            if (!hasTriangle(triangleIdx)) {
+                selectedTriangles.push_back(triangleIdx);
+            }
+        }
+        void removeTriangle(uint32_t triangleIdx) {
+            auto it = std::find(selectedTriangles.begin(), selectedTriangles.end(), triangleIdx);
+            if (it != selectedTriangles.end()) {
+                selectedTriangles.erase(it);
             }
         }
     };
@@ -100,6 +118,14 @@ namespace tremor::editor {
         // Editor state
         void setMode(EditorMode mode);
         EditorMode getMode() const { return m_currentMode; }
+        
+        // Mesh preview
+        void setShowMeshPreview(bool show) { m_showMeshPreview = show; }
+        bool getShowMeshPreview() const { return m_showMeshPreview; }
+        void setWireframeMode(bool wireframe) { m_wireframeMode = wireframe; }
+        bool getWireframeMode() const { return m_wireframeMode; }
+        void setBackfaceCulling(bool enable) { m_backfaceCulling = enable; }
+        bool getBackfaceCulling() const { return m_backfaceCulling; }
 
         // Selection
         const Selection& getSelection() const { return m_selection; }
@@ -107,6 +133,11 @@ namespace tremor::editor {
         bool selectMesh(const glm::vec2& screenPos);
         bool selectVertex(const glm::vec2& screenPos);
         bool selectCustomVertex(const glm::vec2& screenPos);
+        bool selectTriangle(const glm::vec2& screenPos, bool addToSelection = false);
+        
+        // Triangle operations
+        void reverseWindingOrder();  // Reverse winding order of selected triangles
+        void reverseWindingOrderForTriangle(uint32_t triangleIdx);  // Reverse specific triangle
 
         // Mesh creation
         void addVertexAtScreenPosition(const glm::vec2& screenPos);
@@ -135,6 +166,11 @@ namespace tremor::editor {
 
         // UI access
         ModelEditorUI* getUI() const { return m_ui.get(); }
+        
+        // Component access
+        EditorViewport* getViewport() const { return m_viewport.get(); }
+        EditableModel* getModel() const { return m_model.get(); }
+        EditorTools* getTools() const { return m_tools.get(); }
 
     private:
         VkDevice m_device;
@@ -154,6 +190,9 @@ namespace tremor::editor {
         Selection m_selection;
         glm::vec2 m_viewportSize = glm::vec2(1920, 1080);
         glm::vec2 m_scissorSize = glm::vec2(1920, 1080);
+        bool m_showMeshPreview = true;
+        bool m_wireframeMode = false;
+        bool m_backfaceCulling = true;
         
         // File management
         std::string m_currentFilePath;
@@ -182,6 +221,10 @@ namespace tremor::editor {
         bool isViewportHovered(const glm::vec2& mousePos) const;
         glm::vec3 screenToWorld(const glm::vec2& screenPos, float depth = 0.0f) const;
         bool screenToWorldRay(const glm::vec2& screenPos, glm::vec3& rayOrigin, glm::vec3& rayDirection) const;
+        bool rayTriangleIntersect(const glm::vec3& rayOrigin, const glm::vec3& rayDirection,
+                                  const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2,
+                                  float& t) const;  // Ray-triangle intersection test
+        void renderMeshPreview(VkCommandBuffer commandBuffer);  // Render mesh preview using GizmoRenderer
     };
 
     /**
@@ -218,6 +261,7 @@ namespace tremor::editor {
         // Grid and gizmo rendering
         void setShowGrid(bool show) { m_showGrid = show; }
         void setShowGizmos(bool show) { m_showGizmos = show; }
+        void setGridRenderingEnabled(bool enabled) { m_gridRenderingEnabled = enabled; }
 
     private:
         VkDevice m_device;
@@ -248,6 +292,7 @@ namespace tremor::editor {
         // Visual settings
         bool m_showGrid = true;
         bool m_showGizmos = true;
+        bool m_gridRenderingEnabled = true;
 
         int64_t m_stepDuration = 0.00f;
         int64_t m_lastStepTime = -1.0f;
@@ -303,6 +348,12 @@ namespace tremor::editor {
         void transformMesh(uint32_t meshIndex, const glm::mat4& transform);
         void transformVertices(uint32_t meshIndex, const std::vector<uint32_t>& vertexIndices, 
                               const glm::mat4& transform);
+        
+        // Triangle operations
+        bool getTriangle(uint32_t meshIndex, uint32_t triangleIndex, 
+                        glm::vec3& v0, glm::vec3& v1, glm::vec3& v2) const;
+        bool reverseTriangleWinding(uint32_t meshIndex, uint32_t triangleIndex);
+        uint32_t getTriangleCount(uint32_t meshIndex) const;
 
         // Custom mesh creation
         uint32_t addCustomVertex(const glm::vec3& position);
@@ -317,9 +368,19 @@ namespace tremor::editor {
         bool updateCustomVertexPosition(uint32_t vertexId, const glm::vec3& newPosition);
         void transformCustomVertices(const std::vector<uint32_t>& vertexIds, const glm::mat4& transform);
         uint32_t findCustomVertexAt(const glm::vec3& position, float tolerance = 0.1f) const;
+        
+        // Triangle validation
+        bool hasDuplicateTriangle(uint32_t vertexId1, uint32_t vertexId2, uint32_t vertexId3) const;
 
         // Upload to renderer
         bool uploadToRenderer(tremor::gfx::VulkanClusteredRenderer& renderer);
+        
+        // Mesh preview rendering
+        void renderMeshPreview(VkCommandBuffer commandBuffer, 
+                              const glm::mat4& viewMatrix, 
+                              const glm::mat4& projMatrix,
+                              bool wireframe = false,
+                              const std::vector<uint32_t>& selectedTriangles = {});
 
     private:
         std::vector<std::unique_ptr<Tremor::TaffyMesh>> m_meshes;
@@ -334,6 +395,17 @@ namespace tremor::editor {
         uint32_t m_nextTriangleId = 1;
 
         void markDirty() { m_isDirty = true; }
+        
+        // Mesh preview buffers
+        VkBuffer m_previewVertexBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory m_previewVertexMemory = VK_NULL_HANDLE;
+        VkBuffer m_previewIndexBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory m_previewIndexMemory = VK_NULL_HANDLE;
+        uint32_t m_previewIndexCount = 0;
+        
+        void createPreviewBuffers(VkDevice device, VkPhysicalDevice physicalDevice,
+                                 VkCommandPool commandPool, VkQueue graphicsQueue);
+        void cleanupPreviewBuffers(VkDevice device);
     };
 
     /**

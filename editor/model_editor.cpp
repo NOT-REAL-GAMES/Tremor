@@ -100,6 +100,11 @@ namespace tremor::editor {
         if (m_viewport) {
             m_viewport->render(commandBuffer);
         }
+        
+        // Render mesh preview if enabled
+        if (m_showMeshPreview && m_model && m_tools && m_tools->getGizmoRenderer()) {
+            renderMeshPreview(commandBuffer);
+        }
 
         // Render gizmos if we have a selection
         if (m_tools && (m_currentMode == EditorMode::Move || m_currentMode == EditorMode::Rotate || m_currentMode == EditorMode::Scale)) {
@@ -227,13 +232,16 @@ namespace tremor::editor {
                                      (int)m_currentMode, (m_selection.hasMesh() || m_selection.hasCustomVertices()));
                     if (m_currentMode == EditorMode::Select) {
                         // Selection
-                        if (SDL_GetModState() & KMOD_SHIFT) {
+                        if (SDL_GetModState() & KMOD_CTRL) {
+                            // Triangle selection with Ctrl key
+                            bool addToSelection = (SDL_GetModState() & KMOD_SHIFT) != 0;
+                            selectTriangle(mousePos, addToSelection);
+                        } else {
                             // Try to select custom vertex first, then regular mesh vertex
+                            // Single click = single selection, Shift+click = multi-selection
                             if (!selectCustomVertex(mousePos)) {
                                 selectVertex(mousePos);
                             }
-                        } else {
-                            selectMesh(mousePos);
                         }
                     } else if (m_currentMode == EditorMode::AddVertex) {
                         // Add vertex at click position
@@ -315,7 +323,12 @@ namespace tremor::editor {
                     setMode(EditorMode::Move);
                     break;
                 case SDLK_r:
-                    setMode(EditorMode::Rotate);
+                    if (SDL_GetModState() & KMOD_CTRL) {
+                        // Ctrl+R: Reverse winding order
+                        reverseWindingOrder();
+                    } else {
+                        setMode(EditorMode::Rotate);
+                    }
                     break;
                 case SDLK_s:
                     if (SDL_GetModState() & KMOD_CTRL) {
@@ -344,6 +357,18 @@ namespace tremor::editor {
                     break;
                 case SDLK_t:
                     setMode(EditorMode::CreateTriangle);
+                    break;
+                case SDLK_p:
+                    // Toggle mesh preview
+                    setShowMeshPreview(!m_showMeshPreview);
+                    Logger::get().info("Mesh preview toggled: {}", m_showMeshPreview ? "on" : "off");
+                    break;
+                case SDLK_w:
+                    if (SDL_GetModState() & KMOD_CTRL) {
+                        // Ctrl+W: Toggle wireframe
+                        setWireframeMode(!m_wireframeMode);
+                        Logger::get().info("Wireframe mode toggled: {}", m_wireframeMode ? "on" : "off");
+                    }
                     break;
             }
         }
@@ -448,6 +473,401 @@ namespace tremor::editor {
 
         if (m_selectionChangedCallback) {
             m_selectionChangedCallback();
+        }
+    }
+    
+    bool ModelEditor::selectTriangle(const glm::vec2& screenPos, bool addToSelection) {
+        if (!m_model) return false;
+        
+        // Get ray from screen position
+        glm::vec3 rayOrigin, rayDirection;
+        if (!screenToWorldRay(screenPos, rayOrigin, rayDirection)) {
+            return false;
+        }
+        
+        float closestT = std::numeric_limits<float>::max();
+        uint32_t closestTriangleIdx = UINT32_MAX;
+        uint32_t closestMeshIdx = UINT32_MAX;
+        
+        // Check triangles in loaded meshes
+        for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
+            uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
+            
+            for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
+                glm::vec3 v0, v1, v2;
+                if (m_model->getTriangle(meshIdx, triIdx, v0, v1, v2)) {
+                    float t;
+                    if (rayTriangleIntersect(rayOrigin, rayDirection, v0, v1, v2, t)) {
+                        if (t < closestT) {
+                            closestT = t;
+                            closestTriangleIdx = triIdx;
+                            closestMeshIdx = meshIdx;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Check custom triangles
+        const auto& customTriangles = m_model->getCustomTriangles();
+        for (size_t i = 0; i < customTriangles.size(); ++i) {
+            const auto& tri = customTriangles[i];
+            glm::vec3 v0, v1, v2;
+            if (m_model->getCustomVertexPosition(tri.vertexIds[0], v0) &&
+                m_model->getCustomVertexPosition(tri.vertexIds[1], v1) &&
+                m_model->getCustomVertexPosition(tri.vertexIds[2], v2)) {
+                float t;
+                if (rayTriangleIntersect(rayOrigin, rayDirection, v0, v1, v2, t)) {
+                    if (t < closestT) {
+                        closestT = t;
+                        // Use high bit to indicate custom triangle
+                        closestTriangleIdx = static_cast<uint32_t>(i) | 0x80000000;
+                        closestMeshIdx = UINT32_MAX;
+                    }
+                }
+            }
+        }
+        
+        if (closestTriangleIdx != UINT32_MAX) {
+            if (!addToSelection) {
+                m_selection.clearTriangles();
+            }
+            
+            // Store mesh index in high 16 bits, triangle index in low 16 bits
+            uint32_t combinedIdx = (closestMeshIdx << 16) | (closestTriangleIdx & 0xFFFF);
+            if (closestTriangleIdx & 0x80000000) {
+                // Custom triangle - store with special marker
+                combinedIdx = closestTriangleIdx;
+            }
+            
+            if (m_selection.hasTriangle(combinedIdx)) {
+                m_selection.removeTriangle(combinedIdx);
+                Logger::get().info("Deselected triangle {}", combinedIdx & 0xFFFF);
+            } else {
+                m_selection.addTriangle(combinedIdx);
+                Logger::get().info("Selected triangle {} ({} total selected)",
+                                 combinedIdx & 0xFFFF, m_selection.selectedTriangles.size());
+            }
+            
+            if (m_ui) {
+                m_ui->onSelectionChanged(m_selection, m_model.get());
+            }
+            if (m_selectionChangedCallback) {
+                m_selectionChangedCallback();
+            }
+            return true;
+        }
+        
+        return false;
+    }
+    
+    void ModelEditor::reverseWindingOrder() {
+        if (!m_model || !m_selection.hasSelectedTriangles()) {
+            Logger::get().warning("No triangles selected for winding order reversal");
+            return;
+        }
+        
+        for (uint32_t combinedIdx : m_selection.selectedTriangles) {
+            reverseWindingOrderForTriangle(combinedIdx);
+        }
+        
+        markModelChanged();
+        Logger::get().info("Reversed winding order for {} triangles", m_selection.selectedTriangles.size());
+    }
+    
+    void ModelEditor::reverseWindingOrderForTriangle(uint32_t triangleIdx) {
+        if (!m_model) return;
+        
+        if (triangleIdx & 0x80000000) {
+            // Custom triangle
+            uint32_t idx = triangleIdx & 0x7FFFFFFF;
+            auto& customTriangles = const_cast<std::vector<CustomTriangle>&>(m_model->getCustomTriangles());
+            if (idx < customTriangles.size()) {
+                // Swap vertex 1 and 2 to reverse winding
+                std::swap(customTriangles[idx].vertexIds[1], customTriangles[idx].vertexIds[2]);
+                Logger::get().info("Reversed winding order for custom triangle {}", idx);
+            }
+        } else {
+            // Regular mesh triangle
+            uint32_t meshIdx = (triangleIdx >> 16) & 0xFFFF;
+            uint32_t triIdx = triangleIdx & 0xFFFF;
+            m_model->reverseTriangleWinding(meshIdx, triIdx);
+        }
+    }
+    
+    bool ModelEditor::rayTriangleIntersect(const glm::vec3& rayOrigin, const glm::vec3& rayDirection,
+                                          const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2,
+                                          float& t) const {
+        // Möller-Trumbore ray-triangle intersection algorithm
+        const float EPSILON = 0.0000001f;
+        
+        glm::vec3 edge1 = v1 - v0;
+        glm::vec3 edge2 = v2 - v0;
+        glm::vec3 h = glm::cross(rayDirection, edge2);
+        float a = glm::dot(edge1, h);
+        
+        if (a > -EPSILON && a < EPSILON) {
+            return false; // Ray is parallel to triangle
+        }
+        
+        float f = 1.0f / a;
+        glm::vec3 s = rayOrigin - v0;
+        float u = f * glm::dot(s, h);
+        
+        if (u < 0.0f || u > 1.0f) {
+            return false;
+        }
+        
+        glm::vec3 q = glm::cross(s, edge1);
+        float v = f * glm::dot(rayDirection, q);
+        
+        if (v < 0.0f || u + v > 1.0f) {
+            return false;
+        }
+        
+        t = f * glm::dot(edge2, q);
+        
+        if (t > EPSILON) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    void ModelEditor::renderMeshPreview(VkCommandBuffer commandBuffer) {
+        if (!m_model) {
+            return;
+        }
+        
+        // TODO: Render solid mesh using the main rendering pipeline
+        // For now, we'll render wireframe and debug info
+        
+        if (!m_tools || !m_tools->getGizmoRenderer()) {
+            Logger::get().debug("No gizmo renderer available for mesh preview wireframe");
+            return;
+        }
+        
+        auto* gizmoRenderer = m_tools->getGizmoRenderer();
+        const glm::mat4& viewMatrix = m_viewport->getViewMatrix();
+        const glm::mat4& projMatrix = m_viewport->getProjectionMatrix();
+        
+        // Collect triangles for solid and wireframe rendering
+        std::vector<std::pair<glm::vec3, glm::vec3>> edges;
+        std::vector<glm::vec3> solidTriangleVerts;
+        std::vector<uint32_t> solidTriangleIndices;
+        std::vector<glm::vec3> selectedTriangleVerts;
+        std::vector<uint32_t> selectedTriangleIndices;
+        
+        // Collect all triangles for solid rendering (unless wireframe-only mode)
+        // This includes both regular mesh triangles AND custom triangles in one pass
+        if (!m_wireframeMode) {
+            // First, add regular mesh triangles
+            for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
+                uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
+
+                for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
+                    glm::vec3 v0, v1, v2;
+                    if (m_model->getTriangle(meshIdx, triIdx, v0, v1, v2)) {
+                        // Add triangle for solid rendering
+                        uint32_t baseIdx = solidTriangleVerts.size();
+                        solidTriangleVerts.push_back(v0);
+                        solidTriangleVerts.push_back(v1);
+                        solidTriangleVerts.push_back(v2);
+                        solidTriangleIndices.push_back(baseIdx);
+                        solidTriangleIndices.push_back(baseIdx + 1);
+                        solidTriangleIndices.push_back(baseIdx + 2);
+                    }
+                }
+            }
+
+            // Then, add custom triangles to the same solid rendering pass
+            const auto& customTriangles = m_model->getCustomTriangles();
+            for (size_t i = 0; i < customTriangles.size(); ++i) {
+                const auto& tri = customTriangles[i];
+                glm::vec3 v0, v1, v2;
+
+                if (m_model->getCustomVertexPosition(tri.vertexIds[0], v0) &&
+                    m_model->getCustomVertexPosition(tri.vertexIds[1], v1) &&
+                    m_model->getCustomVertexPosition(tri.vertexIds[2], v2)) {
+
+                    // Add to solid rendering
+                    uint32_t baseIdx = solidTriangleVerts.size();
+                    solidTriangleVerts.push_back(v0);
+                    solidTriangleVerts.push_back(v1);
+                    solidTriangleVerts.push_back(v2);
+                    solidTriangleIndices.push_back(baseIdx);
+                    solidTriangleIndices.push_back(baseIdx + 1);
+                    solidTriangleIndices.push_back(baseIdx + 2);
+
+                    // Check if this custom triangle is selected for overlay rendering
+                    uint32_t customTriIdx = 0x80000000 | i;
+                    bool isSelected = std::find(m_selection.selectedTriangles.begin(),
+                                               m_selection.selectedTriangles.end(),
+                                               customTriIdx) != m_selection.selectedTriangles.end();
+
+                    if (isSelected) {
+                        // Add to selected triangles for overlay (slightly offset to avoid Z-fighting)
+                        glm::vec3 normal = glm::normalize(glm::cross(v1 - v0, v2 - v0));
+                        float offset = 0.001f;
+
+                        uint32_t selectedBaseIdx = selectedTriangleVerts.size();
+                        selectedTriangleVerts.push_back(v0 + normal * offset);
+                        selectedTriangleVerts.push_back(v1 + normal * offset);
+                        selectedTriangleVerts.push_back(v2 + normal * offset);
+                        selectedTriangleIndices.push_back(selectedBaseIdx);
+                        selectedTriangleIndices.push_back(selectedBaseIdx + 1);
+                        selectedTriangleIndices.push_back(selectedBaseIdx + 2);
+                    }
+                }
+            }
+        }
+        
+        // Collect wireframe edges (if wireframe mode is enabled)
+        if (m_wireframeMode) {
+            for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
+                uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
+                
+                for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
+                    glm::vec3 v0, v1, v2;
+                    if (m_model->getTriangle(meshIdx, triIdx, v0, v1, v2)) {
+                        // Add triangle edges for wireframe
+                        edges.emplace_back(v0, v1);
+                        edges.emplace_back(v1, v2);
+                        edges.emplace_back(v2, v0);
+                    }
+                }
+            }
+        }
+        
+        // Always show selected triangles as wireframe overlay
+        for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
+            uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
+            
+            for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
+                uint32_t combinedIdx = (meshIdx << 16) | triIdx;
+                
+                bool isSelected = std::find(m_selection.selectedTriangles.begin(),
+                                           m_selection.selectedTriangles.end(),
+                                           combinedIdx) != m_selection.selectedTriangles.end();
+                
+                if (isSelected) {
+                    glm::vec3 v0, v1, v2;
+                    if (m_model->getTriangle(meshIdx, triIdx, v0, v1, v2)) {
+                        // Add to selected triangles for red wireframe overlay
+                        uint32_t baseIdx = selectedTriangleVerts.size();
+                        selectedTriangleVerts.push_back(v0);
+                        selectedTriangleVerts.push_back(v1);
+                        selectedTriangleVerts.push_back(v2);
+                        selectedTriangleIndices.push_back(baseIdx);
+                        selectedTriangleIndices.push_back(baseIdx + 1);
+                        selectedTriangleIndices.push_back(baseIdx + 2);
+                    }
+                }
+            }
+        }
+        
+        // Add custom triangles to wireframe edges if in wireframe mode
+        if (m_wireframeMode) {
+            const auto& customTriangles = m_model->getCustomTriangles();
+            for (size_t i = 0; i < customTriangles.size(); ++i) {
+                const auto& tri = customTriangles[i];
+                glm::vec3 v0, v1, v2;
+
+                if (m_model->getCustomVertexPosition(tri.vertexIds[0], v0) &&
+                    m_model->getCustomVertexPosition(tri.vertexIds[1], v1) &&
+                    m_model->getCustomVertexPosition(tri.vertexIds[2], v2)) {
+
+                    // Add to wireframe
+                    edges.emplace_back(v0, v1);
+                    edges.emplace_back(v1, v2);
+                    edges.emplace_back(v2, v0);
+
+                    // Check if this custom triangle is selected for overlay
+                    uint32_t customTriIdx = 0x80000000 | i;
+                    bool isSelected = std::find(m_selection.selectedTriangles.begin(),
+                                               m_selection.selectedTriangles.end(),
+                                               customTriIdx) != m_selection.selectedTriangles.end();
+
+                    if (isSelected) {
+                        // Add selected triangle edges for green overlay in wireframe mode
+                        glm::vec3 normal = glm::normalize(glm::cross(v1 - v0, v2 - v0));
+                        float offset = 0.001f;
+
+                        uint32_t selectedBaseIdx = selectedTriangleVerts.size();
+                        selectedTriangleVerts.push_back(v0 + normal * offset);
+                        selectedTriangleVerts.push_back(v1 + normal * offset);
+                        selectedTriangleVerts.push_back(v2 + normal * offset);
+                        selectedTriangleIndices.push_back(selectedBaseIdx);
+                        selectedTriangleIndices.push_back(selectedBaseIdx + 1);
+                        selectedTriangleIndices.push_back(selectedBaseIdx + 2);
+                    }
+                }
+            }
+        }
+        
+        // Use high-performance indirect draw calls to render all triangles in a single call
+        std::vector<tremor::editor::GizmoRenderer::TriangleDrawSet> triangleDrawSets;
+
+        // Add solid triangles as the first draw set
+        if (!solidTriangleVerts.empty()) {
+            tremor::editor::GizmoRenderer::TriangleDrawSet solidSet;
+            solidSet.vertices = solidTriangleVerts;
+            solidSet.indices = solidTriangleIndices;
+            solidSet.color = glm::vec3(0.6f, 0.7f, 0.8f); // Light blue-gray color
+            solidSet.alpha = 0.8f; // Slightly transparent
+            triangleDrawSets.push_back(std::move(solidSet));
+        }
+
+        // Add selected triangles as the second draw set (rendered on top)
+        if (!selectedTriangleVerts.empty()) {
+            tremor::editor::GizmoRenderer::TriangleDrawSet selectedSet;
+            selectedSet.vertices = selectedTriangleVerts;
+            selectedSet.indices = selectedTriangleIndices;
+            selectedSet.color = glm::vec3(0.3f, 1.0f, 0.4f); // Light green
+            selectedSet.alpha = 0.5f; // Semi-transparent
+            triangleDrawSets.push_back(std::move(selectedSet));
+        }
+
+        // Single indirect draw call for all triangle sets - maximum performance!
+        if (!triangleDrawSets.empty()) {
+            gizmoRenderer->renderTrianglesIndirect(commandBuffer, triangleDrawSets, viewMatrix, projMatrix, m_backfaceCulling);
+        }
+
+        // Use high-performance indirect draw calls for wireframe edges to eliminate flickering
+        std::vector<tremor::editor::GizmoRenderer::EdgeDrawSet> edgeDrawSets;
+
+        // Add wireframe edges (if wireframe mode is on)
+        if (!edges.empty()) {
+            tremor::editor::GizmoRenderer::EdgeDrawSet wireframeSet;
+            wireframeSet.edges = edges;
+            wireframeSet.color = glm::vec3(0.7f, 0.7f, 0.7f); // Gray wireframe
+            edgeDrawSets.push_back(std::move(wireframeSet));
+        }
+
+        // Add selected triangle edges
+        if (!selectedTriangleVerts.empty()) {
+            std::vector<std::pair<glm::vec3, glm::vec3>> selectedEdges;
+            for (size_t i = 0; i < selectedTriangleIndices.size(); i += 3) {
+                if (i + 2 < selectedTriangleIndices.size()) {
+                    const glm::vec3& v0 = selectedTriangleVerts[selectedTriangleIndices[i]];
+                    const glm::vec3& v1 = selectedTriangleVerts[selectedTriangleIndices[i + 1]];
+                    const glm::vec3& v2 = selectedTriangleVerts[selectedTriangleIndices[i + 2]];
+                    selectedEdges.emplace_back(v0, v1);
+                    selectedEdges.emplace_back(v1, v2);
+                    selectedEdges.emplace_back(v2, v0);
+                }
+            }
+            if (!selectedEdges.empty()) {
+                tremor::editor::GizmoRenderer::EdgeDrawSet selectedSet;
+                selectedSet.edges = selectedEdges;
+                selectedSet.color = glm::vec3(0.2f, 1.0f, 0.3f); // Green for selected
+                edgeDrawSets.push_back(std::move(selectedSet));
+            }
+        }
+
+        // Single indirect draw call for all edge sets - eliminates wireframe flickering!
+        if (!edgeDrawSets.empty()) {
+            gizmoRenderer->renderEdgesIndirect(commandBuffer, edgeDrawSets, viewMatrix, projMatrix);
         }
     }
 
@@ -590,8 +1010,8 @@ namespace tremor::editor {
         }
         
         if (closestVertexId != 0) {
-            // Check if Ctrl is held for multi-selection
-            bool addToSelection = SDL_GetModState() & KMOD_CTRL;
+            // Check if Shift is held for multi-selection
+            bool addToSelection = SDL_GetModState() & KMOD_SHIFT;
             
             if (!addToSelection) {
                 // Clear existing selection if not adding

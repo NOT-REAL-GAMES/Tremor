@@ -46,7 +46,7 @@ namespace tremor::editor {
     }
 
     void EditorViewport::render(VkCommandBuffer commandBuffer) {
-        if (m_showGrid && m_gridRenderer) {
+        if (m_showGrid && m_gridRenderer && m_gridRenderingEnabled && !GridRenderer::isGlobalRenderingBlocked()) {
             VkExtent2D viewportExtent = {
                 static_cast<uint32_t>(m_viewportSize.x),
                 static_cast<uint32_t>(m_viewportSize.y)

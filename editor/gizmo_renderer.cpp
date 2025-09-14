@@ -142,6 +142,7 @@ namespace tremor::editor {
         : m_device(device), m_physicalDevice(physicalDevice),
           m_commandPool(commandPool), m_graphicsQueue(graphicsQueue),
           m_linePipeline(VK_NULL_HANDLE), m_trianglePipeline(VK_NULL_HANDLE),
+          m_triangleNoCullPipeline(VK_NULL_HANDLE),
           m_pipelineLayout(VK_NULL_HANDLE), m_descriptorSetLayout(VK_NULL_HANDLE),
           m_descriptorPool(VK_NULL_HANDLE), m_descriptorSet(VK_NULL_HANDLE),
           m_translationVertexBuffer(device, physicalDevice),
@@ -150,9 +151,20 @@ namespace tremor::editor {
           m_vertexMarkerBuffer(device, physicalDevice),
           m_vertexMarkerIndexBuffer(device, physicalDevice),
           m_triangleEdgeBuffer(device, physicalDevice),
+          m_selectedTriangleEdgeBuffer(device, physicalDevice),
           m_selectedVertexMarkerBuffer(device, physicalDevice),
           m_selectedVertexMarkerIndexBuffer(device, physicalDevice),
           m_mouseRayDebugBuffer(device, physicalDevice),
+          m_indirectDrawBuffer(device, physicalDevice),
+          m_indirectTriangleVertexBuffer(device, physicalDevice),
+          m_indirectTriangleIndexBuffer(device, physicalDevice),
+          m_indirectEdgeDrawBuffer(device, physicalDevice),
+          m_indirectEdgeVertexBuffer(device, physicalDevice),
+          m_filledTriangleBuffer(device, physicalDevice),
+          m_selectedTriangleBuffer(device, physicalDevice),
+          m_filledTriangleIndexBuffer(device, physicalDevice),
+          m_selectedTriangleIndexBuffer(device, physicalDevice),
+          m_wireframeBuffer(device, physicalDevice),
           m_indexBuffer(device, physicalDevice),
           m_uniformBuffer(device, physicalDevice),
           m_gizmoUniformBuffer(device, physicalDevice),
@@ -174,6 +186,9 @@ namespace tremor::editor {
             }
             if (m_trianglePipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(m_device, m_trianglePipeline, nullptr);
+            }
+            if (m_triangleNoCullPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(m_device, m_triangleNoCullPipeline, nullptr);
             }
             if (m_pipelineLayout != VK_NULL_HANDLE) {
                 vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
@@ -311,9 +326,13 @@ namespace tremor::editor {
         }
 
         // Check if we need to recreate the vertex buffer
-        if (!m_vertexMarkerBuffer.isValid() || vertices.size() > m_vertexMarkerBuffer.getCapacity()) {
-            // Create new buffer with extra capacity
-            uint32_t newCapacity = vertices.size() * 2; // Double capacity for growth
+        uint32_t requiredVertices = vertices.size();
+        if (!m_vertexMarkerBuffer.isValid() || requiredVertices > m_vertexMarkerBuffer.getCapacity()) {
+            // Wait for any pending operations to complete before recreating buffer
+            vkDeviceWaitIdle(m_device);
+            
+            // Create new buffer with extra capacity to reduce recreations
+            uint32_t newCapacity = std::max(requiredVertices * 2, 512u); // Double capacity for growth
             VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
             
             if (!m_vertexMarkerBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -401,9 +420,13 @@ namespace tremor::editor {
             generateBox(vertices, indices, pos, size, color, vertexOffset);
         }
         // Check if we need to recreate the selected vertex buffer
-        if (!m_selectedVertexMarkerBuffer.isValid() || vertices.size() > m_selectedVertexMarkerBuffer.getCapacity()) {
-            // Create new buffer with extra capacity
-            uint32_t newCapacity = vertices.size() * 2; // Double capacity for growth
+        uint32_t requiredVertices = vertices.size();
+        if (!m_selectedVertexMarkerBuffer.isValid() || requiredVertices > m_selectedVertexMarkerBuffer.getCapacity()) {
+            // Wait for any pending operations to complete before recreating buffer
+            vkDeviceWaitIdle(m_device);
+            
+            // Create new buffer with extra capacity to reduce recreations
+            uint32_t newCapacity = std::max(requiredVertices * 2, 512u); // Double capacity for growth
             VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
             
             if (!m_selectedVertexMarkerBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -485,9 +508,13 @@ namespace tremor::editor {
         }
 
         // Use dedicated triangle edge buffer for edge rendering
-        if (!m_triangleEdgeBuffer.isValid() || vertices.size() > m_triangleEdgeBuffer.getCapacity()) {
-            // Create new buffer with extra capacity
-            uint32_t newCapacity = vertices.size() * 2;
+        uint32_t requiredVertices = vertices.size();
+        if (!m_triangleEdgeBuffer.isValid() || requiredVertices > m_triangleEdgeBuffer.getCapacity()) {
+            // Wait for any pending operations to complete before recreating buffer
+            vkDeviceWaitIdle(m_device);
+            
+            // Create new buffer with extra capacity to reduce recreations
+            uint32_t newCapacity = std::max(requiredVertices * 2, 512u);
             VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
             
             if (!m_triangleEdgeBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -526,6 +553,530 @@ namespace tremor::editor {
 
         // Draw lines (2 vertices per line)
         vkCmdDraw(commandBuffer, m_triangleEdgeBuffer.getCount(), 1, 0, 0);
+    }
+
+    void GizmoRenderer::renderSelectedTriangleEdges(VkCommandBuffer commandBuffer,
+                                                  const std::vector<std::pair<glm::vec3, glm::vec3>>& edges,
+                                                  const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                                  const glm::vec3& color) {
+        if (edges.empty() || m_linePipeline == VK_NULL_HANDLE) {
+            return;
+        }
+
+        // Generate line geometry for selected triangle edges
+        std::vector<GizmoVertex> vertices;
+        vertices.reserve(edges.size() * 2);
+
+        for (const auto& edge : edges) {
+            vertices.push_back({edge.first, color});
+            vertices.push_back({edge.second, color});
+        }
+
+        // Use dedicated selected triangle edge buffer for edge rendering
+        uint32_t requiredVertices = vertices.size();
+        if (!m_selectedTriangleEdgeBuffer.isValid() || requiredVertices > m_selectedTriangleEdgeBuffer.getCapacity()) {
+            // Wait for any pending operations to complete before recreating buffer
+            vkDeviceWaitIdle(m_device);
+
+            // Create new buffer with extra capacity to reduce recreations
+            uint32_t newCapacity = std::max(requiredVertices * 2, 512u);
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
+
+            if (!m_selectedTriangleEdgeBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            "selected_triangle_edge_buffer")) {
+                Logger::get().error("Failed to create selected triangle edge buffer");
+                return;
+            }
+
+            m_selectedTriangleEdgeBuffer.setCapacity(newCapacity);
+        }
+
+        // Update selected triangle edge vertex buffer
+        if (!m_selectedTriangleEdgeBuffer.updateData(vertices.data(), sizeof(GizmoVertex) * vertices.size())) {
+            Logger::get().error("Failed to update selected triangle edge buffer data");
+            return;
+        }
+
+        m_selectedTriangleEdgeBuffer.setCount(vertices.size());
+
+        // Update uniform buffer
+        glm::mat4 mvpMatrix = projMatrix * viewMatrix;
+        updateUniformBuffer(mvpMatrix, glm::vec3(0.0f));
+
+        // Bind descriptor sets
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                               m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+
+        // Bind line pipeline
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_linePipeline);
+
+        // Bind selected triangle edge vertex buffer
+        VkBuffer vertexBuffers[] = {m_selectedTriangleEdgeBuffer.getBuffer()};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
+        // Draw lines (2 vertices per line)
+        vkCmdDraw(commandBuffer, m_selectedTriangleEdgeBuffer.getCount(), 1, 0, 0);
+    }
+
+    void GizmoRenderer::renderTrianglesIndirect(VkCommandBuffer commandBuffer,
+                                              const std::vector<TriangleDrawSet>& drawSets,
+                                              const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                              bool enableBackfaceCulling) {
+        if (drawSets.empty() || m_trianglePipeline == VK_NULL_HANDLE) {
+            return;
+        }
+
+        // Combine all triangle data into single buffers
+        std::vector<GizmoVertex> allVertices;
+        std::vector<uint32_t> allIndices;
+        std::vector<VkDrawIndexedIndirectCommand> drawCommands;
+
+        uint32_t vertexOffset = 0;
+        uint32_t indexOffset = 0;
+
+        for (const auto& drawSet : drawSets) {
+            if (drawSet.vertices.empty() || drawSet.indices.empty()) {
+                continue;
+            }
+
+            // Add vertices with their colors
+            for (const auto& vertex : drawSet.vertices) {
+                allVertices.push_back({vertex, drawSet.color});
+            }
+
+            // Add indices with vertex offset
+            for (uint32_t index : drawSet.indices) {
+                allIndices.push_back(index + vertexOffset);
+            }
+
+            // Create draw command
+            VkDrawIndexedIndirectCommand cmd{};
+            cmd.indexCount = static_cast<uint32_t>(drawSet.indices.size());
+            cmd.instanceCount = 1;
+            cmd.firstIndex = indexOffset;
+            cmd.vertexOffset = 0; // We're offsetting indices instead
+            cmd.firstInstance = 0;
+
+            drawCommands.push_back(cmd);
+
+            vertexOffset += static_cast<uint32_t>(drawSet.vertices.size());
+            indexOffset += static_cast<uint32_t>(drawSet.indices.size());
+        }
+
+        if (allVertices.empty() || allIndices.empty() || drawCommands.empty()) {
+            return;
+        }
+
+        // Update vertex buffer
+        uint32_t requiredVertices = allVertices.size();
+        if (!m_indirectTriangleVertexBuffer.isValid() || requiredVertices > m_indirectTriangleVertexBuffer.getCapacity()) {
+            vkDeviceWaitIdle(m_device);
+
+            uint32_t newCapacity = std::max(requiredVertices * 2, 2048u);
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
+
+            if (!m_indirectTriangleVertexBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            "indirect_triangle_vertex_buffer")) {
+                Logger::get().error("Failed to create indirect triangle vertex buffer");
+                return;
+            }
+
+            m_indirectTriangleVertexBuffer.setCapacity(newCapacity);
+        }
+
+        if (!m_indirectTriangleVertexBuffer.updateData(allVertices.data(), sizeof(GizmoVertex) * allVertices.size())) {
+            Logger::get().error("Failed to update indirect triangle vertex buffer");
+            return;
+        }
+        m_indirectTriangleVertexBuffer.setCount(allVertices.size());
+
+        // Update index buffer
+        uint32_t requiredIndices = allIndices.size();
+        if (!m_indirectTriangleIndexBuffer.isValid() || requiredIndices > m_indirectTriangleIndexBuffer.getCapacity()) {
+            vkDeviceWaitIdle(m_device);
+
+            uint32_t newIndexCapacity = std::max(requiredIndices * 2, 2048u);
+            VkDeviceSize indexBufferSize = sizeof(uint32_t) * newIndexCapacity;
+
+            if (!m_indirectTriangleIndexBuffer.create(indexBufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            "indirect_triangle_index_buffer")) {
+                Logger::get().error("Failed to create indirect triangle index buffer");
+                return;
+            }
+
+            m_indirectTriangleIndexBuffer.setCapacity(newIndexCapacity);
+        }
+
+        if (!m_indirectTriangleIndexBuffer.updateData(allIndices.data(), sizeof(uint32_t) * allIndices.size())) {
+            Logger::get().error("Failed to update indirect triangle index buffer");
+            return;
+        }
+        m_indirectTriangleIndexBuffer.setCount(allIndices.size());
+
+        // Update indirect draw buffer
+        uint32_t requiredCommands = drawCommands.size();
+        if (!m_indirectDrawBuffer.isValid() || requiredCommands > m_indirectDrawBuffer.getCapacity()) {
+            vkDeviceWaitIdle(m_device);
+
+            uint32_t newCommandCapacity = std::max(requiredCommands * 2, 64u);
+            VkDeviceSize commandBufferSize = sizeof(VkDrawIndexedIndirectCommand) * newCommandCapacity;
+
+            if (!m_indirectDrawBuffer.create(commandBufferSize, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            "indirect_draw_buffer")) {
+                Logger::get().error("Failed to create indirect draw buffer");
+                return;
+            }
+
+            m_indirectDrawBuffer.setCapacity(newCommandCapacity);
+        }
+
+        if (!m_indirectDrawBuffer.updateData(drawCommands.data(), sizeof(VkDrawIndexedIndirectCommand) * drawCommands.size())) {
+            Logger::get().error("Failed to update indirect draw buffer");
+            return;
+        }
+        m_indirectDrawBuffer.setCount(drawCommands.size());
+
+        // Render using indirect draw
+        glm::mat4 mvpMatrix = projMatrix * viewMatrix;
+        updateUniformBuffer(mvpMatrix, glm::vec3(0.0f));
+
+        // Bind descriptor sets
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                               m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+
+        // Bind appropriate triangle pipeline based on culling mode
+        VkPipeline pipeline = enableBackfaceCulling ? m_trianglePipeline : m_triangleNoCullPipeline;
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+        // Bind vertex and index buffers
+        VkBuffer vertexBuffers[] = {m_indirectTriangleVertexBuffer.getBuffer()};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+        vkCmdBindIndexBuffer(commandBuffer, m_indirectTriangleIndexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
+
+        // Single indirect draw call for all triangle sets
+        vkCmdDrawIndexedIndirect(commandBuffer, m_indirectDrawBuffer.getBuffer(), 0,
+                                static_cast<uint32_t>(drawCommands.size()),
+                                sizeof(VkDrawIndexedIndirectCommand));
+    }
+
+    void GizmoRenderer::renderEdgesIndirect(VkCommandBuffer commandBuffer,
+                                           const std::vector<EdgeDrawSet>& drawSets,
+                                           const glm::mat4& viewMatrix, const glm::mat4& projMatrix) {
+        if (drawSets.empty() || m_linePipeline == VK_NULL_HANDLE) {
+            return;
+        }
+
+        // Combine all edge data into single buffers
+        std::vector<GizmoVertex> allVertices;
+        std::vector<VkDrawIndirectCommand> drawCommands;
+
+        uint32_t vertexOffset = 0;
+
+        for (const auto& drawSet : drawSets) {
+            if (drawSet.edges.empty()) {
+                continue;
+            }
+
+            // Add edge vertices with their colors (2 vertices per edge)
+            for (const auto& edge : drawSet.edges) {
+                allVertices.push_back({edge.first, drawSet.color});
+                allVertices.push_back({edge.second, drawSet.color});
+            }
+
+            // Create draw command for this edge set
+            VkDrawIndirectCommand cmd{};
+            cmd.vertexCount = static_cast<uint32_t>(drawSet.edges.size() * 2); // 2 vertices per edge
+            cmd.instanceCount = 1;
+            cmd.firstVertex = vertexOffset;
+            cmd.firstInstance = 0;
+
+            drawCommands.push_back(cmd);
+
+            vertexOffset += cmd.vertexCount;
+        }
+
+        if (allVertices.empty() || drawCommands.empty()) {
+            return;
+        }
+
+        // Update vertex buffer
+        uint32_t requiredVertices = allVertices.size();
+        if (!m_indirectEdgeVertexBuffer.isValid() || requiredVertices > m_indirectEdgeVertexBuffer.getCapacity()) {
+            vkDeviceWaitIdle(m_device);
+
+            uint32_t newCapacity = std::max(requiredVertices * 2, 2048u);
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
+
+            if (!m_indirectEdgeVertexBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            "indirect_edge_vertex_buffer")) {
+                Logger::get().error("Failed to create indirect edge vertex buffer");
+                return;
+            }
+
+            m_indirectEdgeVertexBuffer.setCapacity(newCapacity);
+        }
+
+        if (!m_indirectEdgeVertexBuffer.updateData(allVertices.data(), sizeof(GizmoVertex) * allVertices.size())) {
+            Logger::get().error("Failed to update indirect edge vertex buffer");
+            return;
+        }
+        m_indirectEdgeVertexBuffer.setCount(allVertices.size());
+
+        // Update indirect draw buffer
+        uint32_t requiredCommands = drawCommands.size();
+        if (!m_indirectEdgeDrawBuffer.isValid() || requiredCommands > m_indirectEdgeDrawBuffer.getCapacity()) {
+            vkDeviceWaitIdle(m_device);
+
+            uint32_t newCommandCapacity = std::max(requiredCommands * 2, 64u);
+            VkDeviceSize commandBufferSize = sizeof(VkDrawIndirectCommand) * newCommandCapacity;
+
+            if (!m_indirectEdgeDrawBuffer.create(commandBufferSize, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            "indirect_edge_draw_buffer")) {
+                Logger::get().error("Failed to create indirect edge draw buffer");
+                return;
+            }
+
+            m_indirectEdgeDrawBuffer.setCapacity(newCommandCapacity);
+        }
+
+        if (!m_indirectEdgeDrawBuffer.updateData(drawCommands.data(), sizeof(VkDrawIndirectCommand) * drawCommands.size())) {
+            Logger::get().error("Failed to update indirect edge draw buffer");
+            return;
+        }
+        m_indirectEdgeDrawBuffer.setCount(drawCommands.size());
+
+        // Render using indirect draw
+        glm::mat4 mvpMatrix = projMatrix * viewMatrix;
+        updateUniformBuffer(mvpMatrix, glm::vec3(0.0f));
+
+        // Bind descriptor sets
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                               m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+
+        // Bind line pipeline
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_linePipeline);
+
+        // Bind vertex buffer
+        VkBuffer vertexBuffers[] = {m_indirectEdgeVertexBuffer.getBuffer()};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
+        // Single indirect draw call for all edge sets
+        vkCmdDrawIndirect(commandBuffer, m_indirectEdgeDrawBuffer.getBuffer(), 0,
+                         static_cast<uint32_t>(drawCommands.size()),
+                         sizeof(VkDrawIndirectCommand));
+    }
+
+    void GizmoRenderer::renderFilledTriangles(VkCommandBuffer commandBuffer,
+                                            const std::vector<glm::vec3>& vertices,
+                                            const std::vector<uint32_t>& indices,
+                                            const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                            const glm::vec3& color, float alpha,
+                                            bool enableBackfaceCulling) {
+        if (vertices.empty() || indices.empty() || m_trianglePipeline == VK_NULL_HANDLE) {
+            return;
+        }
+
+        // Generate triangle geometry for filled triangles
+        std::vector<GizmoVertex> gizmoVertices;
+        gizmoVertices.reserve(vertices.size());
+
+        glm::vec3 colorWithAlpha(color.r, color.g, color.b); // Note: alpha handled by pipeline
+        for (const auto& vertex : vertices) {
+            gizmoVertices.push_back({vertex, colorWithAlpha});
+        }
+
+        // Use dedicated filled triangle vertex buffer - only recreate if absolutely necessary
+        uint32_t requiredVertices = gizmoVertices.size();
+        if (!m_filledTriangleBuffer.isValid() || requiredVertices > m_filledTriangleBuffer.getCapacity()) {
+            // Wait for any pending operations to complete before recreating buffer
+            vkDeviceWaitIdle(m_device);
+            
+            // Create new vertex buffer with extra capacity to reduce recreations
+            uint32_t newCapacity = std::max(requiredVertices * 2, 1024u);
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
+            
+            if (!m_filledTriangleBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            "filled_triangle_buffer")) {
+                Logger::get().error("Failed to create filled triangle buffer");
+                return;
+            }
+            
+            m_filledTriangleBuffer.setCapacity(newCapacity);
+        }
+
+        // Update filled triangle vertex buffer
+        if (!m_filledTriangleBuffer.updateData(gizmoVertices.data(), sizeof(GizmoVertex) * gizmoVertices.size())) {
+            Logger::get().error("Failed to update filled triangle buffer data");
+            return;
+        }
+        
+        m_filledTriangleBuffer.setCount(gizmoVertices.size());
+
+        // Create/update dedicated index buffer for filled triangles
+        uint32_t requiredIndices = indices.size();
+        if (requiredIndices > 0) {
+            // Check if we need to recreate the index buffer
+            if (!m_filledTriangleIndexBuffer.isValid() || requiredIndices > m_filledTriangleIndexBuffer.getCapacity()) {
+                // Wait for device idle before recreating
+                vkDeviceWaitIdle(m_device);
+                
+                // Create new index buffer with extra capacity
+                uint32_t newIndexCapacity = std::max(requiredIndices * 2, 1024u);
+                VkDeviceSize indexBufferSize = sizeof(uint32_t) * newIndexCapacity;
+                
+                if (!m_filledTriangleIndexBuffer.create(indexBufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                        "filled_triangle_index_buffer")) {
+                    Logger::get().error("Failed to create filled triangle index buffer");
+                    return;
+                }
+                
+                m_filledTriangleIndexBuffer.setCapacity(newIndexCapacity);
+            }
+
+            // Update index buffer with triangle indices
+            if (!m_filledTriangleIndexBuffer.updateData(indices.data(), sizeof(uint32_t) * indices.size())) {
+                Logger::get().error("Failed to update filled triangle index buffer data");
+                return;
+            }
+            
+            m_filledTriangleIndexBuffer.setCount(indices.size());
+        }
+
+        // Update uniform buffer
+        glm::mat4 mvpMatrix = projMatrix * viewMatrix;
+        updateUniformBuffer(mvpMatrix, glm::vec3(0.0f));
+
+        // Bind descriptor sets
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                               m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+
+        // Bind appropriate triangle pipeline based on culling mode
+        VkPipeline pipeline = enableBackfaceCulling ? m_trianglePipeline : m_triangleNoCullPipeline;
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+        // Bind filled triangle vertex buffer
+        VkBuffer vertexBuffers[] = {m_filledTriangleBuffer.getBuffer()};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
+        // Draw triangles using proper indexed drawing
+        if (m_filledTriangleIndexBuffer.getCount() > 0) {
+            vkCmdBindIndexBuffer(commandBuffer, m_filledTriangleIndexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(commandBuffer, m_filledTriangleIndexBuffer.getCount(), 1, 0, 0, 0);
+        }
+    }
+
+    void GizmoRenderer::renderSelectedTriangles(VkCommandBuffer commandBuffer,
+                                              const std::vector<glm::vec3>& vertices,
+                                              const std::vector<uint32_t>& indices,
+                                              const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                              const glm::vec3& color, float alpha,
+                                              bool enableBackfaceCulling) {
+        if (vertices.empty() || indices.empty() || m_trianglePipeline == VK_NULL_HANDLE) {
+            return;
+        }
+
+        // Generate triangle geometry for selected triangles
+        std::vector<GizmoVertex> gizmoVertices;
+        gizmoVertices.reserve(vertices.size());
+        glm::vec3 colorWithAlpha(color.r, color.g, color.b); // Note: alpha handled by pipeline
+
+        for (const auto& vertex : vertices) {
+            gizmoVertices.push_back({vertex, colorWithAlpha});
+        }
+
+        // Use dedicated selected triangle vertex buffer
+        uint32_t requiredVertices = gizmoVertices.size();
+        if (!m_selectedTriangleBuffer.isValid() || requiredVertices > m_selectedTriangleBuffer.getCapacity()) {
+            // Wait for any pending operations to complete before recreating buffer
+            vkDeviceWaitIdle(m_device);
+
+            // Create new vertex buffer with extra capacity to reduce recreations
+            uint32_t newCapacity = std::max(requiredVertices * 2, 1024u);
+            VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
+
+            if (!m_selectedTriangleBuffer.create(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            "selected_triangle_buffer")) {
+                Logger::get().error("Failed to create selected triangle buffer");
+                return;
+            }
+
+            m_selectedTriangleBuffer.setCapacity(newCapacity);
+        }
+
+        // Update selected triangle vertex buffer
+        if (!m_selectedTriangleBuffer.updateData(gizmoVertices.data(), sizeof(GizmoVertex) * gizmoVertices.size())) {
+            Logger::get().error("Failed to update selected triangle buffer data");
+            return;
+        }
+
+        m_selectedTriangleBuffer.setCount(gizmoVertices.size());
+
+        // Create/update dedicated index buffer for selected triangles
+        uint32_t requiredIndices = indices.size();
+        if (requiredIndices > 0) {
+            // Check if we need to recreate the index buffer
+            if (!m_selectedTriangleIndexBuffer.isValid() || requiredIndices > m_selectedTriangleIndexBuffer.getCapacity()) {
+                // Wait for device idle before recreating
+                vkDeviceWaitIdle(m_device);
+
+                // Create new index buffer with extra capacity
+                uint32_t newIndexCapacity = std::max(requiredIndices * 2, 1024u);
+                VkDeviceSize indexBufferSize = sizeof(uint32_t) * newIndexCapacity;
+
+                if (!m_selectedTriangleIndexBuffer.create(indexBufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                        "selected_triangle_index_buffer")) {
+                    Logger::get().error("Failed to create selected triangle index buffer");
+                    return;
+                }
+
+                m_selectedTriangleIndexBuffer.setCapacity(newIndexCapacity);
+            }
+
+            // Update index buffer with triangle indices
+            if (!m_selectedTriangleIndexBuffer.updateData(indices.data(), sizeof(uint32_t) * indices.size())) {
+                Logger::get().error("Failed to update selected triangle index buffer data");
+                return;
+            }
+
+            m_selectedTriangleIndexBuffer.setCount(indices.size());
+        }
+
+        // Update uniform buffer
+        glm::mat4 mvpMatrix = projMatrix * viewMatrix;
+        updateUniformBuffer(mvpMatrix, glm::vec3(0.0f));
+
+        // Bind descriptor sets
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                               m_pipelineLayout, 0, 1, &m_descriptorSet, 0, nullptr);
+
+        // Bind appropriate triangle pipeline based on culling mode
+        VkPipeline pipeline = enableBackfaceCulling ? m_trianglePipeline : m_triangleNoCullPipeline;
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+        // Bind selected triangle vertex buffer
+        VkBuffer vertexBuffers[] = {m_selectedTriangleBuffer.getBuffer()};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
+        // Draw triangles using proper indexed drawing
+        if (m_selectedTriangleIndexBuffer.getCount() > 0) {
+            vkCmdBindIndexBuffer(commandBuffer, m_selectedTriangleIndexBuffer.getBuffer(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(commandBuffer, m_selectedTriangleIndexBuffer.getCount(), 1, 0, 0, 0);
+        }
     }
 
     int GizmoRenderer::hitTest(EditorMode mode, const glm::vec2& screenPos, const glm::vec3& gizmoPos,
@@ -760,8 +1311,17 @@ namespace tremor::editor {
         linePipelineInfo.pInputAssemblyState = &inputAssembly;
         linePipelineInfo.pRasterizationState = &rasterizer;
 
+        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &linePipelineInfo, nullptr, &m_triangleNoCullPipeline) != VK_SUCCESS) {
+            Logger::get().error("Failed to create gizmo triangle no-cull pipeline");
+            return false;
+        }
+
+        // Create triangle pipeline with backface culling
+        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        
         if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &linePipelineInfo, nullptr, &m_trianglePipeline) != VK_SUCCESS) {
-            Logger::get().error("Failed to create gizmo triangle pipeline");
+            Logger::get().error("Failed to create gizmo triangle pipeline with culling");
             return false;
         }
 

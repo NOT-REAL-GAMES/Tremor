@@ -55,6 +55,13 @@ namespace tremor::editor {
         std::string selectionInfo = getSelectionInfo(selection);
         Logger::get().info("Selection info: {}", selectionInfo);
         updateLabelText(m_propertiesPanel.meshInfoLabelId, selectionInfo);
+        
+        // Enable/disable reverse winding button based on triangle selection
+        if (m_toolsPanel.reverseWindingButtonId != 0) {
+            bool hasTriangles = selection.hasSelectedTriangles();
+            // TODO: Add setButtonEnabled to UIRenderer
+            // m_uiRenderer.setButtonEnabled(m_toolsPanel.reverseWindingButtonId, hasTriangles);
+        }
 
         // Calculate average position for selected vertices
         if (selection.hasCustomVertices() && model) {
@@ -147,44 +154,88 @@ namespace tremor::editor {
             glm::vec2(TOOLS_PANEL_X + PANEL_PADDING, buttonY),
             glm::vec2(PANEL_WIDTH - 2 * PANEL_PADDING, BUTTON_HEIGHT),
             [this]() { onCreateTriangleClicked(); });
+        
+        // Triangle selection and modification tools
+        buttonY += BUTTON_HEIGHT + BUTTON_SPACING + 10.0f;
+        m_toolsPanel.selectTriangleButtonId = m_uiRenderer.addButton("Select Triangle",
+            glm::vec2(TOOLS_PANEL_X + PANEL_PADDING, buttonY),
+            glm::vec2(PANEL_WIDTH - 2 * PANEL_PADDING, BUTTON_HEIGHT),
+            [this]() { onSelectTriangleClicked(); });
+        
+        buttonY += BUTTON_HEIGHT + BUTTON_SPACING;
+        m_toolsPanel.reverseWindingButtonId = m_uiRenderer.addButton("Reverse Winding",
+            glm::vec2(TOOLS_PANEL_X + PANEL_PADDING, buttonY),
+            glm::vec2(PANEL_WIDTH - 2 * PANEL_PADDING, BUTTON_HEIGHT),
+            [this]() { onReverseWindingClicked(); });
+        
+        // Preview controls
+        buttonY += BUTTON_HEIGHT + BUTTON_SPACING + 10.0f;
+        m_toolsPanel.togglePreviewButtonId = m_uiRenderer.addButton("Hide Preview",
+            glm::vec2(TOOLS_PANEL_X + PANEL_PADDING, buttonY),
+            glm::vec2(PANEL_WIDTH - 2 * PANEL_PADDING, BUTTON_HEIGHT),
+            [this]() { onTogglePreviewClicked(); });
+        
+        buttonY += BUTTON_HEIGHT + BUTTON_SPACING;
+        m_toolsPanel.toggleWireframeButtonId = m_uiRenderer.addButton("Wireframe Mode",
+            glm::vec2(TOOLS_PANEL_X + PANEL_PADDING, buttonY),
+            glm::vec2(PANEL_WIDTH - 2 * PANEL_PADDING, BUTTON_HEIGHT),
+            [this]() { onToggleWireframeClicked(); });
+        
+        buttonY += BUTTON_HEIGHT + BUTTON_SPACING;
+        m_toolsPanel.toggleBackfaceCullingButtonId = m_uiRenderer.addButton("Culling ON",
+            glm::vec2(TOOLS_PANEL_X + PANEL_PADDING, buttonY),
+            glm::vec2(PANEL_WIDTH - 2 * PANEL_PADDING, BUTTON_HEIGHT),
+            [this]() { onToggleBackfaceCullingClicked(); });
     }
 
     void ModelEditorUI::createPropertiesPanel() {
         Logger::get().debug("Creating properties panel");
 
+        // Calculate dynamic position (assuming 1280x720 initially, will be updated properly later)
+        glm::vec2 panelPos = calculatePropertiesPanelPosition(1280.0f, 720.0f);
+
+        // Background rectangle
+        m_propertiesPanel.backgroundId = m_uiRenderer.addRect(
+            panelPos,
+            glm::vec2(PANEL_WIDTH, PROPERTIES_PANEL_HEIGHT),
+            PANEL_BG_COLOR,    // fillColor  
+            0x404040FF,        // borderColor (dark gray)
+            1.0f               // borderWidth
+        );
+
         // Title
         m_propertiesPanel.titleLabelId = m_uiRenderer.addLabel("Properties",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, PROPERTIES_PANEL_Y + PANEL_PADDING),
+            glm::vec2(panelPos.x + PANEL_PADDING, panelPos.y + PANEL_PADDING),
             TITLE_COLOR, 0.75f);
 
-        float labelY = PROPERTIES_PANEL_Y + 40.0f;
+        float labelY = panelPos.y + 40.0f;
         const float labelHeight = 20.0f;
         const float labelSpacing = 5.0f;
 
         // Property labels
         m_propertiesPanel.meshInfoLabelId = m_uiRenderer.addLabel("Selection: None",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR, 0.4f);
+            glm::vec2(panelPos.x + PANEL_PADDING, labelY), TEXT_COLOR, 0.4f);
 
         labelY += labelHeight + labelSpacing;
         m_propertiesPanel.positionLabelId = m_uiRenderer.addLabel("Pos: -",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR, 0.3f);
+            glm::vec2(panelPos.x + PANEL_PADDING, labelY), TEXT_COLOR, 0.3f);
 
         labelY += labelHeight + labelSpacing;
         m_propertiesPanel.rotationLabelId = m_uiRenderer.addLabel("Rot: -",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR, 0.3f);
+            glm::vec2(panelPos.x + PANEL_PADDING, labelY), TEXT_COLOR, 0.3f);
 
         labelY += labelHeight + labelSpacing;
         m_propertiesPanel.scaleLabelId = m_uiRenderer.addLabel("Scale: -",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR, 0.3f);
+            glm::vec2(panelPos.x + PANEL_PADDING, labelY), TEXT_COLOR, 0.3f);
 
         // Selection radius controls
         labelY += labelHeight + labelSpacing + 10.0f; // Extra spacing
         m_propertiesPanel.selectionRadiusLabelId = m_uiRenderer.addLabel("Vertex Radius: 0.25",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), TEXT_COLOR, 0.2f);
+            glm::vec2(panelPos.x + PANEL_PADDING, labelY), TEXT_COLOR, 0.2f);
 
         labelY += labelHeight + labelSpacing;
         m_propertiesPanel.selectionRadiusButtonId = m_uiRenderer.addButton("Adjust",
-            glm::vec2(PROPERTIES_PANEL_X + PANEL_PADDING, labelY), glm::vec2(80, 25),
+            glm::vec2(panelPos.x + PANEL_PADDING, labelY), glm::vec2(80, 25),
             [this]() { onSelectionRadiusClicked(); });
     }
 
@@ -251,6 +302,47 @@ namespace tremor::editor {
     void ModelEditorUI::onCreateTriangleClicked() {
         Logger::get().info("Create Triangle mode activated");
         m_editor.setMode(EditorMode::CreateTriangle);
+    }
+    
+    void ModelEditorUI::onSelectTriangleClicked() {
+        Logger::get().info("Select Triangle mode activated");
+        // Keep in Select mode but enable triangle selection
+        m_editor.setMode(EditorMode::Select);
+    }
+    
+    void ModelEditorUI::onReverseWindingClicked() {
+        Logger::get().info("Reverse winding button clicked");
+        m_editor.reverseWindingOrder();
+    }
+    
+    void ModelEditorUI::onTogglePreviewClicked() {
+        bool currentState = m_editor.getShowMeshPreview();
+        m_editor.setShowMeshPreview(!currentState);
+        Logger::get().info("Mesh preview toggled: {}", !currentState ? "on" : "off");
+        
+        // Update button text to reflect state
+        std::string buttonText = !currentState ? "Hide Preview" : "Show Preview";
+        m_uiRenderer.setElementText(m_toolsPanel.togglePreviewButtonId, buttonText);
+    }
+    
+    void ModelEditorUI::onToggleWireframeClicked() {
+        bool currentState = m_editor.getWireframeMode();
+        m_editor.setWireframeMode(!currentState);
+        Logger::get().info("Wireframe mode toggled: {}", !currentState ? "on" : "off");
+        
+        // Update button text to reflect state
+        std::string buttonText = !currentState ? "Solid Mode" : "Wireframe Mode";
+        m_uiRenderer.setElementText(m_toolsPanel.toggleWireframeButtonId, buttonText);
+    }
+
+    void ModelEditorUI::onToggleBackfaceCullingClicked() {
+        bool currentState = m_editor.getBackfaceCulling();
+        m_editor.setBackfaceCulling(!currentState);
+        Logger::get().info("Backface culling toggled: {}", !currentState ? "on" : "off");
+        
+        // Update button text to reflect state
+        std::string buttonText = !currentState ? "Culling ON" : "Culling OFF";
+        m_uiRenderer.setElementText(m_toolsPanel.toggleBackfaceCullingButtonId, buttonText);
     }
 
     void ModelEditorUI::onNewModelClicked() {
@@ -405,5 +497,19 @@ namespace tremor::editor {
         Logger::get().info("Vertex selection radius changed to: {:.2f}", newRadius);
     }
 
+    glm::vec2 ModelEditorUI::calculatePropertiesPanelPosition(float viewportWidth, float viewportHeight) const {
+        // Anchor to bottom-right with bottom-left pivot
+        const float margin = 10.0f;
+        
+        // Calculate position so the panel appears in bottom-right corner
+        float x = viewportWidth - PANEL_WIDTH - margin;  // Right edge minus width minus margin
+        float y = viewportHeight - PROPERTIES_PANEL_HEIGHT - margin; // Bottom edge minus height minus margin
+        
+        // Ensure minimum positions to prevent going off-screen
+        x = std::max(x, margin);
+        y = std::max(y, margin);
+        
+        return glm::vec2(x, y);
+    }
 
 } // namespace tremor::editor

@@ -13,6 +13,8 @@ layout(binding = 0) uniform UniformBufferObject {
 
 void main() {
     gl_Position = ubo.projection * vec4(inPosition, 0.0, 1.0);
+    // Force Z to near plane for UI (with inverse Z, 1.0 is near, 0.0 is far)
+    gl_Position.z = 0.99 * gl_Position.w; // Very close to near plane
     fragTexCoord = inTexCoord;
     
     // Unpack color from uint to vec4

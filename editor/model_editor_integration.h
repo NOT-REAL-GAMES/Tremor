@@ -35,6 +35,9 @@ namespace tremor::editor {
         void toggleEditor();
         bool isEditorEnabled() const { return m_editorEnabled; }
         void setEditorEnabled(bool enabled);
+        
+        // Grid rendering control (to prevent callback loops)
+        void setGridRenderingEnabled(bool enabled);
 
         // Model editor access
         ModelEditor* getEditor() const { return m_modelEditor.get(); }

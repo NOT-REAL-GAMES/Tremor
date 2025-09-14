@@ -34,6 +34,10 @@ void main() {
     float smoothing = params.smoothing * fwidth(signedDist);
     float alpha = smoothstep(-smoothing, smoothing, signedDist);
     
+    // For UI text, make alpha more opaque to block grid
+    // Apply a power curve to make anti-aliased edges more opaque
+    alpha = pow(alpha, 0.5); // Square root makes values closer to 1.0
+    
     // Initialize with text color
     vec4 color = fragColor;
     color.a *= alpha;

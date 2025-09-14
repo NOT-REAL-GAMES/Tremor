@@ -25,6 +25,14 @@ namespace tremor::editor {
                    const glm::mat4& projMatrix, VkExtent2D viewportExtent = {1920, 1080},
                    VkExtent2D scissorExtent = {1920, 1080});
 
+        // Static flag to control grid rendering globally (for UI layering)
+        static void setGlobalRenderingBlocked(bool blocked);
+        static bool isGlobalRenderingBlocked();
+
+    private:
+        // Static flag for global rendering control
+        static bool s_globalRenderingBlocked;
+
         // Configuration
         void setGridSize(float size) { m_gridSize = size; }
         void setGridSpacing(float spacing) { m_gridSpacing = spacing; }

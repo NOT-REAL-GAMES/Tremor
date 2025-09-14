@@ -184,6 +184,12 @@ namespace tremor::editor {
         }
     }
 
+    void ModelEditorIntegration::setGridRenderingEnabled(bool enabled) {
+        if (m_modelEditor && m_modelEditor->getViewport()) {
+            m_modelEditor->getViewport()->setGridRenderingEnabled(enabled);
+        }
+    }
+
     bool ModelEditorIntegration::createCommandPool() {
         // Find graphics queue family
         // TODO: This should come from VulkanBackend, but for now we'll create our own

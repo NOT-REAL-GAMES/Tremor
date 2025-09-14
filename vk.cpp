@@ -7,6 +7,7 @@
 #include "renderer/sdf_text_renderer.h"
 #include "renderer/ui_renderer.h"
 #include "renderer/sequencer_ui.h"
+#include "editor/grid_renderer.h"
 #include "tools.h"
 #include "asset.h"
 #include "overlay.h"
@@ -550,9 +551,9 @@ namespace tremor::gfx {
             // Depth testing
             VkPipelineDepthStencilStateCreateInfo depthStencil{};
             depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-            depthStencil.depthTestEnable = VK_TRUE; // Disable depth test for debugging
+            depthStencil.depthTestEnable = VK_TRUE; // Enable depth test for proper Z-sorting
             depthStencil.depthWriteEnable = VK_TRUE;
-            depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+            depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; // Inverse Z: greater = closer
             depthStencil.depthBoundsTestEnable = VK_FALSE;
             depthStencil.stencilTestEnable = VK_FALSE;
 
@@ -3517,16 +3518,24 @@ namespace tremor::gfx {
             depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         }
 
-        // Configure the subpass
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = (attachmentDescriptions.size() > 0) ? 1 : 0;
-        subpass.pColorAttachments = (attachmentDescriptions.size() > 0) ? &colorAttachmentRef : nullptr;
-        subpass.pDepthStencilAttachment = (attachmentDescriptions.size() > 1) ? &depthAttachmentRef : nullptr;
+        // Configure two subpasses: 3D geometry and UI overlay
+        VkSubpassDescription subpasses[2] = {};
+        
+        // Subpass 0: 3D geometry with depth testing
+        subpasses[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpasses[0].colorAttachmentCount = (attachmentDescriptions.size() > 0) ? 1 : 0;
+        subpasses[0].pColorAttachments = (attachmentDescriptions.size() > 0) ? &colorAttachmentRef : nullptr;
+        subpasses[0].pDepthStencilAttachment = (attachmentDescriptions.size() > 1) ? &depthAttachmentRef : nullptr;
+        
+        // Subpass 1: UI overlay without depth testing
+        subpasses[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpasses[1].colorAttachmentCount = (attachmentDescriptions.size() > 0) ? 1 : 0;
+        subpasses[1].pColorAttachments = (attachmentDescriptions.size() > 0) ? &colorAttachmentRef : nullptr;
+        subpasses[1].pDepthStencilAttachment = nullptr; // No depth attachment for UI
 
         // Configure dependencies
         std::vector<VkSubpassDependency> dependencies;
-        dependencies.reserve(createInfo.dependencies.size());
+        dependencies.reserve(createInfo.dependencies.size() + 1);
 
         for (const auto& dependency : createInfo.dependencies) {
             VkSubpassDependency dep{};
@@ -3539,14 +3548,25 @@ namespace tremor::gfx {
             dep.dependencyFlags = dependency.dependencyFlags;
             dependencies.push_back(dep);
         }
+        
+        // Add dependency from 3D subpass to UI subpass
+        VkSubpassDependency subpassDependency{};
+        subpassDependency.srcSubpass = 0; // 3D geometry subpass
+        subpassDependency.dstSubpass = 1; // UI overlay subpass
+        subpassDependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        subpassDependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        subpassDependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        subpassDependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        subpassDependency.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+        dependencies.push_back(subpassDependency);
 
         // Create the render pass
         VkRenderPassCreateInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
         renderPassInfo.attachmentCount = static_cast<uint32_t>(attachmentDescriptions.size());
         renderPassInfo.pAttachments = attachmentDescriptions.data();
-        renderPassInfo.subpassCount = 1;
-        renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.subpassCount = 2; // Now using 2 subpasses
+        renderPassInfo.pSubpasses = subpasses;
         renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
         renderPassInfo.pDependencies = dependencies.empty() ? nullptr : dependencies.data();
 
@@ -5967,7 +5987,7 @@ namespace tremor::gfx {
                 depthStencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
                 depthStencilAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
                 depthStencilAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                depthStencilAttachment.clearValue.depthStencil = { 1.0f, 0 };
+                depthStencilAttachment.clearValue.depthStencil = { 0.0f, 0 }; // Inverse Z: clear to far plane
 
                 // Add to the renderingInfo
                 renderingInfo.depthStencilAttachment = depthStencilAttachment;
@@ -5991,7 +6011,7 @@ namespace tremor::gfx {
                 // Clear values for each attachment
                 std::array<VkClearValue, 2> clearValues{};
                 clearValues[0].color = { {1.0f, 0.0f, 0.3f, 1.0f} };  // Dark blue
-                clearValues[1].depthStencil = { 1.0f, 0 };
+                clearValues[1].depthStencil = { 0.0f, 0 }; // Inverse Z: clear to far plane
 
                 renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
                 renderPassInfo.pClearValues = clearValues.data();
@@ -6085,7 +6105,6 @@ namespace tremor::gfx {
 			}
 			
 			//m_overlayManager->renderMeshAsset("assets/cube.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
-
 
         }
 
@@ -6203,7 +6222,107 @@ namespace tremor::gfx {
         }
 
         			// Render text overlay
-			if (m_textRenderer) {
+			
+			
+			// // Update sequencer
+			// // Disabled sequencer update to debug hanging issue
+		    if (m_sequencerUI) {
+				m_sequencerUI->update();
+			}
+			
+            float width = static_cast<float>(vkSwapchain->extent().width);
+            float height = static_cast<float>(vkSwapchain->extent().height);
+            glm::mat4 orthoProjection = glm::orthoZO(0.0f, width, 0.0f, height, 10.0f, -10.0f);
+				
+
+
+
+
+   
+            // UI render moved to after dynamic rendering restart for proper layering
+            // m_uiRenderer->render(m_commandBuffers[currentFrame], orthoProjection, vkSwapchain->extent());
+
+			// Try to prevent grid from rendering during UI
+
+			// For dynamic rendering, end and restart rendering pass without depth for UI
+			if (vkDevice.get()->capabilities().dynamicRendering) {
+				// End current rendering pass
+				dr.get()->end(m_commandBuffers[currentFrame]);
+				
+				// Start new rendering pass for UI without depth attachment
+				DynamicRenderer::RenderingInfo uiRenderingInfo{};
+				uiRenderingInfo.renderArea.offset = { 0, 0 };
+				uiRenderingInfo.renderArea.extent = vkSwapchain.get()->extent();
+				uiRenderingInfo.layerCount = 1;
+				uiRenderingInfo.viewMask = 0;
+				
+				// Configure color attachment - LOAD existing content, don't clear
+				DynamicRenderer::ColorAttachment colorAttachment{};
+				if (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT && m_colorImageView) {
+					colorAttachment.imageView = *m_colorImageView;
+					colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+					colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // Load existing content
+					colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+					colorAttachment.resolveImageView = vkSwapchain.get()->imageViews()[m_currentImageIndex];
+					colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+					colorAttachment.clearValue = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
+				} else {
+					colorAttachment.imageView = vkSwapchain.get()->imageViews()[m_currentImageIndex];
+					colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+					colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // Load existing content
+					colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+					colorAttachment.clearValue = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
+				}
+				uiRenderingInfo.colorAttachments.push_back(colorAttachment);
+				
+				// NO depth attachment for UI rendering
+				
+				dr.get()->begin(m_commandBuffers[currentFrame], uiRenderingInfo);
+			} else {
+				// Transition to subpass 1 for UI rendering (traditional render pass)
+				vkCmdNextSubpass(m_commandBuffers[currentFrame], VK_SUBPASS_CONTENTS_INLINE);
+			}
+
+			// Render model editor (including grid) in subpass 0
+			if (m_editorIntegration) {
+				m_editorIntegration->render();
+			}
+            
+			// Render UI elements
+			if (m_uiRenderer) {
+				// Clear depth buffer before UI to ensure UI always appears on top
+				if (!vkDevice.get()->capabilities().dynamicRendering) {
+					// For traditional render pass, we're already in subpass 1 without depth
+					// But let's clear the depth attachment area anyway 
+					VkClearAttachment clearAttachment{};
+					clearAttachment.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+					clearAttachment.clearValue.depthStencil = {0.0f, 0}; // Clear to far depth (inverse Z)
+					
+					VkClearRect clearRect{};
+					clearRect.rect.offset = {0, 0};
+					clearRect.rect.extent = vkSwapchain->extent();
+					clearRect.baseArrayLayer = 0;
+					clearRect.layerCount = 1;
+					
+					// Note: This won't work in subpass 1 since it has no depth attachment
+					// vkCmdClearAttachments(m_commandBuffers[currentFrame], 1, &clearAttachment, 1, &clearRect);
+				}
+				
+				// Create orthographic projection for UI 
+				
+				// Render UI in the depth-less pass
+				m_uiRenderer->render(m_commandBuffers[currentFrame], orthoProjection, vkSwapchain->extent());
+				
+				// Unblock grid rendering after UI is complete
+				tremor::editor::GridRenderer::setGlobalRenderingBlocked(false);
+				
+				// End UI rendering pass for dynamic rendering
+				if (vkDevice.get()->capabilities().dynamicRendering) {
+					dr.get()->end(m_commandBuffers[currentFrame]);
+				}
+			}
+			
+            if (m_textRenderer) {
 				// Create orthographic projection for UI
 				float width = static_cast<float>(vkSwapchain->extent().width);
 				float height = static_cast<float>(vkSwapchain->extent().height);
@@ -6212,27 +6331,8 @@ namespace tremor::gfx {
 
 				m_textRenderer->render(m_commandBuffers[currentFrame], orthoProjection);
 			}
-			
-			// // Update sequencer
-			// // Disabled sequencer update to debug hanging issue
-		    if (m_sequencerUI) {
-				m_sequencerUI->update();
-			}
-			
-			// Render UI elements
-			if (m_uiRenderer) {
-				// Create orthographic projection for UI
-				float width = static_cast<float>(vkSwapchain->extent().width);
-				float height = static_cast<float>(vkSwapchain->extent().height);
-				glm::mat4 orthoProjection = glm::orthoZO(0.0f, width, 0.0f, height, -10.0f, 1.0f);
-				
-				m_uiRenderer->render(m_commandBuffers[currentFrame], orthoProjection);
-			}
 
-			// Render model editor
-			if (m_editorIntegration) {
-				m_editorIntegration->render();
-			}
+			// UI rendering complete
 
         
         // FPS counter
@@ -6251,7 +6351,11 @@ namespace tremor::gfx {
             lastTime = currentTime;
         }
             if (vkDevice->capabilities().dynamicRendering) {
-                dr.get()->end(m_commandBuffers[currentFrame]);
+                // Already ended in UI rendering section above
+                if (!m_uiRenderer) {
+                    // Only end if we didn't render UI (which already ended it)
+                    dr.get()->end(m_commandBuffers[currentFrame]);
+                }
             }
             else {
                 vkCmdEndRenderPass(m_commandBuffers[currentFrame]);
@@ -6496,12 +6600,13 @@ namespace tremor::gfx {
                         reload_assets_requested = true;
                     });*/
                 
+                /*
                 m_toggleOverlayButtonId = m_uiRenderer->addButton("Toggle Overlay", glm::vec2(20, 150), glm::vec2(160, 40),
                     [this]() {
                         Logger::get().info("🎨 Toggle Overlay button clicked!");
                         hot_pink_enabled = !hot_pink_enabled;
                     });
-                
+                */
                 m_modelEditorButtonId = m_uiRenderer->addButton("Model Editor", glm::vec2(20, 200), glm::vec2(160, 40),
                     [this]() {
                         Logger::get().info("🔧 Model Editor button clicked!");

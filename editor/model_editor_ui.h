@@ -29,41 +29,70 @@ namespace tremor::editor {
         m_showToolsPanel = visible;
         
         // Set visibility for all tools panel elements
-        m_uiRenderer.setElementVisible(m_toolsPanel.backgroundId, visible);
-        m_uiRenderer.setElementVisible(m_toolsPanel.titleLabelId, visible);
-        m_uiRenderer.setElementVisible(m_toolsPanel.selectButtonId, visible);
-        m_uiRenderer.setElementVisible(m_toolsPanel.moveButtonId, visible);
-        m_uiRenderer.setElementVisible(m_toolsPanel.rotateButtonId, visible);
-        m_uiRenderer.setElementVisible(m_toolsPanel.scaleButtonId, visible);
-        m_uiRenderer.setElementVisible(m_toolsPanel.addVertexButtonId, visible);
-        m_uiRenderer.setElementVisible(m_toolsPanel.createTriangleButtonId, visible);
+        if (m_toolsPanel.titleLabelId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.titleLabelId, visible);
+        if (m_toolsPanel.selectButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.selectButtonId, visible);
+        if (m_toolsPanel.moveButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.moveButtonId, visible);
+        if (m_toolsPanel.rotateButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.rotateButtonId, visible);
+        if (m_toolsPanel.scaleButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.scaleButtonId, visible);
+        if (m_toolsPanel.addVertexButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.addVertexButtonId, visible);
+        if (m_toolsPanel.createTriangleButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.createTriangleButtonId, visible);
+        if (m_toolsPanel.selectTriangleButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.selectTriangleButtonId, visible);
+        if (m_toolsPanel.reverseWindingButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.reverseWindingButtonId, visible);
+        if (m_toolsPanel.togglePreviewButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.togglePreviewButtonId, visible);
+        if (m_toolsPanel.toggleWireframeButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.toggleWireframeButtonId, visible);
+        if (m_toolsPanel.toggleBackfaceCullingButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.toggleBackfaceCullingButtonId, visible);
     }
 
     void setPropertiesPanelVisible(bool visible) {
         m_showPropertiesPanel = visible;
         
         // Set visibility for all properties panel elements
-        m_uiRenderer.setElementVisible(m_propertiesPanel.backgroundId, visible);
-        m_uiRenderer.setElementVisible(m_propertiesPanel.titleLabelId, visible);
-        m_uiRenderer.setElementVisible(m_propertiesPanel.meshInfoLabelId, visible);
-        m_uiRenderer.setElementVisible(m_propertiesPanel.positionLabelId, visible);
-        m_uiRenderer.setElementVisible(m_propertiesPanel.rotationLabelId, visible);
-        m_uiRenderer.setElementVisible(m_propertiesPanel.scaleLabelId, visible);
-        m_uiRenderer.setElementVisible(m_propertiesPanel.selectionRadiusLabelId, visible);
-        m_uiRenderer.setElementVisible(m_propertiesPanel.selectionRadiusButtonId, visible);
+        if (m_propertiesPanel.backgroundId != 0)
+            m_uiRenderer.setElementVisible(m_propertiesPanel.backgroundId, visible);
+        if (m_propertiesPanel.titleLabelId != 0)
+            m_uiRenderer.setElementVisible(m_propertiesPanel.titleLabelId, visible);
+        if (m_propertiesPanel.meshInfoLabelId != 0)
+            m_uiRenderer.setElementVisible(m_propertiesPanel.meshInfoLabelId, visible);
+        if (m_propertiesPanel.positionLabelId != 0)
+            m_uiRenderer.setElementVisible(m_propertiesPanel.positionLabelId, visible);
+        if (m_propertiesPanel.rotationLabelId != 0)
+            m_uiRenderer.setElementVisible(m_propertiesPanel.rotationLabelId, visible);
+        if (m_propertiesPanel.scaleLabelId != 0)
+            m_uiRenderer.setElementVisible(m_propertiesPanel.scaleLabelId, visible);
+        if (m_propertiesPanel.selectionRadiusLabelId != 0)
+            m_uiRenderer.setElementVisible(m_propertiesPanel.selectionRadiusLabelId, visible);
+        if (m_propertiesPanel.selectionRadiusButtonId != 0)
+            m_uiRenderer.setElementVisible(m_propertiesPanel.selectionRadiusButtonId, visible);
     }
 
     void setFilePanelVisible(bool visible) {
         m_showFilePanel = visible;
         
         // Set visibility for all file panel elements
-        m_uiRenderer.setElementVisible(m_filePanel.backgroundId, visible);
-        m_uiRenderer.setElementVisible(m_filePanel.titleLabelId, visible);
-        m_uiRenderer.setElementVisible(m_filePanel.newButtonId, visible);
-        m_uiRenderer.setElementVisible(m_filePanel.openButtonId, visible);
-        m_uiRenderer.setElementVisible(m_filePanel.saveButtonId, visible);
-        m_uiRenderer.setElementVisible(m_filePanel.saveAsButtonId, visible);
-        m_uiRenderer.setElementVisible(m_filePanel.statusLabelId, visible);
+        if (m_filePanel.titleLabelId != 0)
+            m_uiRenderer.setElementVisible(m_filePanel.titleLabelId, visible);
+        if (m_filePanel.newButtonId != 0)
+            m_uiRenderer.setElementVisible(m_filePanel.newButtonId, visible);
+        if (m_filePanel.openButtonId != 0)
+            m_uiRenderer.setElementVisible(m_filePanel.openButtonId, visible);
+        if (m_filePanel.saveButtonId != 0)
+            m_uiRenderer.setElementVisible(m_filePanel.saveButtonId, visible);
+        if (m_filePanel.saveAsButtonId != 0)
+            m_uiRenderer.setElementVisible(m_filePanel.saveAsButtonId, visible);
+        if (m_filePanel.statusLabelId != 0)
+            m_uiRenderer.setElementVisible(m_filePanel.statusLabelId, visible);
     }
 
         // Update UI state based on editor state
@@ -91,6 +120,13 @@ namespace tremor::editor {
             // Mesh creation tools
             uint32_t addVertexButtonId = 0;
             uint32_t createTriangleButtonId = 0;
+            // Triangle selection and modification
+            uint32_t selectTriangleButtonId = 0;
+            uint32_t reverseWindingButtonId = 0;
+            // Preview controls
+            uint32_t togglePreviewButtonId = 0;
+            uint32_t toggleWireframeButtonId = 0;
+            uint32_t toggleBackfaceCullingButtonId = 0;
         } m_toolsPanel;
 
         struct PropertiesPanel {
@@ -121,13 +157,14 @@ namespace tremor::editor {
         static constexpr float BUTTON_SPACING = 5.0f;
         static constexpr float PANEL_PADDING = 10.0f;
 
-        // Panel positions
+        // Panel positions (static panels)
         static constexpr float TOOLS_PANEL_X = 10.0f;
         static constexpr float TOOLS_PANEL_Y = 10.0f;
-        static constexpr float PROPERTIES_PANEL_X = 10.0f;
-        static constexpr float PROPERTIES_PANEL_Y = 300.0f;
         static constexpr float FILE_PANEL_X = 10.0f;
         static constexpr float FILE_PANEL_Y = 500.0f;
+        
+        // Properties panel dimensions (position calculated dynamically)
+        static constexpr float PROPERTIES_PANEL_HEIGHT = 192.0f;
 
         // Colors
         static constexpr uint32_t PANEL_BG_COLOR = 0x2A2A2AE0;
@@ -151,6 +188,11 @@ namespace tremor::editor {
         // Mesh creation callbacks
         void onAddVertexClicked();
         void onCreateTriangleClicked();
+        void onSelectTriangleClicked();
+        void onReverseWindingClicked();
+        void onTogglePreviewClicked();
+        void onToggleWireframeClicked();
+        void onToggleBackfaceCullingClicked();
         void onNewModelClicked();
         void onOpenModelClicked();
         void onSaveModelClicked();
@@ -167,6 +209,9 @@ namespace tremor::editor {
         void updateLabelText(uint32_t labelId, const std::string& text);
         std::string formatVector3(const glm::vec3& vec);
         std::string getSelectionInfo(const Selection& selection);
+        
+        // Dynamic positioning
+        glm::vec2 calculatePropertiesPanelPosition(float viewportWidth, float viewportHeight) const;
     };
 
 } // namespace tremor::editor

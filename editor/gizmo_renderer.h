@@ -97,6 +97,60 @@ namespace tremor::editor {
                                 const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
                                 const glm::vec3& color = glm::vec3(0.0f, 1.0f, 0.0f));
 
+        // Render selected triangle edges using separate buffer to avoid conflicts
+        void renderSelectedTriangleEdges(VkCommandBuffer commandBuffer,
+                                        const std::vector<std::pair<glm::vec3, glm::vec3>>& edges,
+                                        const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                        const glm::vec3& color = glm::vec3(0.2f, 1.0f, 0.3f));
+
+        // Render multiple triangle sets using indirect draw calls for maximum performance
+        struct TriangleDrawSet {
+            std::vector<glm::vec3> vertices;
+            std::vector<uint32_t> indices;
+            glm::vec3 color;
+            float alpha = 1.0f;
+        };
+
+        void renderTrianglesIndirect(VkCommandBuffer commandBuffer,
+                                   const std::vector<TriangleDrawSet>& drawSets,
+                                   const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                   bool enableBackfaceCulling = true);
+
+        // Render multiple edge sets using indirect draw calls for maximum performance
+        struct EdgeDrawSet {
+            std::vector<std::pair<glm::vec3, glm::vec3>> edges;
+            glm::vec3 color;
+        };
+
+        void renderEdgesIndirect(VkCommandBuffer commandBuffer,
+                                const std::vector<EdgeDrawSet>& drawSets,
+                                const glm::mat4& viewMatrix, const glm::mat4& projMatrix);
+        
+        // Render filled triangles (for selected triangles)
+        void renderFilledTriangles(VkCommandBuffer commandBuffer,
+                                  const std::vector<glm::vec3>& vertices,
+                                  const std::vector<uint32_t>& indices,
+                                  const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                  const glm::vec3& color = glm::vec3(0.8f, 0.3f, 0.3f),
+                                  float alpha = 0.5f,
+                                  bool enableBackfaceCulling = true);
+
+        // Render selected triangles using separate buffer to avoid conflicts
+        void renderSelectedTriangles(VkCommandBuffer commandBuffer,
+                                   const std::vector<glm::vec3>& vertices,
+                                   const std::vector<uint32_t>& indices,
+                                   const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                                   const glm::vec3& color = glm::vec3(0.3f, 1.0f, 0.4f),
+                                   float alpha = 0.5f,
+                                   bool enableBackfaceCulling = true);
+        
+        // Render mesh wireframe
+        void renderWireframe(VkCommandBuffer commandBuffer,
+                            const std::vector<glm::vec3>& vertices,
+                            const std::vector<uint32_t>& indices,
+                            const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
+                            const glm::vec3& color = glm::vec3(0.7f, 0.7f, 0.7f));
+
         // Hit testing for gizmo interaction
         int hitTest(EditorMode mode, const glm::vec2& screenPos, const glm::vec3& gizmoPos,
                    const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
@@ -136,6 +190,7 @@ namespace tremor::editor {
         // Rendering resources
         VkPipeline m_linePipeline;      // For lines (translation, scale handles)
         VkPipeline m_trianglePipeline;  // For filled geometry (arrows, rotation circles)
+        VkPipeline m_triangleNoCullPipeline;  // For filled geometry without backface culling
         VkPipelineLayout m_pipelineLayout;
         VkDescriptorSetLayout m_descriptorSetLayout;
         VkDescriptorPool m_descriptorPool;
@@ -148,11 +203,26 @@ namespace tremor::editor {
 
         // Dynamic buffers for markers and edges
         GizmoBuffer m_vertexMarkerBuffer;
-        GizmoBuffer m_vertexMarkerIndexBuffer;
-        GizmoBuffer m_triangleEdgeBuffer;
         GizmoBuffer m_selectedVertexMarkerBuffer;
+        GizmoBuffer m_triangleEdgeBuffer;
+        GizmoBuffer m_selectedTriangleEdgeBuffer;
+        GizmoBuffer m_filledTriangleBuffer;
+        GizmoBuffer m_selectedTriangleBuffer;
+        GizmoBuffer m_wireframeBuffer;
+        GizmoBuffer m_filledTriangleIndexBuffer;
+        GizmoBuffer m_selectedTriangleIndexBuffer;
+        GizmoBuffer m_vertexMarkerIndexBuffer;
         GizmoBuffer m_selectedVertexMarkerIndexBuffer;
         GizmoBuffer m_mouseRayDebugBuffer;
+
+        // Indirect draw buffers for high-performance multi-draw rendering
+        GizmoBuffer m_indirectDrawBuffer;
+        GizmoBuffer m_indirectTriangleVertexBuffer;
+        GizmoBuffer m_indirectTriangleIndexBuffer;
+
+        // Indirect edge draw buffers
+        GizmoBuffer m_indirectEdgeDrawBuffer;
+        GizmoBuffer m_indirectEdgeVertexBuffer;
 
         // Index and uniform buffers
         GizmoBuffer m_indexBuffer;

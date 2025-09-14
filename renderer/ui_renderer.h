@@ -5,6 +5,7 @@
 #include "sdf_text_renderer.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 #include <SDL2/SDL.h>
 #include <string>
 #include <vector>
@@ -20,6 +21,7 @@ namespace tremor::gfx {
         Button,
         Label,
         Panel,
+        Rectangle,
         Checkbox,
         Slider
     };
@@ -58,8 +60,18 @@ namespace tremor::gfx {
         
         // Check if point is inside element
         bool contains(glm::vec2 point) const {
-            return point.x >= position.x && point.x <= position.x + size.x &&
-                   point.y >= position.y && point.y <= position.y + size.y;
+            // Extract actual position from transform matrix
+            glm::vec3 scale, translation, skew;
+            glm::vec4 perspective;
+            glm::quat rotation;
+            glm::decompose(transform, scale, rotation, translation, skew, perspective);
+            
+            // Use the transformed position for hit testing
+            float transformedX = translation.x;
+            float transformedY = translation.y;
+            
+            return point.x >= transformedX && point.x <= transformedX + size.x &&
+                   point.y >= transformedY && point.y <= transformedY + size.y;
         }
     };
 
@@ -82,6 +94,15 @@ namespace tremor::gfx {
         UILabel() { type = UIElementType::Label; }
     };
 
+    // Rectangle element
+    struct UIRect : UIElement {
+        uint32_t fillColor = 0xFFFFFFFF;
+        uint32_t borderColor = 0x000000FF;
+        float borderWidth = 0.0f;
+        
+        UIRect() { type = UIElementType::Rectangle; }
+    };
+
     // UI Renderer class
     class UIRenderer {
     public:
@@ -102,6 +123,8 @@ namespace tremor::gfx {
         uint32_t addButton(const std::string& text, glm::vec2 position, glm::vec2 size,
                           std::function<void()> onClick = nullptr);
         uint32_t addLabel(const std::string& text, glm::vec2 position, uint32_t color = 0xFFFFFFFF, float scale = 1.0f);
+        uint32_t addRect(glm::vec2 position, glm::vec2 size, uint32_t fillColor = 0xFFFFFFFF,
+                        uint32_t borderColor = 0x000000FF, float borderWidth = 0.0f);
         
         void removeElement(uint32_t id);
         void clearElements();
@@ -112,6 +135,7 @@ namespace tremor::gfx {
         
         // Render all UI elements
         void render(VkCommandBuffer commandBuffer, const glm::mat4& projection);
+        void render(VkCommandBuffer commandBuffer, const glm::mat4& projection, VkExtent2D extent);
         
         // Get/Set element properties
         UIElement* getElement(uint32_t id);
@@ -176,6 +200,9 @@ namespace tremor::gfx {
         
         // Transform matrix for the entire UI
         glm::mat4 m_transform = glm::mat4(1.0f); // Identity matrix by default
+        
+        // Current render extent for viewport/scissor
+        VkExtent2D m_currentExtent = {1280, 720};
         
         // Dirty flags for optimization
         bool m_textDirty = true;  // True when text needs to be regenerated
