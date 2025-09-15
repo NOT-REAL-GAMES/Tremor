@@ -27,8 +27,8 @@ namespace tremor::editor {
                                const std::string& defaultPath = "");
 
         // Convenience methods for common model editor operations
-        static std::string showOpenDialog(const std::string& defaultPath = "assets/");
-        static std::string showSaveDialog(const std::string& defaultPath = "assets/");
+        static std::string showOpenDialog(const std::string& defaultPath = "bin/assets/");
+        static std::string showSaveDialog(const std::string& defaultPath = "bin/assets/");
 
         // Check if a file exists
         static bool fileExists(const std::string& path);

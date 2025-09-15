@@ -2498,12 +2498,12 @@ namespace tremor::gfx {
         meshInfo.indexCount = static_cast<uint32_t>(indices.size());
 
         // Calculate bounds
-        meshInfo.boundsMin = vertices[0].position.toFloat();
-        meshInfo.boundsMax = vertices[0].position.toFloat();
+        meshInfo.boundsMin = vertices[0].position;
+        meshInfo.boundsMax = vertices[0].position;
 
         for (const auto& vertex : vertices) {
-            meshInfo.boundsMin = glm::min((glm::vec3)meshInfo.boundsMin, (glm::vec3)vertex.position.toFloat());
-            meshInfo.boundsMax = glm::max((glm::vec3)meshInfo.boundsMax, (glm::vec3)vertex.position.toFloat());
+            meshInfo.boundsMin = glm::min((glm::vec3)meshInfo.boundsMin, (glm::vec3)vertex.position);
+            meshInfo.boundsMax = glm::max((glm::vec3)meshInfo.boundsMax, (glm::vec3)vertex.position);
         }
 
         // Store mesh info
@@ -6170,21 +6170,21 @@ namespace tremor::gfx {
                 
                 // Create vertices with Vec3Q positions (testing the conversion)
                 MeshVertex v1;
-                v1.position = Vec3Q::fromFloat(glm::vec3(-0.5f, -0.5f, 0.0f));
+                v1.position = glm::vec3(-0.5f, -0.5f, 0.0f);
                 v1.normal = glm::vec3(0.0f, 0.0f, 1.0f);
                 v1.color = glm::vec4(1.0f, 1.0f, 0.0f, 1.0f); // Yellow
                 v1.texCoord = glm::vec2(0.0f, 0.0f);
                 testVertices.push_back(v1);
                 
                 MeshVertex v2;
-                v2.position = Vec3Q::fromFloat(glm::vec3(0.5f, -0.5f, 0.0f));
+                v2.position = glm::vec3(0.5f, -0.5f, 0.0f);
                 v2.normal = glm::vec3(0.0f, 0.0f, 1.0f);
                 v2.color = glm::vec4(1.0f, 0.0f, 1.0f, 1.0f); // Magenta
                 v2.texCoord = glm::vec2(1.0f, 0.0f);
                 testVertices.push_back(v2);
                 
                 MeshVertex v3;
-                v3.position = Vec3Q::fromFloat(glm::vec3(0.0f, 0.5f, 0.0f));
+                v3.position = glm::vec3(0.0f, 0.5f, 0.0f);
                 v3.normal = glm::vec3(0.0f, 0.0f, 1.0f);
                 v3.color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // Red
                 v3.texCoord = glm::vec2(0.5f, 1.0f);
@@ -7333,8 +7333,8 @@ namespace tremor::gfx {
                 
                 for (size_t i = 0; i < m_allVertices.size(); i++) {
                     const auto& vertex = m_allVertices[i];
-                    // Convert Vec3Q position to float
-                    glm::vec3 floatPos = vertex.position.toFloat();
+                    // Position is already float
+                    glm::vec3 floatPos = vertex.position;
                     
                     // IMPORTANT: Pack data to match Taffy's OverlayVertex structure
                     // OverlayVertex layout:

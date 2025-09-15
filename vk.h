@@ -2121,6 +2121,7 @@ namespace tremor::gfx {
         VkCommandBuffer getCurrentCommandBuffer() const { return m_commandBuffers[currentFrame]; }
         VkExtent2D getSwapchainExtent() const { return vkSwapchain ? vkSwapchain->extent() : VkExtent2D{1920, 1080}; }
         UIRenderer* getUIRenderer() const { return m_uiRenderer.get(); }
+        VulkanClusteredRenderer* getClusteredRenderer() const { return m_clusteredRenderer.get(); }
 
         std::unique_ptr<TaffyOverlayManager> m_overlayManager;
 

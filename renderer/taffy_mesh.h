@@ -35,6 +35,12 @@ namespace Tremor {
         const std::vector<tremor::gfx::MeshVertex>& get_vertices() const { return vertices_; }
         const std::vector<uint32_t>& get_indices() const { return indices_; }
 
+        // Update vertex data (for editor scaling corrections)
+        void update_vertices(const std::vector<tremor::gfx::MeshVertex>& newVertices) {
+            vertices_ = newVertices;
+            vertex_count_ = vertices_.size();
+        }
+
         // Mesh info
         uint32_t get_vertex_count() const { return vertex_count_; }
         uint32_t get_index_count() const { return index_count_; }

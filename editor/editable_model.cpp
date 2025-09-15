@@ -5,6 +5,7 @@
 #include <fstream>
 #include <algorithm>
 #include <array>
+#include <unordered_map>
 
 namespace tremor::editor {
 
@@ -67,6 +68,12 @@ namespace tremor::editor {
             return false;
         }
 
+        // Check if this asset was modified in the editor (has custom vertices saved)
+        m_isEditorModified = m_sourceAsset->has_feature(Taffy::FeatureFlags::EditorModified);
+        if (m_isEditorModified) {
+            Logger::get().info("Asset has EditorModified flag - treating as pre-converted custom vertices");
+        }
+
         Logger::get().info("Successfully loaded {} mesh(es) from: {}", geometryCount, filepath);
         markDirty();
         return true;
@@ -74,6 +81,13 @@ namespace tremor::editor {
 
     bool EditableModel::saveToFile(const std::string& filepath) {
         Logger::get().info("Saving model to: {}", filepath);
+
+        // If we have custom vertices, create a new asset from them instead of saving the original
+        if (!m_customVertices.empty()) {
+            Logger::get().info("Model has {} custom vertices and {} custom triangles - creating new asset from custom geometry only",
+                             m_customVertices.size(), m_customTriangles.size());
+            return saveCustomGeometryAsAsset(filepath);
+        }
 
         if (!m_sourceAsset) {
             Logger::get().error("No source asset to save");
@@ -109,11 +123,21 @@ namespace tremor::editor {
 
     void EditableModel::clear() {
         Logger::get().info("Clearing editable model");
-        
+
         m_meshes.clear();
         m_renderMeshIds.clear();
         m_sourceAsset.reset();
+
+        // Clear custom geometry created in the editor
+        m_customVertices.clear();
+        m_customTriangles.clear();
+
+        // Reset ID counters
+        m_nextVertexId = 1;
+        m_nextTriangleId = 1;
+
         m_isDirty = false;
+        m_isEditorModified = false;
     }
 
     const Tremor::TaffyMesh* EditableModel::getMesh(size_t index) const {
@@ -142,8 +166,8 @@ namespace tremor::editor {
             return false;
         }
 
-        // Convert quantized position to float
-        position = vertices[vertexIndex].position.toFloat();
+        // Position is already float
+        position = vertices[vertexIndex].position;
         return true;
     }
 
@@ -202,7 +226,7 @@ namespace tremor::editor {
         
         // Simulate transformation of all vertices
         for (size_t i = 0; i < vertices.size(); ++i) {
-            glm::vec3 oldPos = vertices[i].position.toFloat();
+            glm::vec3 oldPos = vertices[i].position;
             glm::vec4 newPos4 = transform * glm::vec4(oldPos, 1.0f);
             glm::vec3 newPos = glm::vec3(newPos4) / newPos4.w;
             
@@ -239,7 +263,7 @@ namespace tremor::editor {
                 continue;
             }
             
-            glm::vec3 oldPos = vertices[vertexIndex].position.toFloat();
+            glm::vec3 oldPos = vertices[vertexIndex].position;
             glm::vec4 newPos4 = transform * glm::vec4(oldPos, 1.0f);
             glm::vec3 newPos = glm::vec3(newPos4) / newPos4.w;
             
@@ -478,7 +502,60 @@ namespace tremor::editor {
         }
         return 0; // 0 means not found
     }
-    
+
+    void EditableModel::importMeshVerticesAsCustom(uint32_t meshIndex) {
+        if (meshIndex >= m_meshes.size()) {
+            Logger::get().warning("Cannot import vertices: mesh index {} out of range (have {} meshes)",
+                                  meshIndex, m_meshes.size());
+            return;
+        }
+
+        const auto& mesh = m_meshes[meshIndex];
+        const auto& vertices = mesh->get_vertices();
+        const auto& indices = mesh->get_indices();
+
+        Logger::get().info("Importing {} vertices from mesh {} as custom vertices",
+                          vertices.size(), meshIndex);
+
+        // Only import if we don't already have custom vertices (to avoid duplicates on reload)
+        if (!m_customVertices.empty()) {
+            Logger::get().info("Model already has custom vertices - skipping import to avoid duplicates");
+            return;
+        }
+
+        // Clear existing custom vertices and triangles
+        m_customVertices.clear();
+        m_customTriangles.clear();
+
+        // Create custom vertices from mesh vertices
+        std::vector<uint32_t> vertexIdMap(vertices.size());
+        for (size_t i = 0; i < vertices.size(); ++i) {
+            uint32_t customVertexId = addCustomVertex(vertices[i].position);
+            vertexIdMap[i] = customVertexId;
+        }
+
+        // Create custom triangles from mesh indices
+        for (size_t i = 0; i < indices.size(); i += 3) {
+            if (i + 2 < indices.size()) {
+                uint32_t v0 = vertexIdMap[indices[i]];
+                uint32_t v1 = vertexIdMap[indices[i + 1]];
+                uint32_t v2 = vertexIdMap[indices[i + 2]];
+                addCustomTriangle(v0, v1, v2);
+            }
+        }
+
+        Logger::get().info("Successfully imported {} vertices and {} triangles as custom geometry",
+                          vertices.size(), indices.size() / 3);
+
+        // Clear the original mesh data since we've converted it to custom vertices
+        // This prevents double rendering
+        m_meshes.clear();
+        m_renderMeshIds.clear();
+        Logger::get().info("Cleared original mesh data after converting to custom vertices");
+
+        markDirty();
+    }
+
     bool EditableModel::getTriangle(uint32_t meshIndex, uint32_t triangleIndex,
                                    glm::vec3& v0, glm::vec3& v1, glm::vec3& v2) const {
         if (meshIndex >= m_meshes.size()) {
@@ -503,9 +580,9 @@ namespace tremor::editor {
             return false;
         }
         
-        v0 = vertices[idx0].position.toFloat();
-        v1 = vertices[idx1].position.toFloat();
-        v2 = vertices[idx2].position.toFloat();
+        v0 = vertices[idx0].position;
+        v1 = vertices[idx1].position;
+        v2 = vertices[idx2].position;
         
         return true;
     }
@@ -564,9 +641,9 @@ namespace tremor::editor {
             
             for (uint32_t i = 0; i < indices.size(); i += 3) {
                 if (i + 2 < indices.size()) {
-                    glm::vec3 v0 = vertices[indices[i]].position.toFloat();
-                    glm::vec3 v1 = vertices[indices[i + 1]].position.toFloat();
-                    glm::vec3 v2 = vertices[indices[i + 2]].position.toFloat();
+                    glm::vec3 v0 = vertices[indices[i]].position;
+                    glm::vec3 v1 = vertices[indices[i + 1]].position;
+                    glm::vec3 v2 = vertices[indices[i + 2]].position;
                     
                     uint32_t triIdx = i / 3;
                     uint32_t combinedIdx = (meshIdx << 16) | triIdx;
@@ -653,6 +730,115 @@ namespace tremor::editor {
         }
         
         m_previewIndexCount = 0;
+    }
+
+    bool EditableModel::saveCustomGeometryAsAsset(const std::string& filepath) {
+        Logger::get().info("Creating new Taffy asset from custom geometry");
+
+        // Create a new asset
+        auto newAsset = std::make_unique<Taffy::Asset>();
+
+        // Set the EditorModified flag to indicate this asset contains custom vertices
+        newAsset->set_feature_flags(Taffy::FeatureFlags::EditorModified);
+        Logger::get().info("Setting EditorModified flag on saved asset");
+
+        // Convert custom vertices to tremor::gfx::MeshVertex format
+        std::vector<tremor::gfx::MeshVertex> vertices;
+        vertices.reserve(m_customVertices.size());
+
+        for (const auto& customVertex : m_customVertices) {
+            tremor::gfx::MeshVertex vertex{};
+            vertex.position = customVertex.position;
+            vertex.normal = glm::vec3(0.0f, 0.0f, 1.0f); // Default normal
+            vertex.color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f); // White
+            vertex.texCoord = glm::vec2(0.0f, 0.0f); // Default UV
+            vertex.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // Default tangent
+            vertices.push_back(vertex);
+        }
+
+        // Convert custom triangles to indices
+        std::vector<uint32_t> indices;
+        indices.reserve(m_customTriangles.size() * 3);
+
+        // Create a map from custom vertex ID to index in the vertices array
+        std::unordered_map<uint32_t, uint32_t> vertexIdToIndex;
+        for (size_t i = 0; i < m_customVertices.size(); ++i) {
+            vertexIdToIndex[m_customVertices[i].id] = static_cast<uint32_t>(i);
+        }
+
+        for (const auto& triangle : m_customTriangles) {
+            for (int i = 0; i < 3; ++i) {
+                auto it = vertexIdToIndex.find(triangle.vertexIds[i]);
+                if (it != vertexIdToIndex.end()) {
+                    indices.push_back(it->second);
+                } else {
+                    Logger::get().error("Triangle references non-existent vertex ID: {}", triangle.vertexIds[i]);
+                    return false;
+                }
+            }
+        }
+
+        // Create a TaffyMesh and populate it with the custom geometry
+        auto taffyMesh = std::make_unique<Tremor::TaffyMesh>();
+
+        // We need to create geometry data that can be saved to a Taffy asset
+        // For now, use the taffy_compiler to create the asset
+        Logger::get().info("Saving {} vertices and {} triangles to {}", vertices.size(), indices.size() / 3, filepath);
+
+        // Simple fallback: save as a basic mesh file that can be loaded back
+        // TODO: Implement proper Taffy asset creation with geometry chunks
+        try {
+            // Use the taffy_compiler to create the asset
+            std::string tempObjFile = filepath + ".tmp.obj";
+
+            // Create a simple OBJ file
+            std::ofstream objFile(tempObjFile);
+            if (!objFile.is_open()) {
+                Logger::get().error("Failed to create temporary OBJ file: {}", tempObjFile);
+                return false;
+            }
+
+            // Write vertices
+            Logger::get().info("Writing {} vertices to OBJ file", vertices.size());
+            for (const auto& vertex : vertices) {
+                objFile << "v " << vertex.position.x << " " << vertex.position.y << " " << vertex.position.z << "\n";
+            }
+
+            // Write faces (OBJ uses 1-based indexing)
+            Logger::get().info("Writing {} triangles to OBJ file", indices.size() / 3);
+            for (size_t i = 0; i < indices.size(); i += 3) {
+                objFile << "f " << (indices[i] + 1) << " " << (indices[i + 1] + 1) << " " << (indices[i + 2] + 1) << "\n";
+            }
+            objFile.close();
+
+            // Use taffy_compiler to convert OBJ to TAF
+            std::string command = "./taffy_compiler create \"" + tempObjFile + "\" \"" + filepath + "\"";
+            Logger::get().info("Executing command: {}", command);
+            int result = system(command.c_str());
+            Logger::get().info("taffy_compiler command result: {}", result);
+
+            // Clean up temporary file
+            std::filesystem::remove(tempObjFile);
+
+            if (result == 0) {
+                Logger::get().info("Successfully created Taffy asset: {}", filepath);
+
+                // Clear the old mesh data since we've now saved the custom geometry as the new mesh
+                m_meshes.clear();
+                m_renderMeshIds.clear();
+                m_sourceAsset.reset();
+
+                m_isDirty = false;
+                return true;
+            } else {
+                Logger::get().error("taffy_compiler failed with exit code: {}", result);
+                return false;
+            }
+
+        } catch (const std::exception& e) {
+            Logger::get().error("Exception while creating Taffy asset: {}", e.what());
+            return false;
+        }
     }
 
 } // namespace tremor::editor

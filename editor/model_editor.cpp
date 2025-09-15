@@ -3,6 +3,7 @@
 #include "../main.h"
 #include <algorithm>
 #include <limits>
+#include <filesystem>
 #include <glm/gtc/type_ptr.hpp>
 
 namespace tremor::editor {
@@ -13,10 +14,10 @@ namespace tremor::editor {
 
     ModelEditor::ModelEditor(VkDevice device, VkPhysicalDevice physicalDevice,
                            VkCommandPool commandPool, VkQueue graphicsQueue,
-                           tremor::gfx::UIRenderer& uiRenderer)
+                           tremor::gfx::UIRenderer& uiRenderer, tremor::gfx::VulkanBackend& backend)
         : m_device(device), m_physicalDevice(physicalDevice),
           m_commandPool(commandPool), m_graphicsQueue(graphicsQueue),
-          m_uiRenderer(uiRenderer) {
+          m_uiRenderer(uiRenderer), m_backend(backend) {
     }
 
     ModelEditor::~ModelEditor() = default;
@@ -381,15 +382,128 @@ namespace tremor::editor {
         }
 
         Logger::get().info("Loading model: {}", filepath);
-        
+
+        // Clear any existing model data before loading new asset
+        m_model->clear();
+
+        // Clear selection and update UI
+        clearSelection();
+        if (m_selectionChangedCallback) {
+            m_selectionChangedCallback();
+        }
+
         if (m_model->loadFromFile(filepath)) {
             m_currentFilePath = filepath;
             m_hasUnsavedChanges = false;
             
-            // TODO: Upload to renderer when we have a proper renderer reference
-            // For now, just mark as loaded without uploading
-            Logger::get().info("Model loaded successfully: {}", filepath);
-            Logger::get().warning("Model upload to renderer not implemented yet");
+            // Upload loaded meshes to renderer
+            size_t meshCount = m_model->getMeshCount();
+            Logger::get().info("Model loaded successfully: {}, uploading {} meshes to renderer", filepath, meshCount);
+
+            auto* clusteredRenderer = m_backend.getClusteredRenderer();
+            if (clusteredRenderer) {
+                for (size_t i = 0; i < meshCount; ++i) {
+                    const auto* mesh = m_model->getMesh(i);
+                    if (mesh) {
+                        // Get a mutable copy of vertices for potential scaling
+                        auto scaledVertices = mesh->get_vertices();
+                        const auto& indices = mesh->get_indices();
+
+                        // Check if mesh is too small and scale if needed
+                        if (!scaledVertices.empty()) {
+                            glm::vec3 minPos = scaledVertices[0].position;
+                            glm::vec3 maxPos = scaledVertices[0].position;
+                            for (const auto& vertex : scaledVertices) {
+                                minPos = glm::min(minPos, vertex.position);
+                                maxPos = glm::max(maxPos, vertex.position);
+                            }
+                            glm::vec3 center = (minPos + maxPos) * 0.5f;
+                            glm::vec3 size = maxPos - minPos;
+
+                            Logger::get().info("Original mesh {} bounds: min({:.3f}, {:.3f}, {:.3f}) max({:.3f}, {:.3f}, {:.3f})",
+                                             i, minPos.x, minPos.y, minPos.z, maxPos.x, maxPos.y, maxPos.z);
+                            Logger::get().info("Original mesh {} center: ({:.3f}, {:.3f}, {:.3f}) size: ({:.3f}, {:.3f}, {:.3f})",
+                                             i, center.x, center.y, center.z, size.x, size.y, size.z);
+
+                            // TEMPORARILY DISABLED: 128000x scaling correction
+                            // Check if this looks like incorrectly scaled quantized coordinates
+                            // Only apply scaling to very tiny meshes that appear to be quantized coordinates
+                            // Editor-created meshes should already be at the correct scale
+                            float maxDimension = std::max({size.x, size.y, size.z});
+                            Logger::get().info("Mesh {} max dimension: {:.6f}", i, maxDimension);
+                            
+                            if (maxDimension < 0.01f && maxDimension > 0.0f) {  // Much stricter threshold
+                                // This looks like quantized coordinates that were over-scaled during conversion
+                                // Apply the quantized coordinate scale factor (128000)
+                                constexpr float QUANTIZED_SCALE_CORRECTION = 1000.0f;
+                                Logger::get().info("Mesh {} appears to be quantized coordinates (max dimension: {:.6f}), applying scale correction: {}x",
+                                                 i, maxDimension, QUANTIZED_SCALE_CORRECTION);
+
+                                // Apply quantized scale correction to all vertices
+                                for (auto& vertex : scaledVertices) {
+                                    vertex.position *= QUANTIZED_SCALE_CORRECTION;
+                                }
+
+                                // Update bounds after scaling
+                                minPos *= QUANTIZED_SCALE_CORRECTION;
+                                maxPos *= QUANTIZED_SCALE_CORRECTION;
+                                center *= QUANTIZED_SCALE_CORRECTION;
+                                size *= QUANTIZED_SCALE_CORRECTION;
+
+                                Logger::get().info("Corrected mesh {} bounds: min({:.3f}, {:.3f}, {:.3f}) max({:.3f}, {:.3f}, {:.3f})",
+                                                 i, minPos.x, minPos.y, minPos.z, maxPos.x, maxPos.y, maxPos.z);
+                                Logger::get().info("Corrected mesh {} center: ({:.3f}, {:.3f}, {:.3f}) size: ({:.3f}, {:.3f}, {:.3f})",
+                                                 i, center.x, center.y, center.z, size.x, size.y, size.z);
+
+                                // Update the mesh stored in EditableModel with scaled vertices
+                                auto* editableMesh = const_cast<Tremor::TaffyMesh*>(mesh);
+                                editableMesh->update_vertices(scaledVertices);
+                                Logger::get().info("Updated EditableModel mesh {} with scaled vertices", i);
+                            }
+                            
+                        }
+
+                        std::string meshName = std::filesystem::path(filepath).filename().string() + "_mesh_" + std::to_string(i);
+                        uint32_t meshId = clusteredRenderer->loadMesh(scaledVertices, indices, meshName);
+
+                        if (meshId != UINT32_MAX) {
+                            Logger::get().info("Successfully uploaded mesh {} to renderer with ID: {}", i, meshId);
+
+                            // Create a default material for the mesh using clustered renderer
+                            tremor::gfx::PBRMaterial material;
+                            material.baseColor = glm::vec4(0.7f, 0.7f, 0.7f, 1.0f); // Light gray
+                            material.metallic = 0.0f;
+                            material.roughness = 0.5f;
+                            material.normalScale = 1.0f;
+                            material.occlusionStrength = 1.0f;
+                            material.emissiveColor = glm::vec3(0.0f);
+                            material.emissiveFactor = 0.0f;
+
+                            uint32_t materialId = clusteredRenderer->createMaterial(material);
+                            Logger::get().info("Created material for mesh {} with ID: {}", i, materialId);
+
+                            // Note: Mesh is uploaded and should be visible in editor viewport
+                            Logger::get().info("Mesh uploaded to clustered renderer and material created - should be visible in editor preview");
+                        } else {
+                            Logger::get().error("Failed to upload mesh {} to renderer", i);
+                        }
+                    } else {
+                        Logger::get().error("Mesh {} is null", i);
+                    }
+                }
+            } else {
+                Logger::get().error("Clustered renderer is not available");
+            }
+
+            // Import the loaded mesh vertices as custom vertices for editing
+            // BUT only if this asset wasn't already saved from editor (to avoid duplicates)
+            if (meshCount > 0 && !m_model->isEditorModified()) {
+                Logger::get().info("Converting loaded mesh vertices to custom vertices for editing");
+                m_model->importMeshVerticesAsCustom(0); // Import the first mesh
+            } else if (m_model->isEditorModified()) {
+                Logger::get().info("Asset was editor-modified - skipping mesh-to-custom conversion to avoid duplicates");
+            }
+
             markModelChanged();
             return true;
         }
@@ -410,16 +524,17 @@ namespace tremor::editor {
             return false;
         }
 
-        Logger::get().info("Saving model: {}", savePath);
-        
-        if (m_model->saveToFile(savePath)) {
+        Logger::get().info("Saving model as Taffy asset: {}", savePath);
+
+        // Save as Taffy asset format
+        if (saveMeshAsTaffyAsset(savePath)) {
             m_currentFilePath = savePath;
             m_hasUnsavedChanges = false;
-            Logger::get().info("Model saved successfully: {}", savePath);
+            Logger::get().info("Model saved successfully as Taffy asset: {}", savePath);
             return true;
         }
 
-        Logger::get().error("Failed to save model: {}", savePath);
+        Logger::get().error("Failed to save model as Taffy asset: {}", savePath);
         return false;
     }
 
@@ -636,12 +751,17 @@ namespace tremor::editor {
     
     void ModelEditor::renderMeshPreview(VkCommandBuffer commandBuffer) {
         if (!m_model) {
+            Logger::get().debug("renderMeshPreview: No model available");
             return;
         }
-        
+
+        // Debug: Check if we have any mesh data to render
+        size_t meshCount = m_model->getMeshCount();
+        //Logger::get().info("renderMeshPreview: Model has {} meshes", meshCount);
+
         // TODO: Render solid mesh using the main rendering pipeline
         // For now, we'll render wireframe and debug info
-        
+
         if (!m_tools || !m_tools->getGizmoRenderer()) {
             Logger::get().debug("No gizmo renderer available for mesh preview wireframe");
             return;
@@ -659,25 +779,33 @@ namespace tremor::editor {
         std::vector<uint32_t> selectedTriangleIndices;
         
         // Collect all triangles for solid rendering (unless wireframe-only mode)
-        // This includes both regular mesh triangles AND custom triangles in one pass
-        if (!m_wireframeMode) {
-            // First, add regular mesh triangles
-            for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
-                uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
+        // If we have custom vertices, only render those. Otherwise render the original mesh.
+        bool hasCustomVertices = !m_model->getCustomVertices().empty();
 
-                for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
-                    glm::vec3 v0, v1, v2;
-                    if (m_model->getTriangle(meshIdx, triIdx, v0, v1, v2)) {
-                        // Add triangle for solid rendering
-                        uint32_t baseIdx = solidTriangleVerts.size();
-                        solidTriangleVerts.push_back(v0);
-                        solidTriangleVerts.push_back(v1);
-                        solidTriangleVerts.push_back(v2);
-                        solidTriangleIndices.push_back(baseIdx);
-                        solidTriangleIndices.push_back(baseIdx + 1);
-                        solidTriangleIndices.push_back(baseIdx + 2);
+        if (!m_wireframeMode) {
+            // Only render original mesh triangles if we don't have custom vertices
+            if (!hasCustomVertices) {
+                // Add regular mesh triangles
+                for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
+                    uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
+                    //Logger::get().info("renderMeshPreview: Mesh {} has {} triangles", meshIdx, triangleCount);
+
+                    for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
+                        glm::vec3 v0, v1, v2;
+                        if (m_model->getTriangle(meshIdx, triIdx, v0, v1, v2)) {
+                            // Add triangle for solid rendering
+                            uint32_t baseIdx = solidTriangleVerts.size();
+                            solidTriangleVerts.push_back(v0);
+                            solidTriangleVerts.push_back(v1);
+                            solidTriangleVerts.push_back(v2);
+                            solidTriangleIndices.push_back(baseIdx);
+                            solidTriangleIndices.push_back(baseIdx + 1);
+                            solidTriangleIndices.push_back(baseIdx + 2);
+                        }
                     }
                 }
+            } else {
+                //Logger::get().info("renderMeshPreview: Skipping original mesh rendering - using custom vertices only");
             }
 
             // Then, add custom triangles to the same solid rendering pass
@@ -723,10 +851,11 @@ namespace tremor::editor {
         }
         
         // Collect wireframe edges (if wireframe mode is enabled)
-        if (m_wireframeMode) {
+        // Only render original mesh wireframe if we don't have custom vertices
+        if (m_wireframeMode && !hasCustomVertices) {
             for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
                 uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
-                
+
                 for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
                     glm::vec3 v0, v1, v2;
                     if (m_model->getTriangle(meshIdx, triIdx, v0, v1, v2)) {
@@ -739,28 +868,30 @@ namespace tremor::editor {
             }
         }
         
-        // Always show selected triangles as wireframe overlay
-        for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
-            uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
-            
-            for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
-                uint32_t combinedIdx = (meshIdx << 16) | triIdx;
-                
-                bool isSelected = std::find(m_selection.selectedTriangles.begin(),
-                                           m_selection.selectedTriangles.end(),
-                                           combinedIdx) != m_selection.selectedTriangles.end();
-                
-                if (isSelected) {
-                    glm::vec3 v0, v1, v2;
-                    if (m_model->getTriangle(meshIdx, triIdx, v0, v1, v2)) {
-                        // Add to selected triangles for red wireframe overlay
-                        uint32_t baseIdx = selectedTriangleVerts.size();
-                        selectedTriangleVerts.push_back(v0);
-                        selectedTriangleVerts.push_back(v1);
-                        selectedTriangleVerts.push_back(v2);
-                        selectedTriangleIndices.push_back(baseIdx);
-                        selectedTriangleIndices.push_back(baseIdx + 1);
-                        selectedTriangleIndices.push_back(baseIdx + 2);
+        // Show selected triangles as wireframe overlay (only for original mesh if no custom vertices)
+        if (!hasCustomVertices) {
+            for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
+                uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
+
+                for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
+                    uint32_t combinedIdx = (meshIdx << 16) | triIdx;
+
+                    bool isSelected = std::find(m_selection.selectedTriangles.begin(),
+                                               m_selection.selectedTriangles.end(),
+                                               combinedIdx) != m_selection.selectedTriangles.end();
+
+                    if (isSelected) {
+                        glm::vec3 v0, v1, v2;
+                        if (m_model->getTriangle(meshIdx, triIdx, v0, v1, v2)) {
+                            // Add to selected triangles for red wireframe overlay
+                            uint32_t baseIdx = selectedTriangleVerts.size();
+                            selectedTriangleVerts.push_back(v0);
+                            selectedTriangleVerts.push_back(v1);
+                            selectedTriangleVerts.push_back(v2);
+                            selectedTriangleIndices.push_back(baseIdx);
+                            selectedTriangleIndices.push_back(baseIdx + 1);
+                            selectedTriangleIndices.push_back(baseIdx + 2);
+                        }
                     }
                 }
             }
@@ -871,6 +1002,160 @@ namespace tremor::editor {
         }
     }
 
+    bool ModelEditor::saveMeshAsTaffyAsset(const std::string& filePath) {
+        if (!m_model) {
+            Logger::get().error("No model to save");
+            return false;
+        }
+
+        try {
+            using namespace Taffy;
+
+            // Create new Taffy asset
+            Asset asset;
+
+            // Create geometry chunk header
+            GeometryChunk geomHeader{};
+            std::memset(&geomHeader, 0, sizeof(geomHeader));
+
+            // Collect all vertices and triangles from the model
+            std::vector<Vec3Q> positions;
+            std::vector<uint32_t> indices;
+
+            // Get regular mesh triangles
+            for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
+                uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
+
+                for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
+                    glm::vec3 v0, v1, v2;
+                    if (m_model->getTriangle(meshIdx, triIdx, v0, v1, v2)) {
+                        uint32_t baseIdx = positions.size();
+
+                        // Convert to quantized coordinates (Taffy's 64-bit precision system)
+                        positions.emplace_back(Vec3Q{
+                            static_cast<int64_t>(v0.x * 128), // 1/128mm precision
+                            static_cast<int64_t>(v0.y * 128),
+                            static_cast<int64_t>(v0.z * 128)
+                        });
+                        positions.emplace_back(Vec3Q{
+                            static_cast<int64_t>(v1.x * 128),
+                            static_cast<int64_t>(v1.y * 128),
+                            static_cast<int64_t>(v1.z * 128)
+                        });
+                        positions.emplace_back(Vec3Q{
+                            static_cast<int64_t>(v2.x * 128),
+                            static_cast<int64_t>(v2.y * 128),
+                            static_cast<int64_t>(v2.z * 128)
+                        });
+
+                        indices.push_back(baseIdx);
+                        indices.push_back(baseIdx + 1);
+                        indices.push_back(baseIdx + 2);
+                    }
+                }
+            }
+
+            // Add custom triangles
+            const auto& customTriangles = m_model->getCustomTriangles();
+            for (size_t i = 0; i < customTriangles.size(); ++i) {
+                const auto& tri = customTriangles[i];
+                glm::vec3 v0, v1, v2;
+
+                if (m_model->getCustomVertexPosition(tri.vertexIds[0], v0) &&
+                    m_model->getCustomVertexPosition(tri.vertexIds[1], v1) &&
+                    m_model->getCustomVertexPosition(tri.vertexIds[2], v2)) {
+
+                    uint32_t baseIdx = positions.size();
+
+                    positions.emplace_back(Vec3Q{
+                        static_cast<int64_t>(v0.x * 128),
+                        static_cast<int64_t>(v0.y * 128),
+                        static_cast<int64_t>(v0.z * 128)
+                    });
+                    positions.emplace_back(Vec3Q{
+                        static_cast<int64_t>(v1.x * 128),
+                        static_cast<int64_t>(v1.y * 128),
+                        static_cast<int64_t>(v1.z * 128)
+                    });
+                    positions.emplace_back(Vec3Q{
+                        static_cast<int64_t>(v2.x * 128),
+                        static_cast<int64_t>(v2.y * 128),
+                        static_cast<int64_t>(v2.z * 128)
+                    });
+
+                    indices.push_back(baseIdx);
+                    indices.push_back(baseIdx + 1);
+                    indices.push_back(baseIdx + 2);
+                }
+            }
+
+            if (positions.empty()) {
+                Logger::get().error("No geometry to save");
+                return false;
+            }
+
+            // Calculate bounding box
+            Vec3Q boundsMin = positions[0];
+            Vec3Q boundsMax = positions[0];
+            for (const auto& pos : positions) {
+                boundsMin.x = std::min(boundsMin.x, pos.x);
+                boundsMin.y = std::min(boundsMin.y, pos.y);
+                boundsMin.z = std::min(boundsMin.z, pos.z);
+                boundsMax.x = std::max(boundsMax.x, pos.x);
+                boundsMax.y = std::max(boundsMax.y, pos.y);
+                boundsMax.z = std::max(boundsMax.z, pos.z);
+            }
+
+            // Fill geometry header
+            geomHeader.vertex_count = static_cast<uint32_t>(positions.size());
+            geomHeader.index_count = static_cast<uint32_t>(indices.size());
+            geomHeader.vertex_stride = sizeof(Vec3Q); // Simple position-only format for now
+            geomHeader.vertex_format = VertexFormat::Position3D;
+            geomHeader.bounds_min = boundsMin;
+            geomHeader.bounds_max = boundsMax;
+            geomHeader.lod_distance = 1000.0f;
+            geomHeader.lod_level = 0;
+            geomHeader.render_mode = GeometryChunk::Traditional; // Use traditional vertex/index buffers
+
+            // Create geometry chunk data
+            std::vector<uint8_t> geomData;
+            geomData.resize(sizeof(GeometryChunk) + positions.size() * sizeof(Vec3Q) + indices.size() * sizeof(uint32_t));
+
+            // Copy header
+            std::memcpy(geomData.data(), &geomHeader, sizeof(GeometryChunk));
+
+            // Copy vertex data
+            std::memcpy(geomData.data() + sizeof(GeometryChunk),
+                       positions.data(), positions.size() * sizeof(Vec3Q));
+
+            // Copy index data
+            std::memcpy(geomData.data() + sizeof(GeometryChunk) + positions.size() * sizeof(Vec3Q),
+                       indices.data(), indices.size() * sizeof(uint32_t));
+
+            // Add geometry chunk to asset
+            asset.add_chunk(ChunkType::GEOM, geomData, "editor_mesh_geometry");
+
+            // Set asset features
+            asset.set_feature_flags(FeatureFlags::QuantizedCoords);
+
+            // Save the asset
+            if (!asset.save_to_file(filePath)) {
+                Logger::get().error("Failed to save Taffy asset to: {}", filePath);
+                return false;
+            }
+
+            Logger::get().info("Successfully saved mesh as Taffy asset: {}", filePath);
+            Logger::get().info("  Vertices: {}", positions.size());
+            Logger::get().info("  Triangles: {}", indices.size() / 3);
+
+            return true;
+
+        } catch (const std::exception& e) {
+            Logger::get().error("Exception while saving Taffy asset: {}", e.what());
+            return false;
+        }
+    }
+
     bool ModelEditor::selectMesh(const glm::vec2& screenPos) {
         if (!m_model) return false;
 
@@ -923,7 +1208,7 @@ namespace tremor::editor {
         
         // Convert Vec3Q positions to float for selection calculation
         for (const auto& vertex : meshVertices) {
-            vertices.push_back(vertex.position.toFloat());
+            vertices.push_back(vertex.position);
         }
 
         // Check each vertex for selection

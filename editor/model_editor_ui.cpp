@@ -355,7 +355,7 @@ namespace tremor::editor {
     void ModelEditorUI::onOpenModelClicked() {
         Logger::get().info("Open model button clicked");
         
-        std::string filePath = FileDialog::showOpenDialog("assets/");
+        std::string filePath = FileDialog::showOpenDialog("bin/assets/");
         if (!filePath.empty()) {
             Logger::get().info("Selected file: {}", filePath);
             if (m_editor.loadModel(filePath)) {
@@ -383,7 +383,7 @@ namespace tremor::editor {
     void ModelEditorUI::onSaveAsModelClicked() {
         Logger::get().info("Save As button clicked");
         
-        std::string filePath = FileDialog::showSaveDialog("assets/");
+        std::string filePath = FileDialog::showSaveDialog("bin/assets/");
         if (!filePath.empty()) {
             // Ensure .taf extension
             if (FileDialog::getFileExtension(filePath).empty()) {

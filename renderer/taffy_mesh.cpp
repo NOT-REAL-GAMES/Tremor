@@ -129,7 +129,7 @@ namespace Tremor {
                 offset += sizeof(Vec3Q);
 
                 // Convert quantized position to float
-                vertex.position = quantized_pos;
+                vertex.position = quantized_pos.toFloat();
             }
 
             // Parse normal (if present)

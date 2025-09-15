@@ -25,10 +25,10 @@ namespace tremor::gfx {
 #pragma pack(push, 1)
     // Basic vertex structure
     struct MeshVertex {
-        Vec3Q position;
+        glm::vec3 position;  // Changed from Vec3Q to glm::vec3 for shader compatibility
         glm::vec3 normal;
 		glm::vec4 color; // COLORE
-        glm::vec2 texCoord;        
+        glm::vec2 texCoord;
         glm::vec4 tangent; // w component stores handedness
     };
 #pragma pack(pop)

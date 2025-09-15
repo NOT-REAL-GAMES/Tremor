@@ -47,7 +47,8 @@ namespace tremor::editor {
             m_backend.getPhysicalDevice(),
             m_commandPool,
             m_backend.getGraphicsQueue(),
-            *m_uiRenderer
+            *m_uiRenderer,
+            m_backend
         );
 
         if (!m_modelEditor->initialize(m_renderPass, VK_FORMAT_B8G8R8A8_SRGB)) {

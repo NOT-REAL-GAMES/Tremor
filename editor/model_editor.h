@@ -17,6 +17,7 @@
 
 namespace tremor::gfx {
     class UIRenderer;
+    class VulkanBackend;
 }
 
 namespace tremor::editor {
@@ -98,7 +99,7 @@ namespace tremor::editor {
     public:
         ModelEditor(VkDevice device, VkPhysicalDevice physicalDevice,
                    VkCommandPool commandPool, VkQueue graphicsQueue,
-                   tremor::gfx::UIRenderer& uiRenderer);
+                   tremor::gfx::UIRenderer& uiRenderer, tremor::gfx::VulkanBackend& backend);
         ~ModelEditor();
 
         // Initialize the editor
@@ -166,6 +167,9 @@ namespace tremor::editor {
 
         // UI access
         ModelEditorUI* getUI() const { return m_ui.get(); }
+
+        // Asset export
+        bool saveMeshAsTaffyAsset(const std::string& filePath);
         
         // Component access
         EditorViewport* getViewport() const { return m_viewport.get(); }
@@ -178,6 +182,7 @@ namespace tremor::editor {
         VkCommandPool m_commandPool;
         VkQueue m_graphicsQueue;
         tremor::gfx::UIRenderer& m_uiRenderer;
+        tremor::gfx::VulkanBackend& m_backend;
 
         // Core editor components
         std::unique_ptr<EditorViewport> m_viewport;
@@ -335,10 +340,17 @@ namespace tremor::editor {
         bool saveToFile(const std::string& filepath);
         void clear();
 
+    private:
+        // Helper function to save custom geometry as a new Taffy asset
+        bool saveCustomGeometryAsAsset(const std::string& filepath);
+
+    public:
+
         // Model info
         size_t getMeshCount() const { return m_meshes.size(); }
         const Tremor::TaffyMesh* getMesh(size_t index) const;
         uint32_t getMeshRenderId(size_t index) const;
+        bool isEditorModified() const { return m_isEditorModified; }
 
         // Vertex operations
         bool getVertexPosition(uint32_t meshIndex, uint32_t vertexIndex, glm::vec3& position) const;
@@ -360,6 +372,9 @@ namespace tremor::editor {
         bool removeCustomVertex(uint32_t vertexId);
         uint32_t addCustomTriangle(uint32_t vertexId1, uint32_t vertexId2, uint32_t vertexId3);
         bool removeCustomTriangle(uint32_t triangleId);
+
+        // Import mesh vertices as custom vertices
+        void importMeshVerticesAsCustom(uint32_t meshIndex = 0);
         
         // Custom mesh queries
         const std::vector<CustomVertex>& getCustomVertices() const { return m_customVertices; }
@@ -387,6 +402,7 @@ namespace tremor::editor {
         std::vector<uint32_t> m_renderMeshIds;
         std::unique_ptr<Taffy::Asset> m_sourceAsset;
         bool m_isDirty = false;
+        bool m_isEditorModified = false;  // True if loaded asset has EditorModified flag
 
         // Custom mesh data
         std::vector<CustomVertex> m_customVertices;
