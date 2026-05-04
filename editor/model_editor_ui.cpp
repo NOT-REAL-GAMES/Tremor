@@ -48,6 +48,20 @@ namespace tremor::editor {
         updateButtonState(m_toolsPanel.createTriangleButtonId, mode == EditorMode::CreateTriangle);
     }
 
+    void ModelEditorUI::onStateChanged(EditorState state) {
+        // Update the state label text
+        if (m_toolsPanel.stateLabelId != 0) {
+            std::string stateText = (state == EditorState::Preview) ? "Mode: Preview" : "Mode: Edit";
+            m_uiRenderer.setElementText(m_toolsPanel.stateLabelId, stateText);
+        }
+
+        // Update the toggle button text
+        if (m_toolsPanel.stateToggleButtonId != 0) {
+            std::string buttonText = (state == EditorState::Preview) ? "Switch to Edit" : "Switch to Preview";
+            m_uiRenderer.setElementText(m_toolsPanel.stateToggleButtonId, buttonText);
+        }
+    }
+
     void ModelEditorUI::onSelectionChanged(const Selection& selection, EditableModel* model) {
         Logger::get().info("🎯 onSelectionChanged called - updating UI labels");
         
@@ -186,6 +200,18 @@ namespace tremor::editor {
             glm::vec2(TOOLS_PANEL_X + PANEL_PADDING, buttonY),
             glm::vec2(PANEL_WIDTH - 2 * PANEL_PADDING, BUTTON_HEIGHT),
             [this]() { onToggleBackfaceCullingClicked(); });
+
+        // Editor state controls
+        buttonY += BUTTON_HEIGHT + BUTTON_SPACING + 10.0f; // Extra spacing
+        m_toolsPanel.stateLabelId = m_uiRenderer.addLabel("Mode: Preview",
+            glm::vec2(TOOLS_PANEL_X + PANEL_PADDING, buttonY),
+            TITLE_COLOR, 0.6f);
+
+        buttonY += 20.0f; // Space for label
+        m_toolsPanel.stateToggleButtonId = m_uiRenderer.addButton("Switch to Edit",
+            glm::vec2(TOOLS_PANEL_X + PANEL_PADDING, buttonY),
+            glm::vec2(PANEL_WIDTH - 2 * PANEL_PADDING, BUTTON_HEIGHT),
+            [this]() { onStateToggleClicked(); });
     }
 
     void ModelEditorUI::createPropertiesPanel() {
@@ -339,10 +365,17 @@ namespace tremor::editor {
         bool currentState = m_editor.getBackfaceCulling();
         m_editor.setBackfaceCulling(!currentState);
         Logger::get().info("Backface culling toggled: {}", !currentState ? "on" : "off");
-        
+
         // Update button text to reflect state
         std::string buttonText = !currentState ? "Culling ON" : "Culling OFF";
         m_uiRenderer.setElementText(m_toolsPanel.toggleBackfaceCullingButtonId, buttonText);
+    }
+
+    void ModelEditorUI::onStateToggleClicked() {
+        EditorState currentState = m_editor.getState();
+        EditorState newState = (currentState == EditorState::Preview) ? EditorState::Edit : EditorState::Preview;
+        m_editor.setState(newState);
+        Logger::get().info("Editor state toggled to: {}", (newState == EditorState::Preview) ? "Preview" : "Edit");
     }
 
     void ModelEditorUI::onNewModelClicked() {

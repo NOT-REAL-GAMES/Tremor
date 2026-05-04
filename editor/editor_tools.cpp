@@ -21,9 +21,10 @@ namespace tremor::editor {
                                  VkSampleCountFlagBits sampleCount) {
         Logger::get().info("Initializing EditorTools");
 
-        // Create gizmo renderer
+        // Create gizmo renderer (temporarily disabled due to SPIRV-Cross hanging issues)
+        //Logger::get().warning("⚠️ GizmoRenderer temporarily disabled - SPIRV-Cross hangs during shader reflection");
         m_gizmoRenderer = std::make_unique<GizmoRenderer>(m_device, m_physicalDevice,
-                                                         m_commandPool, m_graphicsQueue);
+                                                        m_commandPool, m_graphicsQueue);
         if (!m_gizmoRenderer->initialize(renderPass, colorFormat, sampleCount)) {
             Logger::get().error("Failed to initialize gizmo renderer");
             return false;
@@ -33,19 +34,24 @@ namespace tremor::editor {
         return true;
     }
 
-    bool EditorTools::handleMouseInput(const glm::vec2& mousePos, bool pressed, 
+    bool EditorTools::handleMouseInput(const glm::vec2& mousePos, bool pressed,
                                       const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
                                       const glm::vec2& viewport) {
+        // Don't handle mouse input for gizmos if they're disabled
+        if (!m_gizmosEnabled) {
+            return false;
+        }
+
         if (pressed) {
             // Start interaction
             if (m_gizmoRenderer) {
                 // Only log when we actually hit something
                 // Logger::get().info("Testing gizmo hit...");
-                
-                m_activeAxis = m_gizmoRenderer->hitTest(m_currentMode, mousePos, m_gizmoPosition, 
+
+                m_activeAxis = m_gizmoRenderer->hitTest(m_currentMode, mousePos, m_gizmoPosition,
                                                        viewMatrix, projMatrix, viewport);
                 // Hit test logging handled in GizmoRenderer
-                
+
                 if (m_activeAxis >= 0) {
                     m_isInteracting = true;
                     m_interactionStart = mousePos;
@@ -62,34 +68,39 @@ namespace tremor::editor {
                 return true;
             }
         }
-        
+
         return false;
     }
 
     void EditorTools::renderGizmo(VkCommandBuffer commandBuffer, const glm::vec3& position,
                                  const glm::mat4& viewMatrix, const glm::mat4& projMatrix,
                                  const glm::vec2& viewport) {
+        // Only render gizmos if enabled
+        if (!m_gizmosEnabled) {
+            return;
+        }
+
         // Use the stored position instead of overwriting it
         glm::vec3 renderPos = m_gizmoPosition;
-        
+
         /*
-        
+
         Logger::get().info("EditorTools::renderGizmo - stored position: ({:.2f}, {:.2f}, {:.2f}), passed position: ({:.2f}, {:.2f}, {:.2f})",
                          m_gizmoPosition.x, m_gizmoPosition.y, m_gizmoPosition.z,
                          position.x, position.y, position.z);
-        
+
         */
-        
+
         if (m_gizmoRenderer && m_currentMode != EditorMode::Select) {
-            
+
             /*
-            
-            Logger::get().info("Actually rendering gizmo at: ({:.2f}, {:.2f}, {:.2f})", 
+
+            Logger::get().info("Actually rendering gizmo at: ({:.2f}, {:.2f}, {:.2f})",
                              renderPos.x, renderPos.y, renderPos.z);
-            
+
             */
-            
-            m_gizmoRenderer->renderGizmo(commandBuffer, m_currentMode, renderPos, 
+
+            m_gizmoRenderer->renderGizmo(commandBuffer, m_currentMode, renderPos,
                                        viewMatrix, projMatrix, m_activeAxis);
         }
     }

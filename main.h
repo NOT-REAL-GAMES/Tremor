@@ -25,7 +25,7 @@
 #endif
 
 #define VK_NO_PROTOTYPES 1
-#define VK_USE_64_BIT_PTR_DEFINES 0
+#define VK_USE_64_BIT_PTR_DEFINES 1
 
 #define VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1
 
@@ -49,10 +49,11 @@
 
 #include <random>
 
+#include "volk.h"
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
 
-#include "volk.h"
 
 #include <vulkan/vulkan.hpp>
 
@@ -298,7 +299,6 @@ private:
 #undef near
 #undef far
 #endif
-//#UNDEF WHEREVER_YOU_ARE
 
 
 

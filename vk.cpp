@@ -235,12 +235,9 @@ namespace tremor::gfx {
                 return;
             }
             
-            //Logger::get().info("Overlay applied to working copy of {}", master_path);
-            //Logger::get().info("Original asset remains unchanged");
             
             // IMPORTANT: Replace the loaded asset with the working copy so pipeline creation uses it
             loaded_assets_[master_path] = std::move(working_copy);
-            //Logger::get().info("Working copy is now the active asset for {}", master_path);
             
             // Re-upload the modified asset to GPU
             MeshAssetGPUData gpuData = uploadTaffyAsset(*loaded_assets_[master_path]);
@@ -538,7 +535,7 @@ namespace tremor::gfx {
             rasterizer.rasterizerDiscardEnable = VK_FALSE;
             rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
             rasterizer.lineWidth = 1.0f;
-            rasterizer.cullMode = VK_CULL_MODE_BACK_BIT; // Disable culling for debugging
+            rasterizer.cullMode = VK_CULL_MODE_NONE; // Disable culling for debugging
             rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
             rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -1519,6 +1516,18 @@ namespace tremor::gfx {
         }
 
         void ShaderReflection::reflect(const std::vector<uint32_t>& spirvCode, VkShaderStageFlags stageFlags) {
+            // Safety check - ensure SPIRV code is valid
+            if (spirvCode.empty()) {
+                Logger::get().error("ShaderReflection::reflect - Empty SPIRV code provided");
+                return;
+            }
+
+            // Validate SPIRV magic number (0x07230203)
+            if (spirvCode[0] != 0x07230203) {
+                Logger::get().error("ShaderReflection::reflect - Invalid SPIRV magic number: 0x{:08x}", spirvCode[0]);
+                return;
+            }
+
             // Convert flags to enum
             // Store the SPIRV code for this stage
             m_spirvCode[stageFlags] = spirvCode;
@@ -2045,8 +2054,8 @@ namespace tremor::gfx {
         std::unique_ptr<ShaderModule> ShaderModule::loadFromFile(VkDevice device, const std::string& filename,
             ShaderType type,
             const std::string& entryPoint) {
-            // Read file...
-            std::ifstream file(filename);
+            // Read file in binary mode for SPIR-V
+            std::ifstream file(filename, std::ios::binary | std::ios::ate);
 
             if (!file.is_open()) {
                 //Logger::get().error("Failed to open shader file: {}", filename);
@@ -2149,6 +2158,12 @@ namespace tremor::gfx {
             result->m_type = type;
             result->m_entryPoint = entryPoint;
             result->m_filename = filename;
+
+            // Initialize reflection if needed (for precompiled SPIR-V)
+            result->m_reflection = std::make_unique<ShaderReflection>();
+            result->m_reflection->reflect(spirv, result->getShaderStageFlagBits());
+
+            // Now move the spirv code
             result->m_spirvCode = std::move(spirv);
 
             return result;
@@ -2192,11 +2207,13 @@ namespace tremor::gfx {
             result->m_type = type;
             result->m_entryPoint = entryPoint;
             result->m_filename = filename;
-            result->m_spirvCode = std::move(spirv);
 
-            // ADD THIS: Initialize reflection
+            // Initialize reflection BEFORE moving the spirv code
             result->m_reflection = std::make_unique<ShaderReflection>();
-            result->m_reflection->reflect(result->m_spirvCode, result->getShaderStageFlagBits());
+            result->m_reflection->reflect(spirv, result->getShaderStageFlagBits());
+
+            // Now move the spirv code
+            result->m_spirvCode = std::move(spirv);
 
             return result;
         }
@@ -4384,7 +4401,7 @@ namespace tremor::gfx {
         //Logger::get().info("  - Mesh Shaders: {}", m_capabilities.meshShaders ? "Yes" : "No");
         //Logger::get().info("  - Bresenham Line Rasterization: {}", m_capabilities.bresenhamLineRasterization ? "Yes" : "No");
         //Logger::get().info("  - Sparse Binding (MegaTextures): {}", m_capabilities.sparseBinding ? "Yes" : "No");
-        //Logger::get().info("  - Dynamic Rendering: {}", m_capabilities.dynamicRendering ? "Yes" : "No");
+        Logger::get().info("  - Dynamic Rendering: {}", m_capabilities.dynamicRendering ? "Yes" : "No");
         //Logger::get().info("  - Buffer Device Address: {}", m_capabilities.bufferDeviceAddress ? "Yes" : "No");
     }
 
@@ -6126,28 +6143,61 @@ namespace tremor::gfx {
          * Create development overlays for testing
          */
         void VulkanBackend::createDevelopmentOverlays() {
+            // Check if we can write to current directory
+            bool canCreateAssets = false;
+            try {
+                // Try to create assets directory
+                if (std::filesystem::exists("assets") || std::filesystem::create_directories("assets")) {
+                    canCreateAssets = true;
+                }
+            } catch (const std::filesystem::filesystem_error& e) {
+                Logger::get().warning("Could not create assets directory: {}. Skipping asset creation.", e.what());
+                Logger::get().warning("To fix this, run the application from its intended directory (usually the 'bin' folder)");
+                return; // Skip all asset creation if we can't create the main assets directory
+            }
+
             std::string overlay_dir = "assets/overlays";
-            std::filesystem::create_directories(overlay_dir);
+            try {
+                std::filesystem::create_directories(overlay_dir);
+            } catch (const std::filesystem::filesystem_error& e) {
+                Logger::get().warning("Could not create overlays directory: {}", e.what());
+            }
 
             // Create preset overlays for testing
-            
+
             // Create audio test assets
             std::string audio_dir = "assets/audio";
-            std::filesystem::create_directories(audio_dir);
+            try {
+                std::filesystem::create_directories(audio_dir);
+            } catch (const std::filesystem::filesystem_error& e) {
+                Logger::get().warning("Could not create audio directory: {}", e.what());
+            }
             
-            // Create a simple 440Hz sine wave (A4 note)
-            tremor::taffy::tools::createSineWaveAudioAsset("assets/audio/sine_440hz.taf", 440.0f, 2.0f);
-            
-            // Create a lower frequency sine wave (220Hz, A3)
-            tremor::taffy::tools::createSineWaveAudioAsset("assets/audio/sine_220hz.taf", 220.0f, 2.0f);
+            // Create audio assets only if we can create directories
+            try {
+                // Create a simple 440Hz sine wave (A4 note)
+                tremor::taffy::tools::createSineWaveAudioAsset("assets/audio/sine_440hz.taf", 440.0f, 2.0f);
+
+                // Create a lower frequency sine wave (220Hz, A3)
+                tremor::taffy::tools::createSineWaveAudioAsset("assets/audio/sine_220hz.taf", 220.0f, 2.0f);
+            } catch (const std::filesystem::filesystem_error& e) {
+                Logger::get().warning("Could not create audio assets: {}", e.what());
+            } catch (const std::exception& e) {
+                Logger::get().warning("Error creating audio assets: {}", e.what());
+            }
             
             // Create font test assets
             std::string font_dir = "assets/fonts";
-            std::filesystem::create_directories(font_dir);
+            try {
+                std::filesystem::create_directories(font_dir);
+            } catch (const std::filesystem::filesystem_error& e) {
+                Logger::get().warning("Could not create fonts directory: {}", e.what());
+            }
             
             // Create test SDF font using Bebas Neue
-            
-            std::cout << "✅ Development overlays, audio assets, and fonts created!" << std::endl;
+
+            // Note: Directory and asset creation may have failed if running from unexpected working directory
+            Logger::get().info("Development overlay initialization completed (some assets may not have been created if directories were inaccessible)");
         }
 
         /**
@@ -7480,7 +7530,7 @@ namespace tremor::gfx {
 
             ubo.frameNumber = frameCounter++;
             ubo.time = std::chrono::duration<float>(currentTime - startTime).count();
-            ubo.deltaTime = 1.0f / 60.0f; // You should track real delta time
+            ubo.deltaTime = 1.0f / 1000.0f; // You should track real delta time
             ubo.flags = 0; // Debug flags, etc.
 
             m_uniformBuffer->update(&ubo, sizeof(ubo));

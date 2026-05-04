@@ -1,0 +1,28 @@
+// diag.task - Diagnostic task shader
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(set = 0, binding = 0) uniform ClusterUBO {
+    mat4 viewMatrix;
+    mat4 projMatrix;
+    mat4 invViewMatrix;
+    mat4 invProjMatrix;
+    vec4 cameraPos;
+    uvec4 clusterDimensions;
+    vec4 zPlanes;
+    vec4 screenSize;
+    uint numLights;
+    uint numObjects;
+    uint numClusters;
+    uint frameNumber;
+    float time;
+    float deltaTime;
+    uint flags;
+} ubo;
+
+layout(local_size_x = 1) in;
+
+void main() {
+    // Always emit one mesh task that will draw all diagnostic triangles
+    EmitMeshTasksEXT(1, 1, 1);
+}

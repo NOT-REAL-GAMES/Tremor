@@ -33,9 +33,9 @@ struct FontGlyph {
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 layout(triangles, max_vertices = 128, max_primitives = 64) out;
 
-// Output to fragment shader (per-vertex arrays for mesh shader)
-layout(location = 0) out vec2 fragTexCoord[];
-layout(location = 1) out vec4 fragColor[];
+// Output to fragment shader
+layout(location = 0) out vec2 fragTexCoord;
+layout(location = 1) out vec4 fragColor;
 
 // Storage buffers
 layout(binding = 0, std430) readonly buffer TextInstanceBuffer {
@@ -143,8 +143,8 @@ void main() {
         // Output vertices
         for (uint v = 0; v < totalVertices; v++) {
             gl_MeshVerticesEXT[v].gl_Position = ubo.projection * vec4(sharedPositions[v], 0.0, 1.0);
-            fragTexCoord[v] = sharedUVs[v];
-            fragColor[v] = sharedColors[v];
+            fragTexCoord = sharedUVs[v];
+            fragColor = sharedColors[v];
         }
         
         // Output triangles (2 per glyph)

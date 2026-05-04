@@ -53,6 +53,10 @@ namespace tremor::editor {
             m_uiRenderer.setElementVisible(m_toolsPanel.toggleWireframeButtonId, visible);
         if (m_toolsPanel.toggleBackfaceCullingButtonId != 0)
             m_uiRenderer.setElementVisible(m_toolsPanel.toggleBackfaceCullingButtonId, visible);
+        if (m_toolsPanel.stateToggleButtonId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.stateToggleButtonId, visible);
+        if (m_toolsPanel.stateLabelId != 0)
+            m_uiRenderer.setElementVisible(m_toolsPanel.stateLabelId, visible);
     }
 
     void setPropertiesPanelVisible(bool visible) {
@@ -97,6 +101,7 @@ namespace tremor::editor {
 
         // Update UI state based on editor state
         void onModeChanged(EditorMode mode);
+        void onStateChanged(EditorState state);
         void onSelectionChanged(const Selection& selection, EditableModel* model = nullptr);
         void onModelChanged();
 
@@ -127,6 +132,9 @@ namespace tremor::editor {
             uint32_t togglePreviewButtonId = 0;
             uint32_t toggleWireframeButtonId = 0;
             uint32_t toggleBackfaceCullingButtonId = 0;
+            // Editor state controls
+            uint32_t stateToggleButtonId = 0;
+            uint32_t stateLabelId = 0;
         } m_toolsPanel;
 
         struct PropertiesPanel {
@@ -193,6 +201,7 @@ namespace tremor::editor {
         void onTogglePreviewClicked();
         void onToggleWireframeClicked();
         void onToggleBackfaceCullingClicked();
+        void onStateToggleClicked();
         void onNewModelClicked();
         void onOpenModelClicked();
         void onSaveModelClicked();

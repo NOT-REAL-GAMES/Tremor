@@ -7,12 +7,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 
 # Set C standard
-set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# Ensure proper C++23 support
+# Ensure proper C++23 support for C++ files only
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    add_compile_options(-std=c++23)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-std=c++23>)
 endif()
 
 # Add custom module path for finding packages
@@ -29,12 +29,109 @@ endif()
 # Option to build shared libraries
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 
+set(ABSL_ENABLE_INSTALL          OFF CACHE BOOL "" FORCE)
+set(RE2_BUILD_TESTING            OFF CACHE BOOL "" FORCE)
+set(SHADERC_SKIP_INSTALL         ON  CACHE BOOL "" FORCE)
+set(SHADERC_SKIP_TESTS           ON  CACHE BOOL "" FORCE)
+set(SHADERC_SKIP_EXAMPLES        ON  CACHE BOOL "" FORCE)
+set(SPIRV_SKIP_EXECUTABLES       ON  CACHE BOOL "" FORCE)
+set(SPIRV_SKIP_TESTS             ON  CACHE BOOL "" FORCE)
+set(ENABLE_OPT                   OFF CACHE BOOL "" FORCE)
+set(ALLOW_EXTERNAL_SPIRV_TOOLS   ON  CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_SKIP_INSTALL     ON  CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_CLI              OFF CACHE BOOL "" FORCE)
+set(GLSLANG_TESTS                OFF CACHE BOOL "" FORCE)
+set(GLSLANG_ENABLE_INSTALL       OFF CACHE BOOL "" FORCE)
+
+
+# Disable AssImp tests and samples to avoid C++23 volatile issues
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_COLLADA_IMPORTER ON CACHE BOOL "" FORCE)
+
 # Add Taffy as a subdirectory if it exists
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../Taffy/CMakeLists.txt")
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../Taffy ${CMAKE_CURRENT_BINARY_DIR}/Taffy)
     set(TAFFY_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../Taffy/include)
 else()
     message(FATAL_ERROR "Taffy library not found. Please ensure Taffy is in the parent directory.")
+endif()
+
+# Add flecs using FetchContent
+include(FetchContent)
+FetchContent_Declare(
+    flecs
+    GIT_REPOSITORY https://github.com/SanderMertens/flecs.git
+    GIT_TAG v4.0.3
+)
+FetchContent_MakeAvailable(flecs)
+
+# Add Jolt Physics using FetchContent
+FetchContent_Declare(
+    Jolt
+    GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+    GIT_TAG v5.0.0
+    SOURCE_SUBDIR Build
+)
+
+FetchContent_Declare(
+    glslang
+    GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
+    GIT_TAG main
+)
+
+FetchContent_MakeAvailable(glslang)
+
+FetchContent_Declare(
+    SPIRV-Cross
+    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
+    GIT_TAG main
+)
+
+FetchContent_MakeAvailable(SPIRV-Cross)
+
+FetchContent_Declare(
+    SPIRV-Headers
+    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git
+    GIT_TAG main
+)
+
+FetchContent_MakeAvailable(SPIRV-Headers)
+
+FetchContent_Declare(
+    SPIRV-Tools
+    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Tools.git
+    GIT_TAG main
+)
+
+FetchContent_MakeAvailable(SPIRV-Tools)
+
+
+# Configure Jolt options before making it available
+set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+set(TARGET_HELLO_WORLD OFF CACHE BOOL "" FORCE)
+set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)
+set(TARGET_SAMPLES OFF CACHE BOOL "" FORCE)
+set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
+set(ENABLE_OBJECT_STREAM ON CACHE BOOL "" FORCE)
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+set(GENERATE_DEBUG_SYMBOLS ON CACHE BOOL "" FORCE)
+set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
+set(DOUBLE_PRECISION ON CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(Jolt)
+
+# Ensure Jolt uses the correct C++ standard
+if(TARGET Jolt)
+    set_target_properties(Jolt PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+    )
 endif()
 
 # Find required packages
@@ -121,6 +218,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(asio)
 
+FetchContent_Declare(
+    assimp
+    GIT_REPOSITORY https://github.com/assimp/assimp
+)
+FetchContent_MakeAvailable(assimp)
+
+
 # Create executable
 add_executable(Tremor
     main.cpp
@@ -128,6 +232,7 @@ add_executable(Tremor
     volk.c
     vm.cpp
     vm_bytecode.cpp
+    dmc_physics.cpp
     renderer/taffy_integration.cpp
     renderer/taffy_mesh.cpp
     renderer/sdf_text_renderer.cpp
@@ -143,6 +248,7 @@ add_executable(Tremor
     editor/grid_renderer.cpp
     editor/gizmo_renderer.cpp
     editor/model_editor_integration_impl.cpp
+    gltf_importer.cpp
     editor/model_editor_main_integration.cpp
     editor/file_dialog.cpp
 )
@@ -154,6 +260,8 @@ target_include_directories(Tremor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/taffy
     ${CMAKE_CURRENT_SOURCE_DIR}/audio
     ${CMAKE_CURRENT_SOURCE_DIR}/editor
+    ${CMAKE_CURRENT_SOURCE_DIR}/../build/_deps/spirv-cross-src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../build/_deps/glslang-src/glslang
     ${TAFFY_INCLUDE_DIR}
     ${Vulkan_INCLUDE_DIRS}
     ${SDL2_INCLUDE_DIRS}
@@ -170,39 +278,22 @@ target_link_libraries(Tremor PRIVATE
     ${Vulkan_LIBRARIES}
     SDL2::SDL2
     Threads::Threads
+    assimp
+    shaderc
+    flecs::flecs_static
+    spirv-cross-core
+    spirv-cross-glsl
+    spirv-cross-c
+    spirv-cross-cpp
+    spirv-cross-hlsl
+    spirv-cross-msl
+    SPIRV-Headers
+    SPIRV-Tools
+    glslang::glslang
+    Jolt
 )
 
-# Find and link shaderc
-find_library(SHADERC_COMBINED_LIBRARY NAMES shaderc_combined)
-find_library(SHADERC_LIBRARY NAMES shaderc_shared shaderc)
 
-if(SHADERC_COMBINED_LIBRARY)
-    # Use the combined library which includes all dependencies
-    target_link_libraries(Tremor PRIVATE ${SHADERC_COMBINED_LIBRARY})
-elseif(SHADERC_LIBRARY)
-    # If using the regular shaderc library, we need to link dependencies too
-    target_link_libraries(Tremor PRIVATE ${SHADERC_LIBRARY})
-    # Try to find and link the dependencies
-    find_library(SHADERC_UTIL_LIBRARY NAMES shaderc_util)
-    find_library(GLSLANG_LIBRARY NAMES glslang)
-    find_library(SPIRV_LIBRARY NAMES SPIRV)
-    find_library(SPIRV_TOOLS_LIBRARY NAMES SPIRV-Tools)
-    
-    if(SHADERC_UTIL_LIBRARY)
-        target_link_libraries(Tremor PRIVATE ${SHADERC_UTIL_LIBRARY})
-    endif()
-    if(GLSLANG_LIBRARY)
-        target_link_libraries(Tremor PRIVATE ${GLSLANG_LIBRARY})
-    endif()
-    if(SPIRV_LIBRARY)
-        target_link_libraries(Tremor PRIVATE ${SPIRV_LIBRARY})
-    endif()
-    if(SPIRV_TOOLS_LIBRARY)
-        target_link_libraries(Tremor PRIVATE ${SPIRV_TOOLS_LIBRARY})
-    endif()
-else()
-    message(WARNING "shaderc not found. Shader compilation may not work.")
-endif()
 
 # Platform-specific libraries
 if(UNIX AND NOT APPLE)
@@ -219,6 +310,8 @@ endif()
 target_compile_definitions(Tremor PRIVATE
     USING_VULKAN
     VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1
+    HAS_ASSIMP
+    JPH_DOUBLE_PRECISION
 )
 
 # Set properties
@@ -239,28 +332,73 @@ add_custom_command(TARGET Tremor POST_BUILD
     ${CMAKE_BINARY_DIR}/bin/shaders
 )
 
-# Shader compilation (optional)
+# Shader compilation with SPIRV-Tools integration
 option(COMPILE_SHADERS "Compile shaders to SPIR-V" OFF)
+option(OPTIMIZE_SHADERS "Optimize shaders with spirv-opt" ON)
 if(COMPILE_SHADERS)
     find_program(GLSLC glslc)
+    find_program(SPIRV_OPT spirv-opt)
+    find_program(SPIRV_VAL spirv-val)
+
     if(GLSLC)
         file(GLOB SHADER_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.vert
                                  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.frag
                                  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.mesh
                                  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.task)
+        set(COMPILED_SHADERS "")
         foreach(SHADER ${SHADER_SOURCES})
             get_filename_component(SHADER_NAME ${SHADER} NAME)
             get_filename_component(SHADER_EXT ${SHADER} EXT)
-            if(SHADER_EXT STREQUAL ".mesh" OR SHADER_EXT STREQUAL ".task")
-                add_custom_command(TARGET Tremor POST_BUILD
-                    COMMAND ${GLSLC} --target-env=vulkan1.2 ${SHADER} -o ${CMAKE_BINARY_DIR}/bin/shaders/${SHADER_NAME}.spv
-                )
+            set(OUTPUT_SPV ${CMAKE_BINARY_DIR}/bin/shaders/${SHADER_NAME}.spv)
+            set(TEMP_SPV ${OUTPUT_SPV}.tmp)
+
+            if(OPTIMIZE_SHADERS AND SPIRV_OPT AND SPIRV_VAL)
+                if(SHADER_EXT STREQUAL ".mesh" OR SHADER_EXT STREQUAL ".task")
+                    add_custom_command(OUTPUT ${OUTPUT_SPV}
+                        COMMAND ${GLSLC} --target-env=vulkan1.2 ${SHADER} -o ${TEMP_SPV}
+                        COMMAND ${SPIRV_VAL} ${TEMP_SPV}
+                        COMMAND ${SPIRV_OPT} -O ${TEMP_SPV} -o ${OUTPUT_SPV}
+                        COMMAND ${CMAKE_COMMAND} -E remove ${TEMP_SPV}
+                        DEPENDS ${SHADER}
+                        COMMENT "Compiling and optimizing shader ${SHADER_NAME}"
+                    )
+                else()
+                    add_custom_command(OUTPUT ${OUTPUT_SPV}
+                        COMMAND ${GLSLC} ${SHADER} -o ${TEMP_SPV}
+                        COMMAND ${SPIRV_VAL} ${TEMP_SPV}
+                        COMMAND ${SPIRV_OPT} -O ${TEMP_SPV} -o ${OUTPUT_SPV}
+                        COMMAND ${CMAKE_COMMAND} -E remove ${TEMP_SPV}
+                        DEPENDS ${SHADER}
+                        COMMENT "Compiling and optimizing shader ${SHADER_NAME}"
+                    )
+                endif()
             else()
-                add_custom_command(TARGET Tremor POST_BUILD
-                    COMMAND ${GLSLC} ${SHADER} -o ${CMAKE_BINARY_DIR}/bin/shaders/${SHADER_NAME}.spv
-                )
+                if(SHADER_EXT STREQUAL ".mesh" OR SHADER_EXT STREQUAL ".task")
+                    add_custom_command(OUTPUT ${OUTPUT_SPV}
+                        COMMAND ${GLSLC} --target-env=vulkan1.2 ${SHADER} -o ${OUTPUT_SPV}
+                        DEPENDS ${SHADER}
+                        COMMENT "Compiling shader ${SHADER_NAME}"
+                    )
+                else()
+                    add_custom_command(OUTPUT ${OUTPUT_SPV}
+                        COMMAND ${GLSLC} ${SHADER} -o ${OUTPUT_SPV}
+                        DEPENDS ${SHADER}
+                        COMMENT "Compiling shader ${SHADER_NAME}"
+                    )
+                endif()
             endif()
+            list(APPEND COMPILED_SHADERS ${OUTPUT_SPV})
         endforeach()
+
+        # Create a custom target that depends on all compiled shaders
+        add_custom_target(compile_shaders ALL DEPENDS ${COMPILED_SHADERS})
+        add_dependencies(Tremor compile_shaders)
+
+        if(SPIRV_OPT AND SPIRV_VAL)
+            message(STATUS "SPIRV-Tools found: shader optimization enabled")
+        else()
+            message(STATUS "SPIRV-Tools not found: using basic compilation only")
+        endif()
     else()
         message(WARNING "glslc not found, shaders will not be compiled")
     endif()

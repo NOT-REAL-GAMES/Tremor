@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <limits>
 #include <filesystem>
+#include <unordered_map>
+#include <chrono>
 #include <glm/gtc/type_ptr.hpp>
 
 namespace tremor::editor {
@@ -60,6 +62,9 @@ namespace tremor::editor {
         m_ui->setPropertiesPanelVisible(false);
         m_ui->setFilePanelVisible(false);
 
+        // Set initial UI state to match the default editor state (Preview)
+        m_ui->onStateChanged(m_currentState);
+
         // Create editing tools
         m_tools = std::make_unique<EditorTools>(m_device, m_physicalDevice,
                                                m_commandPool, m_graphicsQueue);
@@ -97,26 +102,93 @@ namespace tremor::editor {
         updateUI();
     }
 
+    void ModelEditor::importMeshForEditing() {
+        if (!m_model || m_model->getMeshCount() == 0) {
+            Logger::get().warning("No mesh available to import");
+            return;
+        }
+
+        if (!m_model->getCustomVertices().empty()) {
+            Logger::get().warning("Custom vertices already exist. Clear model first to re-import.");
+            return;
+        }
+
+        uint32_t triangleCount = m_model->getTriangleCount(0);
+        Logger::get().info("Manually importing {} triangles for editing", triangleCount);
+
+        if (triangleCount > 20000) {
+            Logger::get().warning("Very large mesh ({} triangles). This may cause significant performance impact.", triangleCount);
+        }
+
+        m_model->importMeshVerticesAsCustom(0);
+
+        // Invalidate mesh cache when importing
+        m_meshCacheValid = false;
+    }
+
+    float ModelEditor::calculateAdaptiveMarkerSize(size_t vertexCount) const {
+        // Base size from settings
+        float baseSize = m_vertexMarkerSize;
+
+        // Scale down based on vertex count (performance optimization)
+        float densityScale = 1.0f;
+        if (vertexCount > 1000) {
+            densityScale = std::max(0.3f, 1000.0f / static_cast<float>(vertexCount));
+        }
+
+        // Optional: Scale based on camera distance (if we want distance-based LOD)
+        // For now, we'll keep it simple with just density scaling
+
+        return baseSize * densityScale;
+    }
+
     void ModelEditor::render(VkCommandBuffer commandBuffer, const glm::mat4& projection) {
+        // Simple frame time profiler for performance debugging
+        static auto lastTime = std::chrono::high_resolution_clock::now();
+        static int frameCount = 0;
+        static double totalRenderTime = 0.0;
+
+        auto startTime = std::chrono::high_resolution_clock::now();
+
         if (m_viewport) {
             m_viewport->render(commandBuffer);
         }
-        
-        // Render mesh preview if enabled
-        if (m_showMeshPreview && m_model && m_tools && m_tools->getGizmoRenderer()) {
-            renderMeshPreview(commandBuffer);
+
+        // Debug: Log the conditions for mesh preview rendering (only once)
+        static bool debugLogged = false;
+        if (!debugLogged) {
+            Logger::get().info("ModelEditor::render debug - m_showMeshPreview: {}, m_model: {}, m_tools: {}, gizmoRenderer: {}",
+                             m_showMeshPreview, (m_model != nullptr), (m_tools != nullptr),
+                             (m_tools && m_tools->getGizmoRenderer() != nullptr));
+            if (m_model) {
+                Logger::get().info("Model has {} meshes, {} custom vertices, {} custom triangles",
+                                 m_model->getMeshCount(), m_model->getCustomVertices().size(),
+                                 m_model->getCustomTriangles().size());
+            }
+            debugLogged = true;
         }
 
-        // Render gizmos if we have a selection
-        if (m_tools && (m_currentMode == EditorMode::Move || m_currentMode == EditorMode::Rotate || m_currentMode == EditorMode::Scale)) {
+        // Render mesh preview if enabled
+        if (m_showMeshPreview && m_model && m_tools && m_tools->getGizmoRenderer()) {
+            if (m_showGizmosAndMarkers) {
+                // Edit mode: Show editable mesh with custom modifications
+                renderMeshPreview(commandBuffer);
+            } else {
+                // Preview mode: Use efficient original mesh rendering
+                renderOriginalMeshPreview(commandBuffer);
+            }
+        }
+
+        // Render gizmos if we have a selection and are in edit mode
+        if (m_tools && m_showGizmosAndMarkers && (m_currentMode == EditorMode::Move || m_currentMode == EditorMode::Rotate || m_currentMode == EditorMode::Scale)) {
             bool hasSelection = m_selection.hasCustomVertices() || m_selection.hasMesh();
-            
+
             if (hasSelection) {
                 // Use the stored gizmo position from EditorTools (updated by updateGizmoPosition)
                 glm::vec3 gizmoPos = m_tools->getGizmoPosition();
-                
-                m_tools->renderGizmo(commandBuffer, gizmoPos, 
-                                   m_viewport->getViewMatrix(), 
+
+                m_tools->renderGizmo(commandBuffer, gizmoPos,
+                                   m_viewport->getViewMatrix(),
                                    m_viewport->getProjectionMatrix(),
                                    m_viewportSize);
             }
@@ -130,26 +202,35 @@ namespace tremor::editor {
                                                             m_viewportSize);
         }
 
-        // Render vertex markers for custom vertices
-        if (m_model && m_tools) {
+        // Render vertex markers for custom vertices (only in edit mode)
+        if (m_model && m_tools && m_showGizmosAndMarkers && m_showVertexMarkers) {
             const auto& customVertices = m_model->getCustomVertices();
+
+            // Warn user about performance for large meshes, but allow them to proceed
+            static bool largeVertexWarned = false;
+            if (!largeVertexWarned && customVertices.size() > 5000) {
+                Logger::get().warning("Rendering {} vertex markers may impact performance. Toggle off with 'Hide Vertex Markers'",
+                                    customVertices.size());
+                largeVertexWarned = true;
+            }
+
             if (!customVertices.empty()) {
                 // Extract positions from custom vertices
                 std::vector<glm::vec3> positions;
                 std::vector<glm::vec3> selectedPositions;
                 positions.reserve(customVertices.size());
-                
+
                 for (const auto& vertex : customVertices) {
                     // Check if vertex is selected for triangle creation
-                    bool isSelectedForTriangle = std::find(m_selectedVerticesForTriangle.begin(), 
-                                                          m_selectedVerticesForTriangle.end(), 
+                    bool isSelectedForTriangle = std::find(m_selectedVerticesForTriangle.begin(),
+                                                          m_selectedVerticesForTriangle.end(),
                                                           vertex.id) != m_selectedVerticesForTriangle.end();
-                    
+
                     // Check if vertex is selected for transform operations (move/rotate/scale)
                     bool isSelectedForTransform = m_selection.hasCustomVertex(vertex.id);
-                    
+
                     bool isSelected = isSelectedForTriangle || isSelectedForTransform;
-                    
+
                     if (isSelected) {
                         selectedPositions.push_back(vertex.position);
                     } else {
@@ -159,52 +240,69 @@ namespace tremor::editor {
 
                 // Render normal vertex markers in yellow
                 if (!positions.empty()) {
+                    // Calculate adaptive marker size based on camera distance and vertex count
+                    float adaptiveSize = calculateAdaptiveMarkerSize(positions.size());
+
                     m_tools->getGizmoRenderer()->renderVertexMarkers(
                         commandBuffer, positions,
-                        m_viewport->getViewMatrix(), 
+                        m_viewport->getViewMatrix(),
                         m_viewport->getProjectionMatrix(),
                         glm::vec3(1.0f, 1.0f, 0.0f), // Yellow color
-                        0.5f // Larger size for better visibility
+                        adaptiveSize
                     );
                 }
 
                 // Render selected vertex markers in red using separate buffer
                 if (!selectedPositions.empty()) {
+                    // Selected markers are slightly larger for visibility
+                    float selectedSize = calculateAdaptiveMarkerSize(selectedPositions.size()) * 1.2f;
+
                     m_tools->getGizmoRenderer()->renderSelectedVertexMarkers(
                         commandBuffer, selectedPositions,
-                        m_viewport->getViewMatrix(), 
+                        m_viewport->getViewMatrix(),
                         m_viewport->getProjectionMatrix(),
                         glm::vec3(1.0f, 0.3f, 0.3f), // Red color for selected
-                        0.6f // Larger size for better visibility of selected vertices
+                        selectedSize
                     );
                 }
 
-                // Render triangle edges
-                const auto& customTriangles = m_model->getCustomTriangles();
-                if (!customTriangles.empty()) {
-                    std::vector<std::pair<glm::vec3, glm::vec3>> edges;
-                    
-                    for (const auto& triangle : customTriangles) {
-                        // Get vertex positions for this triangle
-                        glm::vec3 v1, v2, v3;
-                        if (m_model->getCustomVertexPosition(triangle.vertexIds[0], v1) &&
-                            m_model->getCustomVertexPosition(triangle.vertexIds[1], v2) &&
-                            m_model->getCustomVertexPosition(triangle.vertexIds[2], v3)) {
-                            
-                            // Add three edges of the triangle
-                            edges.emplace_back(v1, v2);
-                            edges.emplace_back(v2, v3);
-                            edges.emplace_back(v3, v1);
-                        }
+                // Render triangle edges (if enabled)
+                if (m_showTriangleEdges) {
+                    const auto& customTriangles = m_model->getCustomTriangles();
+
+                    // Warn about performance for large meshes
+                    static bool largeEdgesWarned = false;
+                    if (!largeEdgesWarned && customTriangles.size() > 2000) {
+                        Logger::get().warning("Rendering edges for {} triangles may impact performance. Toggle off with 'Hide Triangle Edges'",
+                                            customTriangles.size());
+                        largeEdgesWarned = true;
                     }
 
-                    if (!edges.empty()) {
-                        m_tools->getGizmoRenderer()->renderTriangleEdges(
-                            commandBuffer, edges,
-                            m_viewport->getViewMatrix(), 
-                            m_viewport->getProjectionMatrix(),
-                            glm::vec3(0.0f, 1.0f, 0.5f) // Cyan color for triangle edges
-                        );
+                    if (!customTriangles.empty()) {
+                        std::vector<std::pair<glm::vec3, glm::vec3>> edges;
+
+                        for (const auto& triangle : customTriangles) {
+                            // Get vertex positions for this triangle
+                            glm::vec3 v1, v2, v3;
+                            if (m_model->getCustomVertexPosition(triangle.vertexIds[0], v1) &&
+                                m_model->getCustomVertexPosition(triangle.vertexIds[1], v2) &&
+                                m_model->getCustomVertexPosition(triangle.vertexIds[2], v3)) {
+
+                                // Add three edges of the triangle
+                                edges.emplace_back(v1, v2);
+                                edges.emplace_back(v2, v3);
+                                edges.emplace_back(v3, v1);
+                            }
+                        }
+
+                        if (!edges.empty()) {
+                            m_tools->getGizmoRenderer()->renderTriangleEdges(
+                                commandBuffer, edges,
+                                m_viewport->getViewMatrix(),
+                                m_viewport->getProjectionMatrix(),
+                                glm::vec3(0.0f, 1.0f, 0.5f) // Cyan color for triangle edges
+                            );
+                        }
                     }
                 }
             }
@@ -214,6 +312,21 @@ namespace tremor::editor {
         if (m_ui) {
             Logger::get().debug("*** ModelEditor: UI elements added to main UIRenderer - skipping local UI render ***");
             m_ui->render(); // This just updates UI state, doesn't actually render
+        }
+
+        // End frame timing and report periodically
+        auto endTime = std::chrono::high_resolution_clock::now();
+        auto renderTime = std::chrono::duration<double, std::milli>(endTime - startTime).count();
+        totalRenderTime += renderTime;
+        frameCount++;
+
+        if (frameCount >= 60) { // Report every 60 frames
+            double avgFrameTime = totalRenderTime / frameCount;
+            double fps = 1000.0 / avgFrameTime;
+            Logger::get().info("ModelEditor render performance: {:.2f}ms avg ({:.1f} FPS)", avgFrameTime, fps);
+
+            frameCount = 0;
+            totalRenderTime = 0.0;
         }
     }
 
@@ -288,7 +401,8 @@ namespace tremor::editor {
             // If we're dragging a gizmo, update the transform
             if (m_isDragging && m_tools && (m_selection.hasMesh() || m_selection.hasCustomVertices())) {
                 glm::vec2 mouseDelta = mousePos - m_lastMousePos;
-                Logger::get().info("Mouse dragging with delta ({:.1f}, {:.1f})", mouseDelta.x, mouseDelta.y);
+                // Performance: Don't log every frame during dragging
+                // Logger::get().info("Mouse dragging with delta ({:.1f}, {:.1f})", mouseDelta.x, mouseDelta.y);
                 
                 // Calculate transform based on current mode and gizmo interaction
                 glm::vec3 delta = m_tools->calculateTranslation(mouseDelta,
@@ -296,19 +410,22 @@ namespace tremor::editor {
                                                                m_viewport->getProjectionMatrix());
                 
                 if (m_currentMode == EditorMode::Move) {
-                    Logger::get().info("Applying translation: ({:.3f}, {:.3f}, {:.3f})", delta.x, delta.y, delta.z);
+                    // Performance: Don't log every frame during dragging
+                    // Logger::get().info("Applying translation: ({:.3f}, {:.3f}, {:.3f})", delta.x, delta.y, delta.z);
                     translateSelection(delta);
                     updateGizmoPosition(); // Update gizmo position after transform
                 } else if (m_currentMode == EditorMode::Rotate) {
                     glm::vec3 rotation = m_tools->calculateRotation(mouseDelta);
                     if (glm::length(rotation) > 0.0f) {
-                        Logger::get().info("Applying rotation");
+                        // Performance: Don't log every frame during dragging
+                        // Logger::get().info("Applying rotation");
                         rotateSelection(glm::normalize(rotation), glm::length(rotation));
                         updateGizmoPosition(); // Update gizmo position after transform
                     }
                 } else if (m_currentMode == EditorMode::Scale) {
                     glm::vec3 scale = m_tools->calculateScale(mouseDelta);
-                    Logger::get().info("Applying scale");
+                    // Performance: Don't log every frame during dragging
+                    // Logger::get().info("Applying scale");
                     scaleSelection(scale); // scale already includes base 1.0f
                     updateGizmoPosition(); // Update gizmo position after transform
                 }
@@ -370,6 +487,41 @@ namespace tremor::editor {
                         setWireframeMode(!m_wireframeMode);
                         Logger::get().info("Wireframe mode toggled: {}", m_wireframeMode ? "on" : "off");
                     }
+                    break;
+                case SDLK_m:
+                    // M: Toggle vertex markers
+                    setShowVertexMarkers(!m_showVertexMarkers);
+                    Logger::get().info("Vertex markers toggled: {}", m_showVertexMarkers ? "on" : "off");
+                    break;
+                case SDLK_e:
+                    if (!(SDL_GetModState() & (KMOD_CTRL | KMOD_ALT))) {
+                        // E: Toggle triangle edges
+                        setShowTriangleEdges(!m_showTriangleEdges);
+                        Logger::get().info("Triangle edges toggled: {}", m_showTriangleEdges ? "on" : "off");
+                    }
+                    break;
+                case SDLK_i:
+                    if (SDL_GetModState() & KMOD_CTRL) {
+                        // Ctrl+I: Manual import mesh for editing
+                        importMeshForEditing();
+                    } else {
+                        // I: Toggle auto-import
+                        setAutoImportMesh(!m_autoImportMesh);
+                        Logger::get().info("Auto-import mesh toggled: {}", m_autoImportMesh ? "on" : "off");
+                    }
+                    break;
+                case SDLK_MINUS:
+                case SDLK_KP_MINUS:
+                    // -: Decrease marker size
+                    setVertexMarkerSize(std::max(0.05f, m_vertexMarkerSize - 0.05f));
+                    Logger::get().info("Vertex marker size: {:.2f}", m_vertexMarkerSize);
+                    break;
+                case SDLK_PLUS:
+                case SDLK_EQUALS: // + key without shift
+                case SDLK_KP_PLUS:
+                    // +: Increase marker size
+                    setVertexMarkerSize(std::min(1.0f, m_vertexMarkerSize + 0.05f));
+                    Logger::get().info("Vertex marker size: {:.2f}", m_vertexMarkerSize);
                     break;
             }
         }
@@ -495,14 +647,18 @@ namespace tremor::editor {
                 Logger::get().error("Clustered renderer is not available");
             }
 
-            // Import the loaded mesh vertices as custom vertices for editing
-            // BUT only if this asset wasn't already saved from editor (to avoid duplicates)
-            if (meshCount > 0 && !m_model->isEditorModified()) {
-                Logger::get().info("Converting loaded mesh vertices to custom vertices for editing");
-                m_model->importMeshVerticesAsCustom(0); // Import the first mesh
-            } else if (m_model->isEditorModified()) {
-                Logger::get().info("Asset was editor-modified - skipping mesh-to-custom conversion to avoid duplicates");
+            // DON'T automatically import mesh vertices as custom vertices
+            // Let the user explicitly enter edit mode to do that
+            // This preserves the original mesh for efficient preview rendering
+            if (m_model->isEditorModified()) {
+                Logger::get().info("Asset was editor-modified - has custom vertices already");
+            } else {
+                Logger::get().info("Loaded original mesh - keeping for preview mode rendering");
             }
+
+            // Ensure mesh preview is enabled after loading
+            m_showMeshPreview = true;
+            Logger::get().info("Model loaded - mesh preview enabled");
 
             markModelChanged();
             return true;
@@ -576,6 +732,54 @@ namespace tremor::editor {
 
             const char* modeNames[] = {"Select", "Move", "Rotate", "Scale"};
             //Logger::get().info("Editor mode changed to: {}", modeNames[static_cast<int>(mode)]);
+        }
+    }
+
+    void ModelEditor::setState(EditorState state) {
+        if (m_currentState != state) {
+            EditorState previousState = m_currentState;
+            m_currentState = state;
+
+            Logger::get().info("Editor state changed from {} to {}",
+                             previousState == EditorState::Preview ? "Preview" : "Edit",
+                             state == EditorState::Preview ? "Preview" : "Edit");
+
+            // When entering preview mode, clear selection and disable gizmos
+            if (state == EditorState::Preview) {
+                clearSelection();
+                m_showGizmosAndMarkers = false;
+                if (m_tools) {
+                    m_tools->setGizmosEnabled(false);
+                }
+            }
+            // When entering edit mode, enable gizmos
+            else if (state == EditorState::Edit) {
+                m_showGizmosAndMarkers = true;
+                if (m_tools) {
+                    m_tools->setGizmosEnabled(true);
+                }
+
+                // Import mesh vertices as custom vertices for editing if not already done
+                if (m_autoImportMesh && m_model && m_model->getMeshCount() > 0 && m_model->getCustomVertices().empty()) {
+                    uint32_t triangleCount = m_model->getTriangleCount(0);
+
+                    if (triangleCount > 10000) {
+                        Logger::get().warning("Large mesh detected ({} triangles). This may impact performance. You can disable auto-import or manually import specific areas.", triangleCount);
+                    }
+
+                    if (triangleCount > 0) {
+                        Logger::get().info("Entering edit mode - importing {} triangles as custom for editing", triangleCount);
+                        m_model->importMeshVerticesAsCustom(0); // Import the first mesh
+                    }
+                } else if (!m_autoImportMesh) {
+                    Logger::get().info("Auto-import disabled. Use 'Import Mesh for Editing' to manually import the mesh.");
+                }
+            }
+
+            // Notify UI of state change
+            if (m_ui) {
+                m_ui->onStateChanged(state);
+            }
         }
     }
 
@@ -782,13 +986,17 @@ namespace tremor::editor {
         // If we have custom vertices, only render those. Otherwise render the original mesh.
         bool hasCustomVertices = !m_model->getCustomVertices().empty();
 
+        // Performance optimization: Cache vertex data for large meshes
+        const auto& customTriangles = m_model->getCustomTriangles();
+        bool needsRebuild = !m_meshCacheValid || customTriangles.size() != m_lastCustomTriangleCount;
+
         if (!m_wireframeMode) {
             // Only render original mesh triangles if we don't have custom vertices
             if (!hasCustomVertices) {
                 // Add regular mesh triangles
                 for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
                     uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
-                    //Logger::get().info("renderMeshPreview: Mesh {} has {} triangles", meshIdx, triangleCount);
+                    //Logger::get().info("renderMeshPreview: Processing mesh {} with {} triangles", meshIdx, triangleCount);
 
                     for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
                         glm::vec3 v0, v1, v2;
@@ -804,28 +1012,63 @@ namespace tremor::editor {
                         }
                     }
                 }
+                // Only log once when debugging, not every frame
+                // Logger::get().info("renderMeshPreview: Collected {} vertices from {} meshes",
+                //                  solidTriangleVerts.size(), m_model->getMeshCount());
             } else {
-                //Logger::get().info("renderMeshPreview: Skipping original mesh rendering - using custom vertices only");
+                // Only log once when debugging, not every frame
+                // Logger::get().info("renderMeshPreview: Skipping original mesh rendering - using custom vertices only");
             }
 
-            // Then, add custom triangles to the same solid rendering pass
-            const auto& customTriangles = m_model->getCustomTriangles();
+            // Then, add custom triangles using PROPER VERTEX SHARING for performance
+            const auto& customVertices = m_model->getCustomVertices();
+
+            // Use cached data if available and valid
+            if (needsRebuild) {
+                // Rebuild cache - only when mesh actually changes
+                m_cachedSolidTriangleVerts.clear();
+                m_cachedSolidTriangleIndices.clear();
+
+                // Build vertex index map to avoid duplicates (MAJOR PERFORMANCE FIX)
+                std::unordered_map<uint32_t, uint32_t> vertexIdToIndex;
+
+                static bool perfLogOnce = false;
+
             for (size_t i = 0; i < customTriangles.size(); ++i) {
                 const auto& tri = customTriangles[i];
-                glm::vec3 v0, v1, v2;
 
-                if (m_model->getCustomVertexPosition(tri.vertexIds[0], v0) &&
-                    m_model->getCustomVertexPosition(tri.vertexIds[1], v1) &&
-                    m_model->getCustomVertexPosition(tri.vertexIds[2], v2)) {
+                // Get or create vertex indices with sharing
+                uint32_t indices[3];
+                bool validTriangle = true;
 
-                    // Add to solid rendering
-                    uint32_t baseIdx = solidTriangleVerts.size();
-                    solidTriangleVerts.push_back(v0);
-                    solidTriangleVerts.push_back(v1);
-                    solidTriangleVerts.push_back(v2);
-                    solidTriangleIndices.push_back(baseIdx);
-                    solidTriangleIndices.push_back(baseIdx + 1);
-                    solidTriangleIndices.push_back(baseIdx + 2);
+                for (int j = 0; j < 3; ++j) {
+                    uint32_t vertexId = tri.vertexIds[j];
+
+                    auto it = vertexIdToIndex.find(vertexId);
+                    if (it == vertexIdToIndex.end()) {
+                        // First time seeing this vertex - add it
+                        glm::vec3 pos;
+                        if (m_model->getCustomVertexPosition(vertexId, pos)) {
+                            uint32_t newIndex = m_cachedSolidTriangleVerts.size();
+                            m_cachedSolidTriangleVerts.push_back(pos);
+                            vertexIdToIndex[vertexId] = newIndex;
+                            indices[j] = newIndex;
+                        } else {
+                            // Skip invalid triangle
+                            validTriangle = false;
+                            break;
+                        }
+                    } else {
+                        // Reuse existing vertex
+                        indices[j] = it->second;
+                    }
+                }
+
+                if (validTriangle) {
+                    // Add triangle with shared vertices
+                    m_cachedSolidTriangleIndices.push_back(indices[0]);
+                    m_cachedSolidTriangleIndices.push_back(indices[1]);
+                    m_cachedSolidTriangleIndices.push_back(indices[2]);
 
                     // Check if this custom triangle is selected for overlay rendering
                     uint32_t customTriIdx = 0x80000000 | i;
@@ -833,7 +1076,43 @@ namespace tremor::editor {
                                                m_selection.selectedTriangles.end(),
                                                customTriIdx) != m_selection.selectedTriangles.end();
 
-                    if (isSelected) {
+                }
+            }
+
+                // Mark cache as valid and update counts
+                m_lastCustomTriangleCount = customTriangles.size();
+                m_meshCacheValid = true;
+
+                // Log performance improvement (once)
+                if (!perfLogOnce && !customTriangles.empty()) {
+                    size_t oldVertexCount = customTriangles.size() * 3; // Old: 3 verts per triangle
+                    size_t newVertexCount = m_cachedSolidTriangleVerts.size(); // New: shared vertices
+                    float reduction = (1.0f - (float)newVertexCount / (float)oldVertexCount) * 100.0f;
+
+                    Logger::get().info("Vertex sharing + caching: {} triangles using {} vertices (was {}), {:.1f}% reduction",
+                                     customTriangles.size(), newVertexCount, oldVertexCount, reduction);
+                    perfLogOnce = true;
+                }
+            }
+
+            // Use cached vertex data for solid rendering
+            solidTriangleVerts = m_cachedSolidTriangleVerts;
+            solidTriangleIndices = m_cachedSolidTriangleIndices;
+
+            // Handle selected triangles separately (these can change frequently)
+            for (size_t i = 0; i < customTriangles.size(); ++i) {
+                uint32_t customTriIdx = 0x80000000 | i;
+                bool isSelected = std::find(m_selection.selectedTriangles.begin(),
+                                           m_selection.selectedTriangles.end(),
+                                           customTriIdx) != m_selection.selectedTriangles.end();
+
+                if (isSelected) {
+                    const auto& tri = customTriangles[i];
+                    glm::vec3 v0, v1, v2;
+                    if (m_model->getCustomVertexPosition(tri.vertexIds[0], v0) &&
+                        m_model->getCustomVertexPosition(tri.vertexIds[1], v1) &&
+                        m_model->getCustomVertexPosition(tri.vertexIds[2], v2)) {
+
                         // Add to selected triangles for overlay (slightly offset to avoid Z-fighting)
                         glm::vec3 normal = glm::normalize(glm::cross(v1 - v0, v2 - v0));
                         float offset = 0.001f;
@@ -849,7 +1128,7 @@ namespace tremor::editor {
                 }
             }
         }
-        
+
         // Collect wireframe edges (if wireframe mode is enabled)
         // Only render original mesh wireframe if we don't have custom vertices
         if (m_wireframeMode && !hasCustomVertices) {
@@ -1002,6 +1281,82 @@ namespace tremor::editor {
         }
     }
 
+    void ModelEditor::renderOriginalMeshPreview(VkCommandBuffer commandBuffer) {
+        if (!m_model) {
+            Logger::get().warning("renderOriginalMeshPreview: No model available");
+            return;
+        }
+
+        // Debug log only once
+        static bool debugLogged = false;
+        if (!debugLogged) {
+            Logger::get().info("renderOriginalMeshPreview called - meshCount: {}", m_model->getMeshCount());
+            debugLogged = true;
+        }
+
+        // In preview mode, render the original mesh using the same GizmoRenderer system
+        // but with simplified rendering (no selections, no custom vertices)
+        if (!m_tools || !m_tools->getGizmoRenderer()) {
+            Logger::get().warning("renderOriginalMeshPreview: No tools or gizmo renderer available");
+            return;
+        }
+
+        auto* gizmoRenderer = m_tools->getGizmoRenderer();
+        const glm::mat4& viewMatrix = m_viewport->getViewMatrix();
+        const glm::mat4& projMatrix = m_viewport->getProjectionMatrix();
+
+        // Collect all original mesh triangles for solid rendering
+        std::vector<glm::vec3> solidTriangleVerts;
+        std::vector<uint32_t> solidTriangleIndices;
+
+        // Add regular mesh triangles
+        for (uint32_t meshIdx = 0; meshIdx < m_model->getMeshCount(); ++meshIdx) {
+            uint32_t triangleCount = m_model->getTriangleCount(meshIdx);
+
+            static bool triDebugLogged = false;
+            if (!triDebugLogged && triangleCount > 0) {
+                Logger::get().info("Mesh {} has {} triangles", meshIdx, triangleCount);
+                triDebugLogged = true;
+            }
+
+            for (uint32_t triIdx = 0; triIdx < triangleCount; ++triIdx) {
+                glm::vec3 v0, v1, v2;
+                if (m_model->getTriangle(meshIdx, triIdx, v0, v1, v2)) {
+                    // Add triangle for solid rendering
+                    uint32_t baseIdx = solidTriangleVerts.size();
+                    solidTriangleVerts.push_back(v0);
+                    solidTriangleVerts.push_back(v1);
+                    solidTriangleVerts.push_back(v2);
+                    solidTriangleIndices.push_back(baseIdx);
+                    solidTriangleIndices.push_back(baseIdx + 1);
+                    solidTriangleIndices.push_back(baseIdx + 2);
+                }
+            }
+        }
+
+        // Debug: Log triangle data (only once)
+        static bool triangleDebugLogged = false;
+        if (!triangleDebugLogged && !solidTriangleVerts.empty()) {
+            Logger::get().info("renderOriginalMeshPreview: Collected {} vertices, {} indices for rendering",
+                             solidTriangleVerts.size(), solidTriangleIndices.size());
+            triangleDebugLogged = true;
+        }
+
+        // Render triangles using GizmoRenderer
+        if (!solidTriangleVerts.empty()) {
+            std::vector<tremor::editor::GizmoRenderer::TriangleDrawSet> triangleDrawSets;
+
+            tremor::editor::GizmoRenderer::TriangleDrawSet solidSet;
+            solidSet.vertices = solidTriangleVerts;
+            solidSet.indices = solidTriangleIndices;
+            solidSet.color = glm::vec3(0.6f, 0.7f, 0.8f); // Light blue-gray color
+            solidSet.alpha = 0.9f; // Slightly more opaque for preview
+            triangleDrawSets.push_back(std::move(solidSet));
+
+            gizmoRenderer->renderTrianglesIndirect(commandBuffer, triangleDrawSets, viewMatrix, projMatrix, true);
+        }
+    }
+
     bool ModelEditor::saveMeshAsTaffyAsset(const std::string& filePath) {
         if (!m_model) {
             Logger::get().error("No model to save");
@@ -1035,17 +1390,20 @@ namespace tremor::editor {
                         positions.emplace_back(Vec3Q{
                             static_cast<int64_t>(v0.x * 128), // 1/128mm precision
                             static_cast<int64_t>(v0.y * 128),
-                            static_cast<int64_t>(v0.z * 128)
+                            static_cast<int64_t>(v0.z * 128),
+                            false
                         });
                         positions.emplace_back(Vec3Q{
                             static_cast<int64_t>(v1.x * 128),
                             static_cast<int64_t>(v1.y * 128),
-                            static_cast<int64_t>(v1.z * 128)
+                            static_cast<int64_t>(v1.z * 128),
+                            false
                         });
                         positions.emplace_back(Vec3Q{
                             static_cast<int64_t>(v2.x * 128),
                             static_cast<int64_t>(v2.y * 128),
-                            static_cast<int64_t>(v2.z * 128)
+                            static_cast<int64_t>(v2.z * 128),
+                            false
                         });
 
                         indices.push_back(baseIdx);
@@ -1070,17 +1428,20 @@ namespace tremor::editor {
                     positions.emplace_back(Vec3Q{
                         static_cast<int64_t>(v0.x * 128),
                         static_cast<int64_t>(v0.y * 128),
-                        static_cast<int64_t>(v0.z * 128)
+                        static_cast<int64_t>(v0.z * 128),
+                        false
                     });
                     positions.emplace_back(Vec3Q{
                         static_cast<int64_t>(v1.x * 128),
                         static_cast<int64_t>(v1.y * 128),
-                        static_cast<int64_t>(v1.z * 128)
+                        static_cast<int64_t>(v1.z * 128),
+                        false
                     });
                     positions.emplace_back(Vec3Q{
                         static_cast<int64_t>(v2.x * 128),
                         static_cast<int64_t>(v2.y * 128),
-                        static_cast<int64_t>(v2.z * 128)
+                        static_cast<int64_t>(v2.z * 128),
+                        false
                     });
 
                     indices.push_back(baseIdx);

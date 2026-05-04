@@ -145,7 +145,8 @@ namespace tremor::gfx {
             return Vec3Q(
                 min.x + (max.x - min.x) / 2,
                 min.y + (max.y - min.y) / 2,
-                min.z + (max.z - min.z) / 2
+                min.z + (max.z - min.z) / 2,
+                true
             );
         }
 

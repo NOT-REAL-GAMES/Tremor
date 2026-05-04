@@ -1,0 +1,9 @@
+#version 450
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32) in;
+
+void main() {
+    // Just emit a minimal output configuration
+    EmitMeshTasksEXT(1, 1, 1);
+}

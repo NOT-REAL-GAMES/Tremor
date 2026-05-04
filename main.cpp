@@ -42,6 +42,7 @@
 #include "renderer/taffy_integration.h"
 #include "../Taffy/include/taffy_audio_tools.h"
 #include "../Taffy/include/taffy_streaming.h"
+#include "dmc_survivors.h"
 #include <filesystem>
 #include <cstring>
 #include <cmath>
@@ -80,7 +81,8 @@ public:
 
     std::unique_ptr<tremor::gfx::RenderBackend> rb;
     std::unique_ptr<tremor::audio::TaffyPolyphonicProcessor> audioProcessor;
-    
+    std::unique_ptr<DMCSurvivors::Game> game;
+
     // Simple voice management for drum playback
     int drumGateCounter = 0;  // Counter to track when gate can be retriggered
     static constexpr int MIN_GATE_INTERVAL = 3;  // Minimum audio callbacks between triggers
@@ -200,6 +202,11 @@ public:
         rb = tremor::gfx::RenderBackend::create(window);
         Logger::get().critical("RenderBackend created: {}", (void*)rb.get());
 
+        // Initialize DMC Survivors game
+        Logger::get().info("Initializing DMC Survivors game...");
+        game = std::make_unique<DMCSurvivors::Game>();
+        Logger::get().info("DMC Survivors game initialized!");
+
         // Initialize audio
         Logger::get().critical("About to initialize audio...");
         Logger::get().critical("Audio initialization complete. Device ID: {}", audioDevice);
@@ -284,8 +291,28 @@ public:
     bool Loop() {
 #if defined(USING_VULKAN)
         static int loopCount = 0;
-        
-        
+
+        // Calculate frame time
+        static Uint32 lastFrameTime = SDL_GetTicks();
+        Uint32 currentFrameTime = SDL_GetTicks();
+        float deltaTime = (currentFrameTime - lastFrameTime) / 1000.0f; // Convert to seconds
+        lastFrameTime = currentFrameTime;
+
+        // Cap delta time to prevent large jumps (e.g. when debugging)
+        if (deltaTime > 0.1f) {
+            deltaTime = 1.0f / 60.0f; // Fallback to 60 FPS if delta is too large
+        }
+
+        // Debug output for frame time (first 60 frames)
+        static int frameCount = 0;
+        if (frameCount < 60) {
+            if (frameCount % 10 == 0) { // Every 10th frame
+                Logger::get().info("🕒 Frame time: {:.3f}ms ({:.1f} FPS)",
+                                 deltaTime * 1000.0f, 1.0f / deltaTime);
+            }
+            frameCount++;
+        }
+
         SDL_Event event{};
         while (SDL_PollEvent(&event)) {
             // Pass event to render backend for UI handling
@@ -421,7 +448,39 @@ public:
             }
         }
 
-        
+        // Handle game input
+        if (game) {
+            DMCSurvivors::InputCommand input{};
+
+            // Get keyboard state for movement
+            const Uint8* keystate = SDL_GetKeyboardState(nullptr);
+
+            // WASD movement
+            glm::vec3 moveDir{0.0f};
+            if (keystate[SDL_SCANCODE_W]) moveDir.z -= 1.0f;
+            if (keystate[SDL_SCANCODE_S]) moveDir.z += 1.0f;
+            if (keystate[SDL_SCANCODE_A]) moveDir.x -= 1.0f;
+            if (keystate[SDL_SCANCODE_D]) moveDir.x += 1.0f;
+
+            if (glm::length(moveDir) > 0.01f) {
+                moveDir = glm::normalize(moveDir);
+            }
+            input.moveDirection = moveDir;
+
+            // Combat inputs
+            input.lightAttack = keystate[SDL_SCANCODE_J];
+            input.heavyAttack = keystate[SDL_SCANCODE_K];
+            input.jump = keystate[SDL_SCANCODE_SPACE];
+            input.dash = keystate[SDL_SCANCODE_LSHIFT];
+            input.lockOn = keystate[SDL_SCANCODE_Q];
+
+            game->processInput(input);
+
+            // Update game with actual frame time
+            game->update(deltaTime);
+        }
+
+
         static int renderCallCount = 0;
         if (renderCallCount < 5) {
             Logger::get().critical("About to call beginFrame, count {}", renderCallCount);
@@ -430,7 +489,16 @@ public:
         rb.get()->beginFrame();
 
         if (renderCallCount < 5) {
-            Logger::get().critical("beginFrame returned, about to call endFrame");
+            Logger::get().critical("beginFrame returned, about to render entities");
+        }
+
+        // Render game entities AFTER beginFrame but BEFORE endFrame
+        if (game) {
+            game->renderEntities(rb.get());
+        }
+
+        if (renderCallCount < 5) {
+            Logger::get().critical("entities rendered, about to call endFrame");
         }
 
         rb.get()->endFrame();

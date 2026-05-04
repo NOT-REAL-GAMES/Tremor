@@ -1,0 +1,9 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    // Emit a single workgroup
+    EmitMeshTasksEXT(1, 1, 1);
+}

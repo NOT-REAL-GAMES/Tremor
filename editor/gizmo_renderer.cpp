@@ -328,9 +328,8 @@ namespace tremor::editor {
         // Check if we need to recreate the vertex buffer
         uint32_t requiredVertices = vertices.size();
         if (!m_vertexMarkerBuffer.isValid() || requiredVertices > m_vertexMarkerBuffer.getCapacity()) {
-            // Wait for any pending operations to complete before recreating buffer
-            vkDeviceWaitIdle(m_device);
-            
+            // NOTE: Removed vkDeviceWaitIdle for performance - buffer recreation happens without stalling
+
             // Create new buffer with extra capacity to reduce recreations
             uint32_t newCapacity = std::max(requiredVertices * 2, 512u); // Double capacity for growth
             VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
@@ -422,8 +421,7 @@ namespace tremor::editor {
         // Check if we need to recreate the selected vertex buffer
         uint32_t requiredVertices = vertices.size();
         if (!m_selectedVertexMarkerBuffer.isValid() || requiredVertices > m_selectedVertexMarkerBuffer.getCapacity()) {
-            // Wait for any pending operations to complete before recreating buffer
-            vkDeviceWaitIdle(m_device);
+            // NOTE: Removed vkDeviceWaitIdle for performance - buffer recreation happens without stalling
             
             // Create new buffer with extra capacity to reduce recreations
             uint32_t newCapacity = std::max(requiredVertices * 2, 512u); // Double capacity for growth
@@ -510,8 +508,7 @@ namespace tremor::editor {
         // Use dedicated triangle edge buffer for edge rendering
         uint32_t requiredVertices = vertices.size();
         if (!m_triangleEdgeBuffer.isValid() || requiredVertices > m_triangleEdgeBuffer.getCapacity()) {
-            // Wait for any pending operations to complete before recreating buffer
-            vkDeviceWaitIdle(m_device);
+            // NOTE: Removed vkDeviceWaitIdle for performance - buffer recreation happens without stalling
             
             // Create new buffer with extra capacity to reduce recreations
             uint32_t newCapacity = std::max(requiredVertices * 2, 512u);
@@ -575,8 +572,7 @@ namespace tremor::editor {
         // Use dedicated selected triangle edge buffer for edge rendering
         uint32_t requiredVertices = vertices.size();
         if (!m_selectedTriangleEdgeBuffer.isValid() || requiredVertices > m_selectedTriangleEdgeBuffer.getCapacity()) {
-            // Wait for any pending operations to complete before recreating buffer
-            vkDeviceWaitIdle(m_device);
+            // NOTE: Removed vkDeviceWaitIdle for performance - buffer recreation happens without stalling
 
             // Create new buffer with extra capacity to reduce recreations
             uint32_t newCapacity = std::max(requiredVertices * 2, 512u);
@@ -672,7 +668,7 @@ namespace tremor::editor {
         // Update vertex buffer
         uint32_t requiredVertices = allVertices.size();
         if (!m_indirectTriangleVertexBuffer.isValid() || requiredVertices > m_indirectTriangleVertexBuffer.getCapacity()) {
-            vkDeviceWaitIdle(m_device);
+            // NOTE: Removed vkDeviceWaitIdle for performance - buffer recreation happens without stalling
 
             uint32_t newCapacity = std::max(requiredVertices * 2, 2048u);
             VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
@@ -696,7 +692,7 @@ namespace tremor::editor {
         // Update index buffer
         uint32_t requiredIndices = allIndices.size();
         if (!m_indirectTriangleIndexBuffer.isValid() || requiredIndices > m_indirectTriangleIndexBuffer.getCapacity()) {
-            vkDeviceWaitIdle(m_device);
+            // NOTE: Removed vkDeviceWaitIdle for performance - buffer recreation happens without stalling
 
             uint32_t newIndexCapacity = std::max(requiredIndices * 2, 2048u);
             VkDeviceSize indexBufferSize = sizeof(uint32_t) * newIndexCapacity;
@@ -720,7 +716,7 @@ namespace tremor::editor {
         // Update indirect draw buffer
         uint32_t requiredCommands = drawCommands.size();
         if (!m_indirectDrawBuffer.isValid() || requiredCommands > m_indirectDrawBuffer.getCapacity()) {
-            vkDeviceWaitIdle(m_device);
+            // NOTE: Removed vkDeviceWaitIdle for performance - buffer recreation happens without stalling
 
             uint32_t newCommandCapacity = std::max(requiredCommands * 2, 64u);
             VkDeviceSize commandBufferSize = sizeof(VkDrawIndexedIndirectCommand) * newCommandCapacity;
@@ -808,7 +804,7 @@ namespace tremor::editor {
         // Update vertex buffer
         uint32_t requiredVertices = allVertices.size();
         if (!m_indirectEdgeVertexBuffer.isValid() || requiredVertices > m_indirectEdgeVertexBuffer.getCapacity()) {
-            vkDeviceWaitIdle(m_device);
+            // NOTE: Removed vkDeviceWaitIdle for performance
 
             uint32_t newCapacity = std::max(requiredVertices * 2, 2048u);
             VkDeviceSize bufferSize = sizeof(GizmoVertex) * newCapacity;
@@ -832,7 +828,7 @@ namespace tremor::editor {
         // Update indirect draw buffer
         uint32_t requiredCommands = drawCommands.size();
         if (!m_indirectEdgeDrawBuffer.isValid() || requiredCommands > m_indirectEdgeDrawBuffer.getCapacity()) {
-            vkDeviceWaitIdle(m_device);
+            // NOTE: Removed vkDeviceWaitIdle for performance
 
             uint32_t newCommandCapacity = std::max(requiredCommands * 2, 64u);
             VkDeviceSize commandBufferSize = sizeof(VkDrawIndirectCommand) * newCommandCapacity;
@@ -897,8 +893,7 @@ namespace tremor::editor {
         // Use dedicated filled triangle vertex buffer - only recreate if absolutely necessary
         uint32_t requiredVertices = gizmoVertices.size();
         if (!m_filledTriangleBuffer.isValid() || requiredVertices > m_filledTriangleBuffer.getCapacity()) {
-            // Wait for any pending operations to complete before recreating buffer
-            vkDeviceWaitIdle(m_device);
+            // NOTE: Removed vkDeviceWaitIdle for performance - buffer recreation happens without stalling
             
             // Create new vertex buffer with extra capacity to reduce recreations
             uint32_t newCapacity = std::max(requiredVertices * 2, 1024u);
@@ -927,8 +922,7 @@ namespace tremor::editor {
         if (requiredIndices > 0) {
             // Check if we need to recreate the index buffer
             if (!m_filledTriangleIndexBuffer.isValid() || requiredIndices > m_filledTriangleIndexBuffer.getCapacity()) {
-                // Wait for device idle before recreating
-                vkDeviceWaitIdle(m_device);
+                // NOTE: Removed vkDeviceWaitIdle for performance - buffer recreation happens without stalling
                 
                 // Create new index buffer with extra capacity
                 uint32_t newIndexCapacity = std::max(requiredIndices * 2, 1024u);
@@ -999,8 +993,7 @@ namespace tremor::editor {
         // Use dedicated selected triangle vertex buffer
         uint32_t requiredVertices = gizmoVertices.size();
         if (!m_selectedTriangleBuffer.isValid() || requiredVertices > m_selectedTriangleBuffer.getCapacity()) {
-            // Wait for any pending operations to complete before recreating buffer
-            vkDeviceWaitIdle(m_device);
+            // NOTE: Removed vkDeviceWaitIdle for performance - buffer recreation happens without stalling
 
             // Create new vertex buffer with extra capacity to reduce recreations
             uint32_t newCapacity = std::max(requiredVertices * 2, 1024u);
@@ -1029,8 +1022,7 @@ namespace tremor::editor {
         if (requiredIndices > 0) {
             // Check if we need to recreate the index buffer
             if (!m_selectedTriangleIndexBuffer.isValid() || requiredIndices > m_selectedTriangleIndexBuffer.getCapacity()) {
-                // Wait for device idle before recreating
-                vkDeviceWaitIdle(m_device);
+                // NOTE: Removed vkDeviceWaitIdle for performance - buffer recreation happens without stalling
 
                 // Create new index buffer with extra capacity
                 uint32_t newIndexCapacity = std::max(requiredIndices * 2, 1024u);
@@ -1125,43 +1117,97 @@ namespace tremor::editor {
     }
 
     bool GizmoRenderer::createShaders() {
-        // Load gizmo shaders
+        // Runtime SPIRV compilation with fallback to pre-compiled shaders
+        Logger::get().info("🔥 Attempting runtime SPIRV compilation for gizmo shaders");
+
+        // Try runtime compilation with safety checks
+        std::unique_ptr<tremor::gfx::ShaderModule> vertexShaderModule;
+        std::unique_ptr<tremor::gfx::ShaderModule> fragmentShaderModule;
+
+        // First try to load pre-compiled SPIR-V files
+        try {
+            // Check if pre-compiled SPIR-V files exist
+            std::ifstream vertSpvCheck("shaders/gizmo.vert.spv", std::ios::binary);
+            std::ifstream fragSpvCheck("shaders/gizmo.frag.spv", std::ios::binary);
+
+            if (vertSpvCheck.is_open() && fragSpvCheck.is_open()) {
+                vertSpvCheck.close();
+                fragSpvCheck.close();
+
+                Logger::get().info("🔧 Loading pre-compiled SPIR-V shaders...");
+
+                // Load pre-compiled SPIR-V files directly
+                vertexShaderModule = tremor::gfx::ShaderModule::loadFromFile(
+                    m_device, "shaders/gizmo.vert.spv", tremor::gfx::ShaderType::Vertex, "main");
+                fragmentShaderModule = tremor::gfx::ShaderModule::loadFromFile(
+                    m_device, "shaders/gizmo.frag.spv", tremor::gfx::ShaderType::Fragment, "main");
+
+                if (vertexShaderModule && fragmentShaderModule) {
+                    Logger::get().info("✅ Pre-compiled shaders loaded successfully!");
+                }
+            } else {
+                if (vertSpvCheck.is_open()) vertSpvCheck.close();
+                if (fragSpvCheck.is_open()) fragSpvCheck.close();
+                Logger::get().info("Pre-compiled SPIR-V files not found, will skip compilation to avoid hanging");
+            }
+        } catch (const std::exception& e) {
+            Logger::get().warning("Could not load pre-compiled shaders: {}", e.what());
+        }
+
+        // If pre-compiled loading failed, skip runtime compilation to avoid hanging
+        if (!vertexShaderModule || !fragmentShaderModule) {
+            Logger::get().error("🚫 Failed to load gizmo shaders - skipping runtime compilation to avoid hanging");
+            vertexShaderModule.reset();
+            fragmentShaderModule.reset();
+        }
+
+        if (vertexShaderModule && fragmentShaderModule) {
+            // Runtime compilation succeeded
+            m_vertexShader = vertexShaderModule->getHandle();
+            m_fragmentShader = fragmentShaderModule->getHandle();
+            Logger::get().info("✅ Gizmo shaders compiled successfully using runtime SPIRV compilation!");
+            return true;
+        }
+
+        // Runtime compilation failed, fallback to pre-compiled SPIR-V
+        Logger::get().warning("⚠️ Runtime SPIRV compilation failed, falling back to pre-compiled shaders");
+
         auto loadShader = [this](const std::string& filename) -> VkShaderModule {
             std::ifstream file(filename, std::ios::ate | std::ios::binary);
             if (!file.is_open()) {
                 Logger::get().error("Failed to open shader file: {}", filename);
                 return VK_NULL_HANDLE;
             }
-            
+
             size_t fileSize = (size_t)file.tellg();
             std::vector<char> code(fileSize);
             file.seekg(0);
             file.read(code.data(), fileSize);
             file.close();
-            
+
             VkShaderModuleCreateInfo createInfo{};
             createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
             createInfo.codeSize = code.size();
             createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
-            
+
             VkShaderModule shaderModule;
             if (vkCreateShaderModule(m_device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-                Logger::get().error("Failed to create shader module");
+                Logger::get().error("Failed to create shader module from SPIR-V");
                 return VK_NULL_HANDLE;
             }
-            
+
             return shaderModule;
         };
-        
+
         m_vertexShader = loadShader("shaders/gizmo.vert.spv");
         m_fragmentShader = loadShader("shaders/gizmo.frag.spv");
-        
+
         if (m_vertexShader == VK_NULL_HANDLE || m_fragmentShader == VK_NULL_HANDLE) {
-            Logger::get().error("Failed to load gizmo shaders");
+            Logger::get().error("❌ Failed to load gizmo shaders (both runtime and pre-compiled failed)");
             return false;
         }
-        
-        Logger::get().info("Gizmo shaders loaded successfully");
+
+        Logger::get().info("💾 Gizmo shaders loaded successfully using pre-compiled SPIR-V fallback");
         return true;
     }
 

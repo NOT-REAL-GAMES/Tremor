@@ -1,6 +1,9 @@
 #include "model_editor.h"
 #include "../main.h"
 #include "../renderer/taffy_integration.h"
+#ifdef HAS_ASSIMP
+#include "../gltf_importer.h"
+#endif
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
@@ -24,6 +27,41 @@ namespace tremor::editor {
             return false;
         }
 
+        // Check file extension to determine format
+        std::string extension = std::filesystem::path(filepath).extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
+
+        std::string taffyPath = filepath;
+        bool isGltfImport = false;
+
+#ifdef HAS_ASSIMP
+        // Handle GLTF/GLB files
+        if (extension == ".gltf" || extension == ".glb") {
+            Logger::get().info("Detected GLTF file, converting to Taffy format");
+
+            // Create temporary Taffy file
+            std::string tempPath = std::filesystem::temp_directory_path() /
+                                 (std::filesystem::path(filepath).stem().string() + "_imported.taf");
+
+            // Use GLTF importer to convert
+            Taffy::GLTFImporter importer;
+            if (!importer.convertGLTFToTaffy(filepath, tempPath)) {
+                Logger::get().error("Failed to convert GLTF file: {}", filepath);
+                return false;
+            }
+
+            taffyPath = tempPath;
+            isGltfImport = true;
+            Logger::get().info("Successfully converted GLTF to Taffy: {}", tempPath);
+        }
+#else
+        // GLTF support not available
+        if (extension == ".gltf" || extension == ".glb") {
+            Logger::get().error("GLTF support not available - AssImp not found during build");
+            return false;
+        }
+#endif
+
         // Create new Taffy asset
         m_sourceAsset = std::make_unique<Taffy::Asset>();
         if (!m_sourceAsset) {
@@ -31,10 +69,20 @@ namespace tremor::editor {
             return false;
         }
 
-        // Load the Taffy file
-        if (!m_sourceAsset->load_from_file_safe(filepath)) {
-            Logger::get().error("Failed to load Taffy asset from: {}", filepath);
+        // Load the Taffy file (either original or converted)
+        if (!m_sourceAsset->load_from_file_safe(taffyPath)) {
+            Logger::get().error("Failed to load Taffy asset from: {}", taffyPath);
+
+            // Clean up temp file if it was created
+            if (isGltfImport && std::filesystem::exists(taffyPath)) {
+                std::filesystem::remove(taffyPath);
+            }
             return false;
+        }
+
+        // Clean up temp file after successful load
+        if (isGltfImport && std::filesystem::exists(taffyPath)) {
+            std::filesystem::remove(taffyPath);
         }
 
         // Clear existing meshes
@@ -547,11 +595,10 @@ namespace tremor::editor {
         Logger::get().info("Successfully imported {} vertices and {} triangles as custom geometry",
                           vertices.size(), indices.size() / 3);
 
-        // Clear the original mesh data since we've converted it to custom vertices
-        // This prevents double rendering
-        m_meshes.clear();
-        m_renderMeshIds.clear();
-        Logger::get().info("Cleared original mesh data after converting to custom vertices");
+        // NOTE: We keep the original mesh data for preview mode
+        // The rendering logic will choose between original mesh or custom vertices
+        // based on the editor state
+        Logger::get().info("Keeping original mesh data for preview mode");
 
         markDirty();
     }

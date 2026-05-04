@@ -31,7 +31,13 @@ namespace tremor::editor {
     class EditableModel;
     class EditorTools;
 
-    // Editor modes
+    // Overall editor state
+    enum class EditorState {
+        Preview,        // Preview mode - read-only, no gizmos
+        Edit           // Edit mode - full editing capabilities with gizmos
+    };
+
+    // Editor tool modes (only used in Edit state)
     enum class EditorMode {
         Select,         // Selection mode
         Move,           // Translation gizmo
@@ -117,8 +123,14 @@ namespace tremor::editor {
         bool newModel();
 
         // Editor state
+        void setState(EditorState state);
+        EditorState getState() const { return m_currentState; }
         void setMode(EditorMode mode);
         EditorMode getMode() const { return m_currentMode; }
+
+        // Mode convenience methods
+        bool isInEditMode() const { return m_currentState == EditorState::Edit; }
+        bool isInPreviewMode() const { return m_currentState == EditorState::Preview; }
         
         // Mesh preview
         void setShowMeshPreview(bool show) { m_showMeshPreview = show; }
@@ -127,6 +139,21 @@ namespace tremor::editor {
         bool getWireframeMode() const { return m_wireframeMode; }
         void setBackfaceCulling(bool enable) { m_backfaceCulling = enable; }
         bool getBackfaceCulling() const { return m_backfaceCulling; }
+
+        // Performance optimization controls
+        void setShowVertexMarkers(bool show) { m_showVertexMarkers = show; }
+        bool getShowVertexMarkers() const { return m_showVertexMarkers; }
+        void setShowTriangleEdges(bool show) { m_showTriangleEdges = show; }
+        bool getShowTriangleEdges() const { return m_showTriangleEdges; }
+        void setAutoImportMesh(bool autoImport) { m_autoImportMesh = autoImport; }
+        bool getAutoImportMesh() const { return m_autoImportMesh; }
+
+        // Force import mesh for editing (manual override)
+        void importMeshForEditing();
+
+        // Vertex marker size control
+        void setVertexMarkerSize(float size) { m_vertexMarkerSize = size; }
+        float getVertexMarkerSize() const { return m_vertexMarkerSize; }
 
         // Selection
         const Selection& getSelection() const { return m_selection; }
@@ -191,13 +218,18 @@ namespace tremor::editor {
         std::unique_ptr<EditorTools> m_tools;
 
         // Editor state
+        EditorState m_currentState = EditorState::Preview;
         EditorMode m_currentMode = EditorMode::Select;
+        bool m_showGizmosAndMarkers = false; // Cached flag for performance
         Selection m_selection;
         glm::vec2 m_viewportSize = glm::vec2(1920, 1080);
         glm::vec2 m_scissorSize = glm::vec2(1920, 1080);
         bool m_showMeshPreview = true;
         bool m_wireframeMode = false;
         bool m_backfaceCulling = true;
+        bool m_showVertexMarkers = true;  // Toggle vertex markers display
+        bool m_showTriangleEdges = true;  // Toggle triangle edges display
+        bool m_autoImportMesh = true;     // Auto-import mesh when entering edit mode
         
         // File management
         std::string m_currentFilePath;
@@ -210,6 +242,13 @@ namespace tremor::editor {
 
         // Selection settings
         float m_vertexSelectionRadius = 0.5f;  // World-space vertex selection radius
+        float m_vertexMarkerSize = 0.2f;       // Base vertex marker size (smaller for performance)
+
+        // Performance caching for large meshes
+        mutable std::vector<glm::vec3> m_cachedSolidTriangleVerts;
+        mutable std::vector<uint32_t> m_cachedSolidTriangleIndices;
+        mutable uint32_t m_lastCustomTriangleCount = 0;
+        mutable bool m_meshCacheValid = false;
 
         // Triangle creation state
         std::vector<uint32_t> m_selectedVerticesForTriangle;
@@ -229,7 +268,9 @@ namespace tremor::editor {
         bool rayTriangleIntersect(const glm::vec3& rayOrigin, const glm::vec3& rayDirection,
                                   const glm::vec3& v0, const glm::vec3& v1, const glm::vec3& v2,
                                   float& t) const;  // Ray-triangle intersection test
-        void renderMeshPreview(VkCommandBuffer commandBuffer);  // Render mesh preview using GizmoRenderer
+        void renderMeshPreview(VkCommandBuffer commandBuffer);  // Render mesh preview using GizmoRenderer (edit mode)
+        void renderOriginalMeshPreview(VkCommandBuffer commandBuffer);  // Render original mesh efficiently (preview mode)
+        float calculateAdaptiveMarkerSize(size_t vertexCount) const;  // Calculate performance-optimized marker size
     };
 
     /**
@@ -464,6 +505,10 @@ namespace tremor::editor {
         // Access to gizmo renderer
         GizmoRenderer* getGizmoRenderer() const { return m_gizmoRenderer.get(); }
 
+        // Gizmo control
+        void setGizmosEnabled(bool enabled) { m_gizmosEnabled = enabled; }
+        bool getGizmosEnabled() const { return m_gizmosEnabled; }
+
     private:
         VkDevice m_device;
         VkPhysicalDevice m_physicalDevice;
@@ -474,7 +519,8 @@ namespace tremor::editor {
         std::unique_ptr<GizmoRenderer> m_gizmoRenderer;
 
         EditorMode m_currentMode = EditorMode::Select;
-        
+        bool m_gizmosEnabled = true;  // Controls whether gizmos are rendered/interactive
+
         // Gizmo interaction state
         bool m_isInteracting = false;
         int m_activeAxis = -1;  // 0=X, 1=Y, 2=Z, -1=none

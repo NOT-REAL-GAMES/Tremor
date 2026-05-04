@@ -38,6 +38,9 @@ namespace tremor::editor {
     std::string FileDialog::showOpenDialog(const std::string& defaultPath) {
         std::vector<Filter> filters = {
             {"Taffy Files", "*.taf"},
+            {"GLTF Files", "*.gltf"},
+            {"GLB Files", "*.glb"},
+            {"All Model Files", "*.taf;*.gltf;*.glb"},
             {"All Files", "*.*"}
         };
         return show(Type::Open, "Open Model", filters, defaultPath);
