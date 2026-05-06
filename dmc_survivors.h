@@ -392,9 +392,9 @@ public:
         // Debug output for player position and camera
         static int frameCount = 0;
         if (frameCount++ % 60 == 0) {
-            printf("Player at: %.2f, %.2f, %.2f | Camera at: %.2f, %.2f, %.2f\n",
+            /*printf("Player at: %.2f, %.2f, %.2f | Camera at: %.2f, %.2f, %.2f\n",
                    playerPos.x, playerPos.y, playerPos.z,
-                   cameraPos.x, cameraPos.y, cameraPos.z);
+                   cameraPos.x, cameraPos.y, cameraPos.z);*/
         }
 
         // Render player entities (Blue/Green cube)

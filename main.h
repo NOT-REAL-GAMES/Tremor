@@ -1,20 +1,30 @@
 #pragma once
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+
+#define GLM_ENABLE_EXPERIMENTAL
+
+#define NOGDI
+
 // Platform detection
 #ifdef _WIN32
-    #ifndef WIN32_LEAN_AND_MEAN
-    #define WIN32_LEAN_AND_MEAN
+    #ifndef NOMINMAX
+    #define NOMINMAX
     #endif
+    #define NOCOMM
+    #define NOSOUND
+    #define NODRAWTEXT
+    #define NOGDI
+    #define NOUSER
+    #define NOMCX
     #include <windows.h>
-    #include <mmsystem.h>
     #include <io.h>
     #include <direct.h>
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
 #else
-    // Linux/Unix includes
     #include <unistd.h>
-    #include <asio.hpp>
     #include <netinet/in.h>
     #include <arpa/inet.h>
     #include <dirent.h>
@@ -50,6 +60,8 @@
 #include <random>
 
 #include "volk.h"
+
+#define SDL_MAIN_HANDLED
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>

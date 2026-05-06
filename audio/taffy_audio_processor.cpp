@@ -11,6 +11,11 @@
 #include <fstream>
 #include <iomanip>
 
+#define NOMINMAX
+
+#undef min
+#undef max
+
 namespace tremor::audio {
 
 #ifndef M_PI
@@ -726,6 +731,7 @@ namespace tremor::audio {
                       << " type=" << static_cast<int>(node.node.type) << std::endl;
             nodeProcessDebug++;
         }
+        static bool streamingDebugPrinted = false;
 
         switch (node.node.type) {
             case Taffy::AudioChunk::NodeType::Oscillator:
@@ -757,7 +763,6 @@ namespace tremor::audio {
                 processSampler(node, frameCount);
                 break;
             case Taffy::AudioChunk::NodeType::StreamingSampler:
-                static bool streamingDebugPrinted = false;
                 if (!streamingDebugPrinted) {
                     std::cout << "🎵 STREAMING SAMPLER NODE FOUND AND PROCESSING!" << std::endl;
                     std::cout << "   Node ID: " << node.node.id << std::endl;

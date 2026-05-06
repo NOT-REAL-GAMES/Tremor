@@ -12,7 +12,7 @@ GLTFImporter::GLTFImporter() {
 
 GLTFImporter::~GLTFImporter() = default;
 
-bool GLTFImporter::convertGLTFToTaffy(const std::string& gltfPath, const std::string& outputPath) {
+bool GLTFImporter::convertGLTFToTaffy(const std::string& gltfPath, const std::filesystem::path& outputPath) {
     std::cout << "🔄 Loading GLTF file: " << gltfPath << std::endl;
 
     // Load the GLTF file with AssImp

@@ -1651,7 +1651,7 @@ namespace tremor::editor {
 
         for (uint32_t i = 0; i < segments; ++i) {
             float angle = 2.0f * glm::pi<float>() * i / segments;
-            glm::vec3 position = center + radius * (cos(angle) * tangent + sin(angle) * bitangent);
+            glm::vec3 position = center + radius * (cosf(angle) * tangent + sinf(angle) * bitangent);
             vertices.push_back({position, color});
 
             // Add line indices to form the circle

@@ -1,6 +1,9 @@
 #pragma once
 #include "handle.h"
 
+#undef min
+#undef max
+
 namespace tremor::gfx {
 
     // Texture formats

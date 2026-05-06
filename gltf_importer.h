@@ -23,7 +23,7 @@ public:
      * @param outputPath Path for the output Taffy asset (.taf)
      * @return true if successful, false otherwise
      */
-    bool convertGLTFToTaffy(const std::string& gltfPath, const std::string& outputPath);
+    bool convertGLTFToTaffy(const std::string& gltfPath, const std::filesystem::path& outputPath);
 
 private:
     /**

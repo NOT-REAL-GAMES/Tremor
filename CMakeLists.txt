@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 4.3)
 project(Tremor VERSION 0.1.0 LANGUAGES C CXX)
 
 # Set C++ standard
@@ -9,6 +9,13 @@ set(CMAKE_CXX_EXTENSIONS ON)
 # Set C standard
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+if(MSVC)
+    string(APPEND CMAKE_CXX_FLAGS " /Zc:enumTypes-")
+    string(APPEND CMAKE_C_FLAGS   " /Zc:enumTypes-")
+endif()
 
 # Ensure proper C++23 support for C++ files only
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -70,6 +77,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(flecs)
 
+FetchContent_Declare(
+    SDL
+    GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+    GIT_TAG SDL2
+)
+FetchContent_MakeAvailable(SDL)
+
+
 # Add Jolt Physics using FetchContent
 FetchContent_Declare(
     Jolt
@@ -87,14 +102,6 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(glslang)
 
 FetchContent_Declare(
-    SPIRV-Cross
-    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
-    GIT_TAG main
-)
-
-FetchContent_MakeAvailable(SPIRV-Cross)
-
-FetchContent_Declare(
     SPIRV-Headers
     GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Headers.git
     GIT_TAG main
@@ -110,6 +117,22 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(SPIRV-Tools)
 
+FetchContent_Declare(
+    SPIRV-Cross
+    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
+    GIT_TAG main
+)
+
+FetchContent_MakeAvailable(SPIRV-Cross)
+
+FetchContent_Declare(
+    shaderc
+    GIT_REPOSITORY https://github.com/google/shaderc.git
+    GIT_TAG        main
+)
+
+FetchContent_MakeAvailable(shaderc)
+
 
 # Configure Jolt options before making it available
 set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
@@ -120,13 +143,18 @@ set(TARGET_VIEWER OFF CACHE BOOL "" FORCE)
 set(ENABLE_OBJECT_STREAM ON CACHE BOOL "" FORCE)
 set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
 set(GENERATE_DEBUG_SYMBOLS ON CACHE BOOL "" FORCE)
-set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
+set(OVERRIDE_CXX_FLAGS ON CACHE BOOL "" FORCE)
 set(DOUBLE_PRECISION ON CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(Jolt)
 
+target_compile_definitions(Jolt PRIVATE NOGDI)
+target_compile_options(Jolt PRIVATE /W0)
+
+
 # Ensure Jolt uses the correct C++ standard
 if(TARGET Jolt)
+
     set_target_properties(Jolt PROPERTIES
         CXX_STANDARD 17
         CXX_STANDARD_REQUIRED ON
@@ -186,8 +214,8 @@ if(WIN32 AND DEFINED ENV{VULKAN_SDK})
         message(STATUS "  Libraries: ${SDL2_LIBRARIES}")
         
         # Create imported target for modern CMake
-        add_library(SDL2::SDL2 INTERFACE IMPORTED)
-        set_target_properties(SDL2::SDL2 PROPERTIES
+        add_library(SDL2 INTERFACE IMPORTED)
+        set_target_properties(SDL2 PROPERTIES
             INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIRS}"
             INTERFACE_LINK_LIBRARIES "${SDL2_LIBRARIES}"
         )
@@ -303,6 +331,7 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(WIN32)
+    target_link_libraries(Tremor PRIVATE Ole32)
     target_link_libraries(Tremor PRIVATE ws2_32)
 endif()
 

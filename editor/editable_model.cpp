@@ -31,7 +31,7 @@ namespace tremor::editor {
         std::string extension = std::filesystem::path(filepath).extension().string();
         std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
 
-        std::string taffyPath = filepath;
+        std::filesystem::path taffyPath = filepath;
         bool isGltfImport = false;
 
 #ifdef HAS_ASSIMP
@@ -40,7 +40,7 @@ namespace tremor::editor {
             Logger::get().info("Detected GLTF file, converting to Taffy format");
 
             // Create temporary Taffy file
-            std::string tempPath = std::filesystem::temp_directory_path() /
+            std::filesystem::path tempPath = std::filesystem::temp_directory_path() /
                                  (std::filesystem::path(filepath).stem().string() + "_imported.taf");
 
             // Use GLTF importer to convert
@@ -52,7 +52,7 @@ namespace tremor::editor {
 
             taffyPath = tempPath;
             isGltfImport = true;
-            Logger::get().info("Successfully converted GLTF to Taffy: {}", tempPath);
+            Logger::get().info("Successfully converted GLTF to Taffy: {}", tempPath.generic_string());
         }
 #else
         // GLTF support not available
@@ -70,8 +70,8 @@ namespace tremor::editor {
         }
 
         // Load the Taffy file (either original or converted)
-        if (!m_sourceAsset->load_from_file_safe(taffyPath)) {
-            Logger::get().error("Failed to load Taffy asset from: {}", taffyPath);
+        if (!m_sourceAsset->load_from_file_safe(taffyPath.generic_string())) {
+            Logger::get().error("Failed to load Taffy asset from: {}", taffyPath.generic_string());
 
             // Clean up temp file if it was created
             if (isGltfImport && std::filesystem::exists(taffyPath)) {

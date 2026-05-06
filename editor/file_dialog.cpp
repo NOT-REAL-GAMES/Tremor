@@ -1,13 +1,21 @@
+// Windows includes MUST come before main.h
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+// Deliberately NOT defining NOUSER here — shobjidl.h needs it
+#include <windows.h>
+#include <shobjidl.h>
+#include <objbase.h>
+#include <atlcomcli.h>
+#endif
+
+// Now main.h is safe to include
 #include "file_dialog.h"
 #include "../main.h"
+
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
-
-#ifdef _WIN32
-#include <windows.h>
-#include <commdlg.h>
-#endif
 
 #ifdef __linux__
 #include <cstdlib>
@@ -16,6 +24,7 @@
 #include <string>
 #include <array>
 #endif
+
 
 namespace tremor::editor {
 
@@ -62,47 +71,85 @@ namespace tremor::editor {
         std::filesystem::path p(path);
         return p.extension().string();
     }
-
+    
     #ifdef _WIN32
     std::string FileDialog::showWindowsDialog(Type type, const std::string& title,
-                                             const std::vector<Filter>& filters,
-                                             const std::string& defaultPath) {
-        OPENFILENAMEA ofn;
-        char szFile[260] = {0};
+                                            const std::vector<Filter>& filters,
+                                            const std::string& defaultPath) {
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 
-        // Initialize filename with default path
-        if (!defaultPath.empty()) {
-            strncpy(szFile, defaultPath.c_str(), sizeof(szFile) - 1);
-        }
+        std::string result;
 
-        ZeroMemory(&ofn, sizeof(ofn));
-        ofn.lStructSize = sizeof(ofn);
-        ofn.lpstrFile = szFile;
-        ofn.nMaxFile = sizeof(szFile);
-        ofn.lpstrTitle = title.c_str();
-        ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+        CComPtr<IFileDialog> dialog;
+        HRESULT hr;
 
-        // Build filter string
-        std::string filterStr;
-        for (const auto& filter : filters) {
-            filterStr += filter.name + '\0' + filter.extension + '\0';
-        }
-        filterStr += '\0';
-        ofn.lpstrFilter = filterStr.c_str();
-
-        bool result = false;
         if (type == Type::Open) {
-            result = GetOpenFileNameA(&ofn);
+            hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr,
+                                CLSCTX_ALL, IID_IFileOpenDialog,
+                                reinterpret_cast<void**>(&dialog));
         } else {
-            ofn.Flags |= OFN_OVERWRITEPROMPT;
-            result = GetSaveFileNameA(&ofn);
+            hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr,
+                                CLSCTX_ALL, IID_IFileSaveDialog,
+                                reinterpret_cast<void**>(&dialog));
         }
 
-        if (result) {
-            return std::string(szFile);
+        if (FAILED(hr)) {
+            CoUninitialize();
+            return showConsoleDialog(type, title, filters, defaultPath);
         }
 
-        return ""; // User cancelled or error
+        // Set title
+        std::wstring wtitle(title.begin(), title.end());
+        dialog->SetTitle(wtitle.c_str());
+
+        // Build filter spec from filters vector
+        std::vector<COMDLG_FILTERSPEC> filterSpecs;
+        std::vector<std::wstring> nameStorage, specStorage; // keep wstrings alive
+
+        for (const auto& f : filters) {
+            nameStorage.emplace_back(f.name.begin(), f.name.end());
+            specStorage.emplace_back(f.extension.begin(), f.extension.end());
+            filterSpecs.push_back({ nameStorage.back().c_str(),
+                                    specStorage.back().c_str() });
+        }
+
+        if (!filterSpecs.empty()) {
+            dialog->SetFileTypes(static_cast<UINT>(filterSpecs.size()),
+                                filterSpecs.data());
+        }
+
+        // Set default folder
+        if (!defaultPath.empty()) {
+            std::wstring wpath(defaultPath.begin(), defaultPath.end());
+            CComPtr<IShellItem> folder;
+            if (SUCCEEDED(SHCreateItemFromParsingName(wpath.c_str(), nullptr,
+                                                    IID_IShellItem,
+                                                    reinterpret_cast<void**>(&folder)))) {
+                dialog->SetDefaultFolder(folder);
+            }
+        }
+
+        if (type == Type::Save) {
+            dialog->SetDefaultExtension(L"taf");
+        }
+
+        // Show dialog
+        hr = dialog->Show(nullptr);
+        if (SUCCEEDED(hr)) {
+            CComPtr<IShellItem> item;
+            if (SUCCEEDED(dialog->GetResult(&item))) {
+                PWSTR filePath = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &filePath))) {
+                    // Convert wide string back to narrow
+                    std::wstring ws(filePath);
+                    result = std::string(ws.begin(), ws.end());
+                    CoTaskMemFree(filePath);
+                }
+            }
+        }
+
+        CoUninitialize();
+        return result;
     }
     #endif
 
@@ -220,7 +267,7 @@ namespace tremor::editor {
 
             // Make path relative to search directory if not absolute
             if (!std::filesystem::path(filename).is_absolute()) {
-                filename = std::filesystem::path(searchDir) / filename;
+                filename = (std::filesystem::path(searchDir) / std::filesystem::path(filename)).generic_string();
             }
 
             return filename;
