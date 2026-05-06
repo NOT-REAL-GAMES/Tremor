@@ -121,7 +121,12 @@ namespace tremor::gfx {
         vertexStorageBinding.binding = 0;
         vertexStorageBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         vertexStorageBinding.descriptorCount = 1;
-        vertexStorageBinding.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;  // Both mesh and fragment shaders need this
+        // The same storage buffer is consumed by either the mesh shader path or
+        // the traditional vertex-shader fallback, so expose it to both stages.
+        vertexStorageBinding.stageFlags =
+            VK_SHADER_STAGE_VERTEX_BIT |
+            VK_SHADER_STAGE_MESH_BIT_EXT |
+            VK_SHADER_STAGE_FRAGMENT_BIT;
         vertexStorageBinding.pImmutableSamplers = nullptr;
         bindings.push_back(vertexStorageBinding);
 
@@ -185,7 +190,6 @@ namespace tremor::gfx {
             
             // Ensure asset is loaded
             if (!ensureAssetLoaded(asset_path)) {
-                std::cerr << "Failed to load asset: " << asset_path << std::endl;
                 return;
             }
 
@@ -290,6 +294,7 @@ namespace tremor::gfx {
             
             // Clear any overlay tracking since we're reloading from disk
             applied_overlays_.erase(asset_path);
+            failed_asset_loads_.erase(asset_path);
             
             // Wait for GPU to finish
             vkDeviceWaitIdle(device_);
@@ -403,6 +408,10 @@ namespace tremor::gfx {
                 //Logger::get().info("  TaffyOverlayManager instance: {}", (void*)this);
                 return true;
             }
+
+            if (failed_asset_loads_.find(asset_path) != failed_asset_loads_.end()) {
+                return false;
+            }
             
             //Logger::get().info("Loading new asset: {}", asset_path);
             //Logger::get().info("  TaffyOverlayManager instance: {}", (void*)this);
@@ -411,6 +420,7 @@ namespace tremor::gfx {
             auto asset = std::make_unique<Taffy::Asset>();
             if (!asset->load_from_file_safe(asset_path)) {
                 std::cerr << "Failed to load Taffy asset: " << asset_path << std::endl;
+                failed_asset_loads_.insert(asset_path);
                 return false;
             }
 
@@ -418,6 +428,7 @@ namespace tremor::gfx {
             MeshAssetGPUData gpuData = uploadTaffyAsset(*asset);
             if (!gpuData.vertexStorageBuffer) {
                 std::cerr << "Failed to upload asset to GPU: " << asset_path << std::endl;
+                failed_asset_loads_.insert(asset_path);
                 return false;
             }
 
@@ -426,6 +437,7 @@ namespace tremor::gfx {
             // Always create working copies when applying overlays
             loaded_assets_[asset_path] = std::move(asset);
             gpu_data_cache_[asset_path] = gpuData;
+            failed_asset_loads_.erase(asset_path);
             
             // std::cout << "Asset loaded successfully: " << asset_path << std::endl;
             //Logger::get().info("  Loaded assets count: {}", loaded_assets_.size());
@@ -459,11 +471,18 @@ namespace tremor::gfx {
                 return nullptr;
             }
 
+            auto gpuDataIt = gpu_data_cache_.find(asset_path);
+            if (gpuDataIt == gpu_data_cache_.end()) {
+                std::cerr << "Missing GPU data for asset pipeline creation: " << asset_path << std::endl;
+                return nullptr;
+            }
+
             const Taffy::Asset& asset = *assetIt->second;
+            const MeshAssetGPUData& gpuData = gpuDataIt->second;
             PipelineInfo pipelineInfo;
 
             // Extract shaders from asset
-            if (!extractShadersFromAsset(asset, pipelineInfo.meshShader, pipelineInfo.fragmentShader)) {
+            if (!extractShadersFromAsset(asset, pipelineInfo.vertexShader, pipelineInfo.meshShader, pipelineInfo.fragmentShader)) {
                 std::cerr << "Failed to extract shaders from asset: " << asset_path << std::endl;
                 return nullptr;
             }
@@ -474,12 +493,13 @@ namespace tremor::gfx {
             pipelineLayoutInfo.setLayoutCount = 1;
             pipelineLayoutInfo.pSetLayouts = &meshShaderDescSetLayout;
 
-            // Push constants for mesh and fragment shaders
+            // Push constants for vertex or mesh shaders plus the fragment shader
             VkPushConstantRange pushConstantRange{};
-            pushConstantRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            pushConstantRange.stageFlags =
+                (gpuData.usesMeshShader ? VK_SHADER_STAGE_MESH_BIT_EXT : VK_SHADER_STAGE_VERTEX_BIT) |
+                VK_SHADER_STAGE_FRAGMENT_BIT;
             pushConstantRange.offset = 0;
-            // Data-driven mesh shader now expects MVP matrix + metadata (80 bytes total)
-            pushConstantRange.size = sizeof(MeshShaderPushConstants); // MVP (64) + 4 uint32_t (16) = 80 bytes
+            pushConstantRange.size = sizeof(MeshShaderPushConstants);
             pipelineLayoutInfo.pushConstantRangeCount = 1;
             pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
@@ -489,8 +509,24 @@ namespace tremor::gfx {
                 return nullptr;
             }
 
+            if (gpuData.usesMeshShader && pipelineInfo.meshShader == VK_NULL_HANDLE) {
+                std::cerr << "Asset requires mesh shaders but no mesh shader module was embedded" << std::endl;
+                vkDestroyPipelineLayout(device_, pipelineInfo.layout, nullptr);
+                cleanupShaderModules(pipelineInfo);
+                return nullptr;
+            }
+
+            if (!gpuData.usesMeshShader && pipelineInfo.vertexShader == VK_NULL_HANDLE) {
+                std::cerr << "Traditional asset is missing an embedded vertex shader" << std::endl;
+                vkDestroyPipelineLayout(device_, pipelineInfo.layout, nullptr);
+                cleanupShaderModules(pipelineInfo);
+                return nullptr;
+            }
+
             // Create pipeline
-            pipelineInfo.pipeline = createMeshShaderPipeline(pipelineInfo);
+            pipelineInfo.pipeline = gpuData.usesMeshShader
+                ? createMeshShaderPipeline(pipelineInfo)
+                : createTraditionalPipeline(pipelineInfo);
             if (!pipelineInfo.pipeline) {
                 vkDestroyPipelineLayout(device_, pipelineInfo.layout, nullptr);
                 cleanupShaderModules(pipelineInfo);
@@ -635,6 +671,124 @@ namespace tremor::gfx {
             return pipeline;
         }
 
+        VkPipeline TaffyOverlayManager::createTraditionalPipeline(const PipelineInfo& pipelineInfo) {
+            std::vector<VkPipelineShaderStageCreateInfo> shaderStages;
+
+            if (pipelineInfo.vertexShader != VK_NULL_HANDLE) {
+                VkPipelineShaderStageCreateInfo vertexStageInfo{};
+                vertexStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                vertexStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+                vertexStageInfo.module = pipelineInfo.vertexShader;
+                vertexStageInfo.pName = "main";
+                shaderStages.push_back(vertexStageInfo);
+            }
+
+            if (pipelineInfo.fragmentShader != VK_NULL_HANDLE) {
+                VkPipelineShaderStageCreateInfo fragStageInfo{};
+                fragStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                fragStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+                fragStageInfo.module = pipelineInfo.fragmentShader;
+                fragStageInfo.pName = "main";
+                shaderStages.push_back(fragStageInfo);
+            }
+
+            VkPipelineVertexInputStateCreateInfo vertexInput{};
+            vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+            VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+            inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+            VkPipelineViewportStateCreateInfo viewportState{};
+            viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            viewportState.viewportCount = 1;
+            viewportState.scissorCount = 1;
+
+            VkPipelineRasterizationStateCreateInfo rasterizer{};
+            rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            rasterizer.depthClampEnable = VK_FALSE;
+            rasterizer.rasterizerDiscardEnable = VK_FALSE;
+            rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+            rasterizer.lineWidth = 1.0f;
+            rasterizer.cullMode = VK_CULL_MODE_NONE;
+            rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+            rasterizer.depthBiasEnable = VK_FALSE;
+
+            VkPipelineMultisampleStateCreateInfo multisampling{};
+            multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            multisampling.sampleShadingEnable = VK_FALSE;
+            multisampling.rasterizationSamples = sample_count_;
+
+            VkPipelineDepthStencilStateCreateInfo depthStencil{};
+            depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            depthStencil.depthTestEnable = VK_TRUE;
+            depthStencil.depthWriteEnable = VK_TRUE;
+            depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+            depthStencil.depthBoundsTestEnable = VK_FALSE;
+            depthStencil.stencilTestEnable = VK_FALSE;
+
+            VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+            colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            colorBlendAttachment.blendEnable = VK_FALSE;
+
+            VkPipelineColorBlendStateCreateInfo colorBlending{};
+            colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            colorBlending.logicOpEnable = VK_FALSE;
+            colorBlending.attachmentCount = 1;
+            colorBlending.pAttachments = &colorBlendAttachment;
+
+            std::vector<VkDynamicState> dynamicStates = {
+                VK_DYNAMIC_STATE_VIEWPORT,
+                VK_DYNAMIC_STATE_SCISSOR
+            };
+
+            VkPipelineDynamicStateCreateInfo dynamicState{};
+            dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+            dynamicState.pDynamicStates = dynamicStates.data();
+
+            VkPipelineRenderingCreateInfo renderingInfo{};
+            if (render_pass_ == VK_NULL_HANDLE) {
+                renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+                renderingInfo.colorAttachmentCount = 1;
+                renderingInfo.pColorAttachmentFormats = &swapchain_format_;
+                renderingInfo.depthAttachmentFormat = depth_format_;
+                renderingInfo.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+            }
+
+            VkGraphicsPipelineCreateInfo pipelineInfoCreate{};
+            pipelineInfoCreate.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            if (render_pass_ == VK_NULL_HANDLE) {
+                pipelineInfoCreate.pNext = &renderingInfo;
+            }
+            pipelineInfoCreate.stageCount = static_cast<uint32_t>(shaderStages.size());
+            pipelineInfoCreate.pStages = shaderStages.data();
+            pipelineInfoCreate.pVertexInputState = &vertexInput;
+            pipelineInfoCreate.pInputAssemblyState = &inputAssembly;
+            pipelineInfoCreate.pViewportState = &viewportState;
+            pipelineInfoCreate.pRasterizationState = &rasterizer;
+            pipelineInfoCreate.pMultisampleState = &multisampling;
+            pipelineInfoCreate.pDepthStencilState = &depthStencil;
+            pipelineInfoCreate.pColorBlendState = &colorBlending;
+            pipelineInfoCreate.pDynamicState = &dynamicState;
+            pipelineInfoCreate.layout = pipelineInfo.layout;
+            pipelineInfoCreate.renderPass = render_pass_;
+            pipelineInfoCreate.subpass = 0;
+            pipelineInfoCreate.basePipelineHandle = VK_NULL_HANDLE;
+
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            VkResult pipelineResult = vkCreateGraphicsPipelines(
+                device_, VK_NULL_HANDLE, 1, &pipelineInfoCreate, nullptr, &pipeline);
+            if (pipelineResult != VK_SUCCESS) {
+                std::cerr << "Failed to create traditional graphics pipeline! Error: " << pipelineResult << std::endl;
+                return VK_NULL_HANDLE;
+            }
+
+            return pipeline;
+        }
+
         void TaffyOverlayManager::invalidatePipeline(const std::string& asset_path) {
             pipeline_rebuild_flags_[asset_path] = true;
         }
@@ -657,6 +811,9 @@ namespace tremor::gfx {
             if (pipelineInfo.taskShader) {
                 vkDestroyShaderModule(device_, pipelineInfo.taskShader, nullptr);
             }
+            if (pipelineInfo.vertexShader) {
+                vkDestroyShaderModule(device_, pipelineInfo.vertexShader, nullptr);
+            }
             if (pipelineInfo.meshShader) {
                 vkDestroyShaderModule(device_, pipelineInfo.meshShader, nullptr);
             }
@@ -667,13 +824,6 @@ namespace tremor::gfx {
 
         void TaffyOverlayManager::renderMeshAssetInternal(VkCommandBuffer cmd, VkPipeline meshPipeline,
             VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj, const glm::mat4& model) {
-            if (!gpuData.usesMeshShader) {
-                std::cerr << "⚠️  Asset doesn't use mesh shaders!" << std::endl;
-                return;
-            }
-
-            // Bind mesh shader pipeline
-            //Logger::get().info("Binding mesh shader pipeline");
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
 
             // Set viewport
@@ -703,55 +853,47 @@ namespace tremor::gfx {
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 pipelineLayout, 0, 1, &gpuData.descriptorSet, 0, nullptr);
 
-            // Set push constants
             MeshShaderPushConstants pushConstants{};
-            pushConstants.mvp = viewProj * model;  // Use the view-projection matrix directly
+            pushConstants.mvp = viewProj * model;
             pushConstants.vertex_count = gpuData.vertexCount;
             pushConstants.primitive_count = gpuData.primitiveCount;
             pushConstants.vertex_stride_floats = gpuData.vertexStrideFloats;
             pushConstants.index_offset_bytes = gpuData.indexOffset;
+            pushConstants.overlay_flags = 0;
+            pushConstants.overlay_data_offset = 0;
 
-            //Logger::get().info("Push constants: vertices={}, primitives={}, stride={}",
-            //    pushConstants.vertex_count,
-            //    pushConstants.primitive_count,
-            //    pushConstants.vertex_stride_floats);
+            if (gpuData.usesMeshShader) {
+                if (!vkCmdDrawMeshTasksEXT) {
+                    return;
+                }
 
-            // Push the full structure with MVP matrix
-            vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT,
-                0, sizeof(pushConstants), &pushConstants);
+                vkCmdPushConstants(
+                    cmd,
+                    pipelineLayout,
+                    VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                    0,
+                    sizeof(pushConstants),
+                    &pushConstants);
 
-            // Draw with mesh shader
-            //Logger::get().info("Drawing mesh shader with 1x1x1 workgroups");
-            
-            // Ensure vkCmdDrawMeshTasksEXT is available
-            if (!vkCmdDrawMeshTasksEXT) {
-                //Logger::get().error("vkCmdDrawMeshTasksEXT is not available! Mesh shader extension not loaded properly.");
+                vkCmdDrawMeshTasksEXT(cmd, 8, 1, 1);
                 return;
             }
-            
-            // Set push constants for mesh shader
-            struct MeshPushConstantsData {
-                glm::mat4 mvp;
-                uint32_t vertex_count;
-                uint32_t primitive_count;
-                uint32_t vertex_stride_floats;
-                uint32_t index_offset_bytes;
-                uint32_t overlay_flags;
-                uint32_t overlay_data_offset;
-            } meshPushData;
-            
-            meshPushData.mvp = viewProj * model;
-            meshPushData.vertex_count = gpuData.vertexCount;
-            meshPushData.primitive_count = gpuData.primitiveCount;
-            meshPushData.vertex_stride_floats = gpuData.vertexStrideFloats;
-            meshPushData.index_offset_bytes = gpuData.indexOffset;
-            meshPushData.overlay_flags = 0; // Overlays will be handled by shader replacement
-            meshPushData.overlay_data_offset = 0;
-                        
-            vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT,
-                0, sizeof(meshPushData), &meshPushData);
-            
-            vkCmdDrawMeshTasksEXT(cmd, 8, 1, 1);  // 1x1x1 workgroups
+
+            vkCmdPushConstants(
+                cmd,
+                pipelineLayout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(pushConstants),
+                &pushConstants);
+
+            if (gpuData.indexCount > 0) {
+                vkCmdBindIndexBuffer(cmd, gpuData.vertexStorageBuffer, gpuData.indexOffset, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, gpuData.indexCount, 1, 0, 0, 0);
+            }
+            else {
+                vkCmdDraw(cmd, gpuData.vertexCount, 1, 0, 0);
+            }
         }
 
         TaffyOverlayManager::MeshAssetGPUData TaffyOverlayManager::uploadTaffyAsset(const Taffy::Asset& asset) {
@@ -999,6 +1141,9 @@ namespace tremor::gfx {
                 // Calculate vertex data size and offset
                 size_t vertexDataOffset = sizeof(Taffy::GeometryChunk);
                 size_t vertexDataSize = geomHeader.vertex_count * geomHeader.vertex_stride;
+                size_t indexDataSize = geomHeader.index_count * sizeof(uint32_t);
+                size_t indexDataOffset = vertexDataOffset + vertexDataSize;
+                size_t totalBufferSize = vertexDataSize + indexDataSize;
                 
                 std::cout << "  Vertex data size: " << vertexDataSize << " bytes" << std::endl;
                 
@@ -1007,14 +1152,26 @@ namespace tremor::gfx {
                     std::cerr << "❌ Vertex data extends beyond chunk!" << std::endl;
                     return gpuData;
                 }
+
+                if (geomHeader.index_count > 0 && indexDataOffset + indexDataSize > geomData->size()) {
+                    std::cerr << "❌ Index data extends beyond chunk!" << std::endl;
+                    return gpuData;
+                }
                 
                 const uint8_t* vertexData = geomData->data() + vertexDataOffset;
+                const uint8_t* indexData = geomHeader.index_count > 0
+                    ? geomData->data() + indexDataOffset
+                    : nullptr;
                 
-                // Create vertex buffer (using storage buffer for now, but with vertex buffer usage)
+                // Keep geometry in a single storage/index buffer so the fallback vertex shader
+                // can read packed vertices via gl_VertexIndex and indexed draws can reuse the same upload.
                 VkBufferCreateInfo bufferInfo{};
                 bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-                bufferInfo.size = vertexDataSize;
-                bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                bufferInfo.size = totalBufferSize;
+                bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
                 
                 if (vkCreateBuffer(device_, &bufferInfo, nullptr, &gpuData.vertexStorageBuffer) != VK_SUCCESS) {
@@ -1040,17 +1197,23 @@ namespace tremor::gfx {
                 
                 vkBindBufferMemory(device_, gpuData.vertexStorageBuffer, gpuData.vertexStorageMemory, 0);
                 
-                // Copy vertex data to buffer
+                // Copy vertex and index data into the shared buffer
                 void* mappedData;
-                vkMapMemory(device_, gpuData.vertexStorageMemory, 0, vertexDataSize, 0, &mappedData);
+                vkMapMemory(device_, gpuData.vertexStorageMemory, 0, totalBufferSize, 0, &mappedData);
                 std::memcpy(mappedData, vertexData, vertexDataSize);
+                if (indexDataSize > 0 && indexData != nullptr) {
+                    std::memcpy(static_cast<uint8_t*>(mappedData) + vertexDataSize, indexData, indexDataSize);
+                }
                 vkUnmapMemory(device_, gpuData.vertexStorageMemory);
                 
-                std::cout << "✅ Vertex buffer created with " << vertexDataSize << " bytes" << std::endl;
+                std::cout << "✅ Traditional geometry buffer created with " << totalBufferSize << " bytes" << std::endl;
                 
                 // Store info for traditional rendering
                 gpuData.vertexCount = geomHeader.vertex_count;
-                gpuData.vertexStrideFloats = geomHeader.vertex_stride / sizeof(float);
+                gpuData.primitiveCount = geomHeader.index_count > 0
+                    ? geomHeader.index_count / 3
+                    : geomHeader.vertex_count / 3;
+                gpuData.vertexStrideFloats = geomHeader.vertex_stride / sizeof(uint32_t);
                 gpuData.indexOffset = vertexDataSize;  // Indices start after vertices
                 gpuData.indexCount = geomHeader.index_count;
                 gpuData.usesMeshShader = false;
@@ -1067,6 +1230,22 @@ namespace tremor::gfx {
                 if (allocResult != VK_SUCCESS) {
                     std::cerr << "⚠️  Warning: Failed to allocate descriptor set for traditional rendering" << std::endl;
                     // This is not critical for traditional rendering, so we continue
+                } else {
+                    VkDescriptorBufferInfo bufferDescInfo{};
+                    bufferDescInfo.buffer = gpuData.vertexStorageBuffer;
+                    bufferDescInfo.offset = 0;
+                    bufferDescInfo.range = totalBufferSize;
+
+                    VkWriteDescriptorSet descriptorWrite{};
+                    descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    descriptorWrite.dstSet = gpuData.descriptorSet;
+                    descriptorWrite.dstBinding = 0;
+                    descriptorWrite.dstArrayElement = 0;
+                    descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    descriptorWrite.descriptorCount = 1;
+                    descriptorWrite.pBufferInfo = &bufferDescInfo;
+
+                    vkUpdateDescriptorSets(device_, 1, &descriptorWrite, 0, nullptr);
                 }
             }
 
@@ -1077,6 +1256,7 @@ namespace tremor::gfx {
 
         // Extract and create shader modules from Taffy asset
         bool TaffyOverlayManager::extractShadersFromAsset(const Taffy::Asset& asset,
+            VkShaderModule& vertexShaderModule,
             VkShaderModule& meshShaderModule,
             VkShaderModule& fragmentShaderModule) {
             std::cout << "🔍 Extracting shaders from Taffy asset..." << std::endl;
@@ -1102,7 +1282,7 @@ namespace tremor::gfx {
 
             // Process each shader
             for (uint32_t i = 0; i < header.shader_count; ++i) {
-                if (!extractAndCompileShader(*shaderData, i, meshShaderModule, fragmentShaderModule)) {
+                if (!extractAndCompileShader(*shaderData, i, vertexShaderModule, meshShaderModule, fragmentShaderModule)) {
                     std::cerr << "❌ Failed to extract shader " << i << std::endl;
                     return false;
                 }
@@ -1175,6 +1355,7 @@ namespace tremor::gfx {
 
         bool TaffyOverlayManager::extractAndCompileShader(const std::vector<uint8_t>& shader_data,
             uint32_t shader_index,
+            VkShaderModule& vertexShaderModule,
             VkShaderModule& meshShaderModule,
             VkShaderModule& fragmentShaderModule) {
             std::cout << "  🔍 Extracting shader " << shader_index << ":" << std::endl;
@@ -1245,7 +1426,11 @@ namespace tremor::gfx {
             std::cout << "    ✅ Shader extracted and compiled successfully!" << std::endl;
 
             // Store the shader module based on stage
-            if (shader_info.stage == Taffy::ShaderChunk::Shader::ShaderStage::MeshShader) {
+            if (shader_info.stage == Taffy::ShaderChunk::Shader::ShaderStage::Vertex) {
+                vertexShaderModule = shaderModule;
+                std::cout << "      → Stored as vertex shader module" << std::endl;
+            }
+            else if (shader_info.stage == Taffy::ShaderChunk::Shader::ShaderStage::MeshShader) {
                 meshShaderModule = shaderModule;
                 std::cout << "      → Stored as mesh shader module" << std::endl;
             }
@@ -2355,10 +2540,19 @@ namespace tremor::gfx {
         throw std::runtime_error("Failed to find suitable memory type");
     }
 
+    namespace {
+        struct ClusterFallbackPushConstants {
+            glm::mat4 mvp{ 1.0f };
+            glm::vec4 baseColor{ 1.0f };
+        };
+    }
+
     // Implementation
     VulkanClusteredRenderer::VulkanClusteredRenderer(VkDevice device, VkPhysicalDevice physicalDevice,
         VkQueue graphicsQueue, uint32_t graphicsQueueFamily,
-        VkCommandPool commandPool, const ClusterConfig& config)
+        VkCommandPool commandPool, const ClusterConfig& config,
+        VkRenderPass renderPass, bool useDynamicRendering,
+        VkSampleCountFlagBits sampleCount)
         : m_device(device)
         , m_physicalDevice(physicalDevice)
         , m_graphicsQueue(graphicsQueue)
@@ -2366,6 +2560,9 @@ namespace tremor::gfx {
         , m_commandPool(commandPool)
         , m_config(config)
         , m_totalClusters(config.xSlices* config.ySlices* config.zSlices)
+        , m_renderPass(renderPass)
+        , m_useDynamicRendering(useDynamicRendering)
+        , m_sampleCount(sampleCount)
     {
         //Logger::get().info("Creating VulkanClusteredRenderer with {} clusters ({}x{}x{})",
         //    m_totalClusters, config.xSlices, config.ySlices, config.zSlices);
@@ -2471,17 +2668,23 @@ namespace tremor::gfx {
         try {
             // Create GPU buffers
             if (!createMeshBuffers()) {
-                //Logger::get().error("Failed to create mesh buffers");
+                Logger::get().error("VulkanClusteredRenderer: failed to create mesh buffers");
                 return false;
             }
 
             // Create default textures
             if (!createDefaultTextures()) {
-                //Logger::get().error("Failed to create default textures");
+                Logger::get().error("VulkanClusteredRenderer: failed to create default textures");
                 return false;
             }
 
             createClusterGrid();
+
+            m_meshShaderSupported = supportsMeshShaderPath();
+            if (!createFallbackPipeline()) {
+                Logger::get().error("VulkanClusteredRenderer: failed to create fallback pipeline");
+                return false;
+            }
             
 
             // Create default material
@@ -2491,9 +2694,149 @@ namespace tremor::gfx {
             return true;
         }
         catch (const std::exception& e) {
-            //Logger::get().error("Exception during VulkanClusteredRenderer initialization: {}", e.what());
+            Logger::get().error("Exception during VulkanClusteredRenderer initialization: {}", e.what());
             return false;
         }
+    }
+
+    bool VulkanClusteredRenderer::supportsMeshShaderPath() const {
+        return vkGetDeviceProcAddr(m_device, "vkCmdDrawMeshTasksEXT") != nullptr;
+    }
+
+    bool VulkanClusteredRenderer::createFallbackPipeline() {
+        m_fallbackVertexShader = ShaderModule::compileFromFile(m_device, "shaders/cluster_fallback.vert");
+        m_fallbackFragmentShader = ShaderModule::compileFromFile(m_device, "shaders/cluster_fallback.frag");
+        if (!m_fallbackVertexShader || !m_fallbackFragmentShader) {
+            Logger::get().error("Failed to load clustered fallback shaders from relative path 'shaders/'");
+            return false;
+        }
+
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = sizeof(ClusterFallbackPushConstants);
+
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        if (vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
+            return false;
+        }
+        m_fallbackPipelineLayout = std::make_unique<PipelineLayoutResource>(m_device, pipelineLayout);
+
+        VkVertexInputBindingDescription bindingDescription{};
+        bindingDescription.binding = 0;
+        bindingDescription.stride = sizeof(MeshVertex);
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+        std::array<VkVertexInputAttributeDescription, 5> attributeDescriptions{};
+        attributeDescriptions[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<uint32_t>(offsetof(MeshVertex, position)) };
+        attributeDescriptions[1] = { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, static_cast<uint32_t>(offsetof(MeshVertex, normal)) };
+        attributeDescriptions[2] = { 2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, static_cast<uint32_t>(offsetof(MeshVertex, color)) };
+        attributeDescriptions[3] = { 3, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<uint32_t>(offsetof(MeshVertex, texCoord)) };
+        attributeDescriptions[4] = { 4, 0, VK_FORMAT_R32G32B32A32_SFLOAT, static_cast<uint32_t>(offsetof(MeshVertex, tangent)) };
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo rasterizer{};
+        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer.depthClampEnable = VK_FALSE;
+        rasterizer.rasterizerDiscardEnable = VK_FALSE;
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.lineWidth = 1.0f;
+        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterizer.depthBiasEnable = VK_FALSE;
+
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.sampleShadingEnable = VK_FALSE;
+        multisampling.rasterizationSamples = m_sampleCount;
+
+        VkPipelineDepthStencilStateCreateInfo depthStencil{};
+        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depthStencil.depthTestEnable = VK_TRUE;
+        depthStencil.depthWriteEnable = VK_TRUE;
+        depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+        depthStencil.depthBoundsTestEnable = VK_FALSE;
+        depthStencil.stencilTestEnable = VK_FALSE;
+
+        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachment.blendEnable = VK_FALSE;
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.logicOpEnable = VK_FALSE;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &colorBlendAttachment;
+
+        std::array<VkDynamicState, 2> dynamicStates = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR
+        };
+
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+        dynamicState.pDynamicStates = dynamicStates.data();
+
+        std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
+            m_fallbackVertexShader->createShaderStageInfo(),
+            m_fallbackFragmentShader->createShaderStageInfo()
+        };
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+        pipelineInfo.pStages = shaderStages.data();
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pDepthStencilState = &depthStencil;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = m_fallbackPipelineLayout->handle();
+        pipelineInfo.renderPass = m_renderPass;
+        pipelineInfo.subpass = 0;
+
+        VkPipelineRenderingCreateInfo renderingInfo{};
+        if (m_useDynamicRendering) {
+            renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+            renderingInfo.colorAttachmentCount = 1;
+            renderingInfo.pColorAttachmentFormats = m_colorFormat;
+            renderingInfo.depthAttachmentFormat = *m_depthFormat;
+            pipelineInfo.pNext = &renderingInfo;
+        }
+
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
+            return false;
+        }
+
+        m_fallbackPipeline = std::make_unique<PipelineResource>(m_device, pipeline);
+        return true;
     }
 
     void VulkanClusteredRenderer::shutdown() {
@@ -2591,6 +2934,20 @@ namespace tremor::gfx {
         //renderDebug(cmdBuffer, camera);
 
         updateUniformBuffers(camera);
+
+        const bool useMeshShaderPath =
+            m_meshShaderSupported &&
+            m_pipeline &&
+            m_pipelineLayout &&
+            m_descriptorSet &&
+            vkGetDeviceProcAddr(m_device, "vkCmdDrawMeshTasksEXT") != nullptr;
+
+        m_lastRenderUsedMeshShaderPath = useMeshShaderPath;
+
+        if (!useMeshShaderPath) {
+            renderFallback(cmdBuffer, camera);
+            return;
+        }
 
         //Logger::get().info("C++ EnhancedClusterUBO size: {}", sizeof(EnhancedClusterUBO));
         //Logger::get().info("C++ time offset: {}", offsetof(EnhancedClusterUBO, time));
@@ -2746,6 +3103,75 @@ namespace tremor::gfx {
 
     }
 
+    void VulkanClusteredRenderer::renderFallback(VkCommandBuffer cmdBuffer, Camera* camera) {
+        if (!camera || !m_fallbackPipeline || !m_fallbackPipelineLayout || !m_fallbackVertexBuffer || !m_meshIndexBuffer) {
+            return;
+        }
+
+        if (m_visibleObjects.empty()) {
+            return;
+        }
+
+        VkExtent2D extent = camera->extent;
+
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(extent.width);
+        viewport.height = static_cast<float>(extent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(cmdBuffer, 0, 1, &viewport);
+
+        VkRect2D scissor{};
+        scissor.offset = { 0, 0 };
+        scissor.extent = extent;
+        vkCmdSetScissor(cmdBuffer, 0, 1, &scissor);
+
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_fallbackPipeline->handle());
+
+        VkBuffer vertexBuffers[] = { m_fallbackVertexBuffer->getBuffer() };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(cmdBuffer, 0, 1, vertexBuffers, offsets);
+        vkCmdBindIndexBuffer(cmdBuffer, m_meshIndexBuffer->getBuffer(), 0, VK_INDEX_TYPE_UINT32);
+
+        const glm::mat4 viewProj = camera->getViewProjectionMatrix();
+        for (const auto& object : m_visibleObjects) {
+            if (object.meshID >= m_meshInfos.size()) {
+                continue;
+            }
+
+            const auto& meshInfo = m_meshInfos[object.meshID];
+            if (meshInfo.indexCount == 0) {
+                continue;
+            }
+
+            ClusterFallbackPushConstants pushConstants{};
+            pushConstants.mvp = viewProj * object.transform;
+            if (object.materialID < m_materials.size()) {
+                pushConstants.baseColor = m_materials[object.materialID].baseColor;
+            }
+
+            vkCmdPushConstants(
+                cmdBuffer,
+                m_fallbackPipelineLayout->handle(),
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0,
+                sizeof(pushConstants),
+                &pushConstants
+            );
+
+            vkCmdDrawIndexed(
+                cmdBuffer,
+                meshInfo.indexCount,
+                1,
+                meshInfo.indexOffset,
+                static_cast<int32_t>(meshInfo.vertexOffset),
+                0
+            );
+        }
+    }
+
     // Private implementation methods...
 
     bool VulkanClusteredRenderer::createMeshBuffers() {
@@ -2768,9 +3194,15 @@ namespace tremor::gfx {
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
+            m_fallbackVertexBuffer = std::make_unique<Buffer>(
+                m_device, m_physicalDevice, VERTEX_BUFFER_SIZE,
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
             m_meshIndexBuffer = std::make_unique<Buffer>(
                 m_device, m_physicalDevice, INDEX_BUFFER_SIZE,
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
@@ -6057,8 +6489,11 @@ namespace tremor::gfx {
             //if (m_taffyMeshShaderManager) {
             //}
 
-            // Render using clustered renderer
-            //m_clusteredRenderer->render(m_commandBuffers[currentFrame], &cam);
+            // Render the scene. The clustered renderer will choose mesh shaders when available
+            // and fall back to indexed draws on older hardware.
+            if (m_clusteredRenderer) {
+                m_clusteredRenderer->render(m_commandBuffers[currentFrame], &cam);
+            }
             
             // Removed runtime overlay manipulation to prevent modifying the asset
             // demonstrateOverlayControls();
@@ -6280,6 +6715,8 @@ namespace tremor::gfx {
         if (endFrameCount < 50) {
             //Logger::get().critical("endFrame() called, count {}", endFrameCount++);
         }
+
+            updateMeshShaderStatusLabel();
 
         			// Render text overlay
 			
@@ -6615,7 +7052,10 @@ namespace tremor::gfx {
                 graphicsQueue,        // Add this
                 vkDevice->graphicsQueueFamily(),  // Add this
                 m_commandPool->handle(),       // Add this - pass the command pool
-                clusterConfig
+                clusterConfig,
+                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
+                vkDevice->capabilities().dynamicRendering,
+                m_msaaSamples
             );
 
             if (!m_clusteredRenderer->initialize((Format)vkDevice.get()->colorFormat(), (Format)vkDevice.get()->depthFormat())) {
@@ -6722,6 +7162,12 @@ namespace tremor::gfx {
                 }
                 
                 m_uiRenderer->addLabel("NOT REAL GAMES",glm::vec2(24,36),0xFF0050FF);
+                m_meshShaderStatusLabelId = m_uiRenderer->addLabel(
+                    "Mesh Shaders: Off",
+                    glm::vec2(1020.0f, 36.0f),
+                    0xFF4040FF,
+                    0.7f
+                );
             }
 
             initializeOverlaySystem();
@@ -7037,9 +7483,9 @@ namespace tremor::gfx {
 
             VulkanDevice::DevicePreferences prefs;
             prefs.preferDiscreteGPU = true;
-            prefs.requireMeshShaders = true;  // Set based on your requirements
-            prefs.requireRayQuery = true;     // Set based on your requirements
-            prefs.requireSparseBinding = true; // Set based on your requirements
+            prefs.requireMeshShaders = false;
+            prefs.requireRayQuery = false;
+            prefs.requireSparseBinding = false;
 
 
             // Create device
@@ -7379,7 +7825,7 @@ namespace tremor::gfx {
         }
 
     void VulkanClusteredRenderer::updateMeshBuffers() {
-        if (!m_vertexBuffer || !m_meshIndexBuffer || !m_meshInfoBuffer) {
+        if (!m_vertexBuffer || !m_fallbackVertexBuffer || !m_meshIndexBuffer || !m_meshInfoBuffer) {
             //Logger::get().error("Mesh buffers not initialized");
             return;
         }
@@ -7440,6 +7886,13 @@ namespace tremor::gfx {
                 else {
                     //Logger::get().warning("Vertex buffer too small: need {}, have {}",
                     //    vertexSize, m_vertexBuffer->getSize());
+                }
+            }
+
+            if (!m_allVertices.empty()) {
+                VkDeviceSize fallbackVertexSize = m_allVertices.size() * sizeof(MeshVertex);
+                if (fallbackVertexSize <= m_fallbackVertexBuffer->getSize()) {
+                    m_fallbackVertexBuffer->update(m_allVertices.data(), fallbackVertexSize);
                 }
             }
 
@@ -7586,6 +8039,30 @@ namespace tremor::gfx {
             m_uiRenderer->setElementVisible(m_toggleOverlayButtonId, visible);
             m_uiRenderer->setElementVisible(m_modelEditorButtonId, visible);
             m_uiRenderer->setElementVisible(m_exitButtonId, visible);
+        }
+    }
+
+    void VulkanBackend::updateMeshShaderStatusLabel() {
+        if (!m_uiRenderer || m_meshShaderStatusLabelId == 0) {
+            return;
+        }
+
+        const bool meshShadersActive =
+            m_clusteredRenderer && m_clusteredRenderer->isMeshShaderPathActive();
+
+        m_uiRenderer->setElementText(
+            m_meshShaderStatusLabelId,
+            meshShadersActive ? "Mesh Shaders: On" : "Mesh Shaders: Off"
+        );
+        m_uiRenderer->setElementTextColor(
+            m_meshShaderStatusLabelId,
+            meshShadersActive ? 0x30FF60FF : 0xFF4040FF
+        );
+
+        if (vkSwapchain) {
+            const float width = static_cast<float>(vkSwapchain->extent().width);
+            const float labelX = std::max(20.0f, width - 260.0f);
+            m_uiRenderer->setElementPosition(m_meshShaderStatusLabelId, glm::vec2(labelX, 36.0f));
         }
     }
 

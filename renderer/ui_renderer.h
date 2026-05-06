@@ -143,6 +143,7 @@ namespace tremor::gfx {
         void setElementVisible(uint32_t id, bool visible);
         void setElementEnabled(uint32_t id, bool enabled);
         void setElementText(uint32_t id, const std::string& text);
+        void setElementTextColor(uint32_t id, uint32_t color);
         
         // Per-element transform controls
         void setElementTransform(uint32_t id, const glm::mat4& transform);

@@ -934,6 +934,24 @@ namespace tremor::gfx {
         }
     }
 
+    void UIRenderer::setElementTextColor(uint32_t id, uint32_t color) {
+        if (UIElement* elem = getElement(id)) {
+            if (elem->type == UIElementType::Label) {
+                UILabel* label = static_cast<UILabel*>(elem);
+                if (label->textColor != color) {
+                    label->textColor = color;
+                    m_textDirty = true;
+                }
+            } else if (elem->type == UIElementType::Button) {
+                UIButton* button = static_cast<UIButton*>(elem);
+                if (button->textColor != color) {
+                    button->textColor = color;
+                    m_textDirty = true;
+                }
+            }
+        }
+    }
+
 
     uint32_t UIRenderer::getElementColor(const UIElement* element) const {
         switch (element->state) {

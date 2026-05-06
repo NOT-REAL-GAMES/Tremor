@@ -5,7 +5,7 @@ Tremor is a modern game engine built on a reimagined foundation inspired by the 
 ## Prerequisites
 
 ### All Platforms
-- CMake 3.16 or higher
+- CMake 3.20 or higher
 - C++23 compatible compiler
 - Vulkan SDK
 - SDL2
@@ -13,7 +13,7 @@ Tremor is a modern game engine built on a reimagined foundation inspired by the 
 ### Platform-Specific Requirements
 
 #### Windows
-- Visual Studio 2022 with C++ desktop development
+- Visual Studio 2022 or newer with C++ desktop development
 - Vulkan SDK from https://vulkan.lunarg.com/
 - SDL2 (often included with Vulkan SDK in Third-Party folder)
 
@@ -43,27 +43,31 @@ make -j$(nproc)
 ### Windows (Command Line)
 ```cmd
 cd Tremor
-mkdir build
-cd build
-cmake -G "Visual Studio 17 2022" -A x64 ..
-cmake --build . --config Release
+build.bat
+```
+
+If you want to run CMake manually, use the generator that matches your installed Visual Studio:
+
+```cmd
+cmake -G "Visual Studio 18 2026" -A x64 -S . -B build-vs18
+cmake --build build-vs18 --config Release
 ```
 
 ### Windows (Visual Studio)
-1. Open the Tremor folder in Visual Studio 2022
+1. Open the Tremor folder in Visual Studio 2022 or newer
 2. VS will automatically detect CMakeLists.txt
 3. Select x64-Release or x64-Debug configuration
 4. Build → Build All
 
 ## Running
 
-The executable will be in `build/bin/`:
+The executable will be in your chosen build directory under `bin/`:
 ```bash
 # Linux
 ./build/bin/Tremor
 
-# Windows
-build\bin\Release\Tremor.exe
+# Windows example
+build-vs18\bin\Release\Tremor.exe
 ```
 
 ## Troubleshooting
