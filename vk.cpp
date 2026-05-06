@@ -15,7 +15,7 @@
 #include "taffy_audio_tools.h"
 #include <iomanip>
 
-
+static bool meshShadersActive = false;
 
 // Helper function to copy buffer data
 void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
@@ -533,6 +533,7 @@ namespace tremor::gfx {
                 return nullptr;
             }
 
+
             // Store in cache
             pipeline_cache_[asset_path] = pipelineInfo;
             return &pipeline_cache_[asset_path];
@@ -866,6 +867,8 @@ namespace tremor::gfx {
                 if (!vkCmdDrawMeshTasksEXT) {
                     return;
                 }
+
+                meshShadersActive = true;
 
                 vkCmdPushConstants(
                     cmd,
@@ -2942,7 +2945,7 @@ namespace tremor::gfx {
             m_descriptorSet &&
             vkGetDeviceProcAddr(m_device, "vkCmdDrawMeshTasksEXT") != nullptr;
 
-        m_lastRenderUsedMeshShaderPath = useMeshShaderPath;
+        m_lastRenderUsedMeshShaderPath = false;
 
         if (!useMeshShaderPath) {
             renderFallback(cmdBuffer, camera);
@@ -7483,7 +7486,7 @@ namespace tremor::gfx {
 
             VulkanDevice::DevicePreferences prefs;
             prefs.preferDiscreteGPU = true;
-            prefs.requireMeshShaders = false;
+            prefs.requireMeshShaders = true;
             prefs.requireRayQuery = false;
             prefs.requireSparseBinding = false;
 
@@ -8046,9 +8049,6 @@ namespace tremor::gfx {
         if (!m_uiRenderer || m_meshShaderStatusLabelId == 0) {
             return;
         }
-
-        const bool meshShadersActive =
-            m_clusteredRenderer && m_clusteredRenderer->isMeshShaderPathActive();
 
         m_uiRenderer->setElementText(
             m_meshShaderStatusLabelId,
