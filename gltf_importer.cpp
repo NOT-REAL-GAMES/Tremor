@@ -61,7 +61,7 @@ bool GLTFImporter::convertGLTFToTaffy(const std::string& gltfPath, const std::fi
 
     // Save the Taffy asset
     std::cout << "💾 Saving Taffy asset: " << outputPath << std::endl;
-    if (taffyAsset.save_to_file(outputPath)) {
+    if (taffyAsset.save_to_file(outputPath.generic_string())) {
         std::cout << "✅ Successfully converted GLTF to Taffy asset!" << std::endl;
         return true;
     } else {
