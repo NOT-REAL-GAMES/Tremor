@@ -715,7 +715,7 @@ namespace tremor::gfx {
          * - Binding pipeline and resources
          * - Issuing draw commands
          */
-        void renderMeshAsset(const std::string& asset_path, VkCommandBuffer cmd, const glm::mat4& viewProj);
+        void renderMeshAsset(const std::string& asset_path, VkCommandBuffer cmd, const glm::mat4& viewProj,const Vec3Q& renderOrigin = Vec3Q(), const Vec3Q& objectPosition = Vec3Q());
 
         // Asset loading and overlay management
         /**
@@ -840,7 +840,7 @@ namespace tremor::gfx {
          * @brief Internal render method with explicit pipeline and GPU data
          */
         void renderMeshAssetInternal(VkCommandBuffer cmd, VkPipeline meshPipeline,
-            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj);
+            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj, const glm::mat4& model);
 
         /**
          * @brief Upload a Taffy asset to GPU memory

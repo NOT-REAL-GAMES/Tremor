@@ -371,11 +371,11 @@ public:
 
         // Create a camera that follows the player from behind and above
         glm::vec3 cameraOffset(0, -10, 12);  // Behind and above the player
-        glm::vec3 cameraPos = playerPos + cameraOffset;
-        glm::vec3 lookTarget = playerPos + glm::vec3(0, 2, 0); // Look slightly above player
+        Vec3Q cameraPos = Vec3Q::fromFloat(playerPos);
+        glm::vec3 lookTarget = glm::vec3(0, 2, 0); // Look slightly above player
 
         glm::mat4 view = glm::lookAt(
-            cameraPos,      // Camera position (follows player)
+            cameraOffset,      // Camera position (follows player)
             lookTarget,     // Look at player
             glm::vec3(0, 1, 0)  // Up vector
         );
@@ -397,55 +397,34 @@ public:
                    cameraPos.x, cameraPos.y, cameraPos.z);*/
         }
 
-        // Render player entities (Blue/Green cube)
+        // Render player entities
         world.each([&](flecs::entity entity, const Position& pos, const Player& playerTag, const MeshRenderer& mesh) {
-            glm::vec3 worldPos = pos.getFloat();
-
-            // Create transform matrix for player (normal size)
-            glm::mat4 transform = glm::scale(glm::translate(glm::mat4(1.0f), worldPos),glm::vec3(1.0f,2.0f,1.0f));
-            glm::mat4 mvp = viewProj * transform;
-
-            // Player rendering (debug output moved above)
-
-            // Render player as cube
-            overlayManager->renderMeshAsset("assets/cube.taf", cmd, mvp);
+            glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
+            glm::mat4 transform = glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(1.0f, 2.0f, 1.0f));
+            overlayManager->renderMeshAsset("assets/cube.taf", cmd, viewProj * transform);
         });
 
-        // Render enemy entities (Red cubes)
+        // Render enemy entities
         world.each([&](flecs::entity entity, const Position& pos, const Enemy& enemyTag, const MeshRenderer& mesh) {
-            glm::vec3 worldPos = pos.getFloat();
-
-            // Create transform matrix for enemies (slightly larger)
-            glm::mat4 transform = glm::translate(glm::mat4(1.0f), worldPos);
-            transform = glm::scale(transform, glm::vec3(1.2f)); // 20% larger
-            glm::mat4 mvp = viewProj * transform;
-
-            overlayManager->renderMeshAsset("assets/cube.taf", cmd, mvp);
+            glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
+            glm::mat4 transform = glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(1.2f));
+            overlayManager->renderMeshAsset("assets/sphere.taf", cmd, viewProj * transform);
         });
 
-        // Render projectiles (Small yellow cubes)
+        // Render projectiles
         world.each([&](flecs::entity entity, const Position& pos, const Projectile& proj, const MeshRenderer& mesh) {
-            glm::vec3 worldPos = pos.getFloat();
-
-            glm::mat4 transform = glm::translate(glm::mat4(1.0f), worldPos);
-            // Make projectiles much smaller
-            transform = glm::scale(transform, glm::vec3(0.2f));
-            glm::mat4 mvp = viewProj * transform;
-
-            overlayManager->renderMeshAsset("assets/cube.taf", cmd, mvp);
+            glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
+            glm::mat4 transform = glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(0.2f));
+            overlayManager->renderMeshAsset("assets/cube.taf", cmd, viewProj * transform);
         });
 
-        // Render XP orbs (Medium purple cubes)
+        // Render XP orbs
         world.each([&](flecs::entity entity, const Position& pos, const RedOrb& orb, const MeshRenderer& mesh) {
-            glm::vec3 worldPos = pos.getFloat();
-
+            glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
             glm::mat4 transform = glm::translate(glm::mat4(1.0f), worldPos);
-            // Make orbs medium sized and elevated
+            transform = glm::translate(transform, glm::vec3(0, 0.5f, 0));
             transform = glm::scale(transform, glm::vec3(0.4f));
-            transform = glm::translate(transform, glm::vec3(0, 0.5f, 0)); // Float above ground
-            glm::mat4 mvp = viewProj * transform;
-
-            overlayManager->renderMeshAsset("assets/cube.taf", cmd, mvp);
+            overlayManager->renderMeshAsset("assets/cube.taf", cmd, viewProj * transform);
         });
     }
 

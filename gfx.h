@@ -222,22 +222,20 @@ namespace tremor::gfx {
     // Camera class
     class Camera {
     public:
-        struct WorldPosition {
-            glm::i64vec3 integer = glm::i64vec3(0);
-            glm::vec3 fractional = glm::vec3(0.0f);
+        Vec3Q worldPosition;
 
-            glm::dvec3 getCombined() const {
-                return glm::dvec3(integer) + glm::dvec3(fractional);
-            }
-        };
+        glm::vec3 getRenderPosition(const Vec3Q& renderOrigin) const {
+            return worldPosition.relativeTo(renderOrigin);
+        }
+
 
         Camera();
         Camera(float fovDegrees, float aspectRatio, float nearZ, float farZ);
 
-        void lookAt(const WorldPosition& target, const glm::vec3& up);
+        void lookAt(const Vec3Q& target, const glm::vec3& up);
         glm::mat4 calculateViewMatrix() const;
         // Position and orientation
-        void setPosition(const WorldPosition& position);
+        void setPosition(const Vec3Q& position);
         void setPosition(const glm::vec3& position);
         void setRotation(const glm::quat& rotation);
         void setRotation(float pitch, float yaw, float roll);
@@ -254,7 +252,7 @@ namespace tremor::gfx {
         void lookAt(const glm::vec3& target, const glm::vec3& up = glm::vec3(0.0f, 1.0f, 0.0f));
 
         // Getters
-        const WorldPosition& getPosition() const { return m_position; }
+        const Vec3Q& getPosition() const { return m_position; }
         glm::vec3 getLocalPosition() const;
         glm::quat getRotation() const { return m_rotation; }
         float getFovDegrees() const { return glm::degrees(m_fovRadians); }
@@ -286,7 +284,7 @@ namespace tremor::gfx {
         VkExtent2D extent = { 1920, 1080 };
 
     private:
-        WorldPosition m_position;
+        Vec3Q m_position;
         glm::quat m_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
         float m_fovRadians = glm::radians(60.0f);
         float m_aspectRatio = 16.0f / 9.0f;
@@ -304,7 +302,7 @@ namespace tremor::gfx {
         void updateViewMatrix() const;
         void updateProjectionMatrix() const;
         void updateViewProjectionMatrix() const;
-        void normalizePosition();
+        //void normalizePosition();
     };
 
     // Octree implementation
@@ -480,8 +478,7 @@ namespace tremor::gfx {
         , m_vpDirty(true) {
 
         // Default position at origin
-        m_position.integer = glm::i64vec3(0);
-        m_position.fractional = glm::vec3(0.0f);
+        worldPosition = Vec3Q();
 
         // Default orientation
         m_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
@@ -497,9 +494,8 @@ namespace tremor::gfx {
         , m_vpDirty(true) {
 
         // Default position at origin
-        m_position.integer = glm::i64vec3(0);
-        m_position.fractional = glm::vec3(0.0f);
-
+        worldPosition = Vec3Q();
+        
         // Default orientation
         m_rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     }
@@ -507,9 +503,7 @@ namespace tremor::gfx {
     inline void Camera::setPosition(const glm::vec3& position) {
         //Logger::get().info("Camera::setPosition: position={},{},{}",
         //    position.x, position.y, position.z);
-        m_position.integer = glm::i64vec3(0);
-        m_position.fractional = position;
-        normalizePosition();
+        worldPosition = Vec3Q::fromFloat(position);
         m_viewDirty = true;
     }
 
@@ -528,19 +522,17 @@ namespace tremor::gfx {
         glm::vec3 worldDelta = m_rotation * delta;
 
         // Add to fractional part
-        m_position.fractional += worldDelta;
+        worldPosition += Vec3Q::fromFloat(worldDelta);
 
         // Handle potential overflow/underflow
-        normalizePosition();
         m_viewDirty = true;
     }
 
     inline void Camera::moveWorld(const glm::vec3& delta) {
         // Add directly to fractional part
-        m_position.fractional += delta;
+        worldPosition += Vec3Q::fromFloat(delta);
 
         // Handle potential overflow/underflow
-        normalizePosition();
         m_viewDirty = true;
     }
 
@@ -581,16 +573,16 @@ namespace tremor::gfx {
             pos.x, pos.y, pos.z, target.x, target.y, target.z);*/
     }
 
-    inline void Camera::lookAt(const WorldPosition& target, const glm::vec3& up) {
+    inline void Camera::lookAt(const Vec3Q& target, const glm::vec3& up) {
         // Calculate world-space vector from camera to target
-        glm::dvec3 targetPos = target.getCombined();
-        glm::dvec3 cameraPos = m_position.getCombined();
+        Vec3Q targetPos = target;
+        Vec3Q cameraPos = worldPosition;
 
         // Convert to float (for local space operations)
-        glm::vec3 direction = glm::normalize(glm::vec3(targetPos - cameraPos));
+        glm::vec3 forward = glm::normalize(target.relativeTo(worldPosition));
 
         // Create rotation quaternion
-        m_rotation = glm::quatLookAt(direction, up);
+        m_rotation = glm::quatLookAt(forward, up);
         m_viewDirty = true;
     }
 
@@ -598,22 +590,8 @@ namespace tremor::gfx {
         // Convert 64-bit position to local-space float position
         // This is a simplified version - a real implementation would
         // have to consider the reference point for local space
-        glm::vec3 combinedPos;
+        return worldPosition.toFloat();
 
-        if (m_position.integer == glm::i64vec3(0)) {
-            // If integer part is zero, use fractional directly
-            combinedPos = m_position.fractional;
-        }
-        else {
-            // Otherwise use a local-space approximation
-            // (This could be more sophisticated based on a reference point)
-            combinedPos = glm::vec3(
-                static_cast<float>(m_position.integer.x) + m_position.fractional.x,
-                static_cast<float>(m_position.integer.y) + m_position.fractional.y,
-                static_cast<float>(m_position.integer.z) + m_position.fractional.z
-            );
-        }
-        return combinedPos;
     }
 
     inline glm::vec3 Camera::getForward() const {
@@ -702,46 +680,46 @@ namespace tremor::gfx {
     }
 
 
-    inline void Camera::normalizePosition() {
+    //inline void Camera::normalizePosition() {
         // Handle overflow/underflow in fractional part
         // If any component is >= 1.0 or < 0.0, adjust integer part
 
         // X component
-        if (m_position.fractional.x >= 1.0f) {
-            int64_t increment = static_cast<int64_t>(m_position.fractional.x);
-            m_position.integer.x += increment;
-            m_position.fractional.x -= static_cast<float>(increment);
-        }
-        else if (m_position.fractional.x < 0.0f) {
-            int64_t decrement = static_cast<int64_t>(-m_position.fractional.x) + 1;
-            m_position.integer.x -= decrement;
-            m_position.fractional.x += static_cast<float>(decrement);
-        }
-
-        // Y component
-        if (m_position.fractional.y >= 1.0f) {
-            int64_t increment = static_cast<int64_t>(m_position.fractional.y);
-            m_position.integer.y += increment;
-            m_position.fractional.y -= static_cast<float>(increment);
-        }
-        else if (m_position.fractional.y < 0.0f) {
-            int64_t decrement = static_cast<int64_t>(-m_position.fractional.y) + 1;
-            m_position.integer.y -= decrement;
-            m_position.fractional.y += static_cast<float>(decrement);
-        }
-
-        // Z component
-        if (m_position.fractional.z >= 1.0f) {
-            int64_t increment = static_cast<int64_t>(m_position.fractional.z);
-            m_position.integer.z += increment;
-            m_position.fractional.z -= static_cast<float>(increment);
-        }
-        else if (m_position.fractional.z < 0.0f) {
-            int64_t decrement = static_cast<int64_t>(-m_position.fractional.z) + 1;
-            m_position.integer.z -= decrement;
-            m_position.fractional.z += static_cast<float>(decrement);
-        }
-    }
+    //    if (m_position.fractional.x >= 1.0f) {
+    //        int64_t increment = static_cast<int64_t>(m_position.fractional.x);
+    //       m_position.integer.x += increment;
+    //        m_position.fractional.x -= static_cast<float>(increment);
+    //    }
+    //    else if (m_position.fractional.x < 0.0f) {
+    //        int64_t decrement = static_cast<int64_t>(-m_position.fractional.x) + 1;
+    //        m_position.integer.x -= decrement;
+    //        m_position.fractional.x += static_cast<float>(decrement);
+    //    }
+    //
+    //    // Y component
+    //    if (m_position.fractional.y >= 1.0f) {
+    //        int64_t increment = static_cast<int64_t>(m_position.fractional.y);
+    //        m_position.integer.y += increment;
+    //        m_position.fractional.y -= static_cast<float>(increment);
+    //    }
+    //    else if (m_position.fractional.y < 0.0f) {
+    //        int64_t decrement = static_cast<int64_t>(-m_position.fractional.y) + 1;
+    //        m_position.integer.y -= decrement;
+    //        m_position.fractional.y += static_cast<float>(decrement);
+    //    }
+    //
+    //    // Z component
+    //    if (m_position.fractional.z >= 1.0f) {
+    //        int64_t increment = static_cast<int64_t>(m_position.fractional.z);
+    //        m_position.integer.z += increment;
+    //        m_position.fractional.z -= static_cast<float>(increment);
+    //    }
+    //    else if (m_position.fractional.z < 0.0f) {
+    //        int64_t decrement = static_cast<int64_t>(-m_position.fractional.z) + 1;
+    //       m_position.integer.z -= decrement;
+    //        m_position.fractional.z += static_cast<float>(decrement);
+    //    }
+    //}
 
     inline Frustum Camera::getViewFrustum() {
         Frustum frustum;

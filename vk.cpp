@@ -15,6 +15,8 @@
 #include "taffy_audio_tools.h"
 #include <iomanip>
 
+
+
 // Helper function to copy buffer data
 void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
     VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
@@ -166,10 +168,18 @@ namespace tremor::gfx {
         }
 
         // Simplified render method - just pass asset path and command buffer
-        void TaffyOverlayManager::renderMeshAsset(const std::string& asset_path, VkCommandBuffer cmd, const glm::mat4& viewProj) {
+        void TaffyOverlayManager::renderMeshAsset(
+            const std::string& asset_path,
+            VkCommandBuffer cmd,
+            const glm::mat4& viewProj,
+            const Vec3Q& renderOrigin,
+            const Vec3Q& objectPosition) {
             // Extract camera position from view matrix (inverse of last column)
-            glm::vec3 camPos = -glm::vec3(viewProj[3]);
             
+            glm::vec3 renderPos = objectPosition.relativeTo(renderOrigin);
+
+            glm::mat4 model = glm::translate(glm::mat4(1.0f), renderPos);
+
             //std::cout << "\n=== renderMeshAsset called for: " << asset_path << " ===" << std::endl;
             //std::cout << "Camera position from viewProj: (" << camPos.x << ", " << camPos.y << ", " << camPos.z << ")" << std::endl;
             
@@ -196,7 +206,7 @@ namespace tremor::gfx {
             const MeshAssetGPUData& gpuData = gpuDataIt->second;
 
             // Now render using the cached pipeline and GPU data
-            renderMeshAssetInternal(cmd, pipeline->pipeline, pipeline->layout, gpuData, viewProj);
+            renderMeshAssetInternal(cmd, pipeline->pipeline, pipeline->layout, gpuData, viewProj, model);
         }
 
         // Asset loading and management
@@ -656,7 +666,7 @@ namespace tremor::gfx {
         }
 
         void TaffyOverlayManager::renderMeshAssetInternal(VkCommandBuffer cmd, VkPipeline meshPipeline,
-            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj) {
+            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj, const glm::mat4& model) {
             if (!gpuData.usesMeshShader) {
                 std::cerr << "⚠️  Asset doesn't use mesh shaders!" << std::endl;
                 return;
@@ -695,7 +705,7 @@ namespace tremor::gfx {
 
             // Set push constants
             MeshShaderPushConstants pushConstants{};
-            pushConstants.mvp = viewProj;  // Use the view-projection matrix directly
+            pushConstants.mvp = viewProj * model;  // Use the view-projection matrix directly
             pushConstants.vertex_count = gpuData.vertexCount;
             pushConstants.primitive_count = gpuData.primitiveCount;
             pushConstants.vertex_stride_floats = gpuData.vertexStrideFloats;
@@ -730,7 +740,7 @@ namespace tremor::gfx {
                 uint32_t overlay_data_offset;
             } meshPushData;
             
-            meshPushData.mvp = viewProj;
+            meshPushData.mvp = viewProj * model;
             meshPushData.vertex_count = gpuData.vertexCount;
             meshPushData.primitive_count = gpuData.primitiveCount;
             meshPushData.vertex_stride_floats = gpuData.vertexStrideFloats;
@@ -741,7 +751,7 @@ namespace tremor::gfx {
             vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_MESH_BIT_EXT,
                 0, sizeof(meshPushData), &meshPushData);
             
-            vkCmdDrawMeshTasksEXT(cmd, 3, 1, 1);  // 1x1x1 workgroups
+            vkCmdDrawMeshTasksEXT(cmd, 8, 1, 1);  // 1x1x1 workgroups
         }
 
         TaffyOverlayManager::MeshAssetGPUData TaffyOverlayManager::uploadTaffyAsset(const Taffy::Asset& asset) {
@@ -5882,7 +5892,7 @@ namespace tremor::gfx {
             cam.setClipPlanes(0.01f,100000000000.0f);
             // Camera orbiting at a reasonable distance for a 0.5 unit cube
             float time = std::chrono::steady_clock::now().time_since_epoch().count()/1000000000.0f;
-            cam.setPosition({sin(time)*10.0f, 2.0f, cos(time)*10.0f});
+            cam.setPosition(glm::vec3(sin(time)*10.0f, 2.0f, cos(time)*10.0f));
             cam.lookAt({0.0f,0.0f,0.0f});  // Look at origin where the cube is centered
 
             // Add camera debug info
@@ -6721,6 +6731,9 @@ namespace tremor::gfx {
 			m_overlayManager->reloadAsset("assets/cube.taf");
 			m_overlayManager->load_master_asset("assets/cube.taf");
 
+            m_overlayManager->reloadAsset("assets/sphere.taf");
+			m_overlayManager->load_master_asset("assets/sphere.taf");
+
             // Create enhanced content
 
             return true;
@@ -7508,7 +7521,7 @@ namespace tremor::gfx {
             ubo.projMatrix = camera->getProjectionMatrix();
             ubo.invViewMatrix = glm::inverse(ubo.viewMatrix);
             ubo.invProjMatrix = glm::inverse(ubo.projMatrix);
-            ubo.cameraPos = glm::vec4(camera->getLocalPosition(), 1.0f);
+
             ubo.clusterDimensions = glm::uvec4(m_config.xSlices, m_config.ySlices, m_config.zSlices, 0);
             ubo.zPlanes = glm::vec4(m_config.nearPlane, m_config.farPlane, static_cast<float>(m_config.zSlices), 0.0f);
 
@@ -7533,11 +7546,17 @@ namespace tremor::gfx {
             ubo.deltaTime = 1.0f / 1000.0f; // You should track real delta time
             ubo.flags = 0; // Debug flags, etc.
 
-            m_uniformBuffer->update(&ubo, sizeof(ubo));
 
-            glm::vec3 camPos = camera->getPosition().fractional;
-            glm::vec3 camForward = camera->getForward();
-            glm::mat4 view = camera->getViewMatrix();
+            Vec3Q renderOrigin = camera->worldPosition;
+            ubo.cameraPos = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+                        
+            glm::mat4 view = glm::lookAt(
+                glm::vec3(0.0f),
+                glm::vec3(0.0f) + camera->getForward(),
+                camera->getUp()
+            );
+
+
             glm::mat4 proj = camera->getProjectionMatrix();
 
             //Logger::get().info("Camera Debug:");
@@ -7554,6 +7573,8 @@ namespace tremor::gfx {
             size_t requiredSize = sizeof(RenderableObject) * ubo.numObjects;
             size_t actualSize = m_objectBuffer->getSize();
             //Logger::get().info("Required: {} bytes, Actual: {} bytes", requiredSize, actualSize);
+            
+            m_uniformBuffer->update(&ubo, sizeof(ubo));
         }
         catch (const std::exception& e) {
             //Logger::get().error("Exception in updateUniformBuffers: {}", e.what());
