@@ -201,6 +201,10 @@ public:
         Logger::get().critical("Creating RenderBackend...");
         rb = tremor::gfx::RenderBackend::create(window);
         Logger::get().critical("RenderBackend created: {}", (void*)rb.get());
+        if (!rb) {
+            Logger::get().critical("RenderBackend initialization failed. Check that runtime shaders and assets were copied beside the executable.");
+            throw std::runtime_error("RenderBackend initialization failed");
+        }
 
         // Initialize DMC Survivors game
         Logger::get().info("Initializing DMC Survivors game...");
@@ -290,6 +294,11 @@ public:
   
     bool Loop() {
 #if defined(USING_VULKAN)
+        if (!rb) {
+            Logger::get().critical("RenderBackend is null in Engine::Loop");
+            return false;
+        }
+
         static int loopCount = 0;
 
         // Calculate frame time

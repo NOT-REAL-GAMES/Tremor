@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 4.3)
+cmake_minimum_required(VERSION 3.20)
 project(Tremor VERSION 0.1.0 LANGUAGES C CXX)
 
 # Set C++ standard
@@ -22,8 +22,11 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-std=c++23>)
 endif()
 
-# Add custom module path for finding packages
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
+# Add custom module paths for finding packages
+list(APPEND CMAKE_MODULE_PATH
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../cmake"
+)
 message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
 
 # Check for Vulkan SDK
@@ -165,16 +168,22 @@ endif()
 # Find required packages
 find_package(Vulkan QUIET)
 if(NOT Vulkan_FOUND)
-    # Try our alternative finder
-    include(FindVulkanAlt)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindVulkanAlt.cmake")
+        include(FindVulkanAlt)
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/FindVulkanAlt.cmake")
+        include(FindVulkanAlt)
+    endif()
 endif()
 if(NOT Vulkan_FOUND)
-    message(FATAL_ERROR "Vulkan not found! Please install libvulkan-dev (Ubuntu/Debian) or vulkan-devel (Fedora)")
+    message(FATAL_ERROR "Vulkan not found! Install the Vulkan SDK on Windows, or libvulkan-dev/vulkan-devel on Linux.")
 endif()
 
 # Find SDL2
 set(SDL2_FOUND FALSE)
-if(WIN32 AND DEFINED ENV{VULKAN_SDK})
+if(TARGET SDL2::SDL2)
+    set(SDL2_FOUND TRUE)
+    message(STATUS "Using vendored SDL2 target")
+elseif(WIN32 AND DEFINED ENV{VULKAN_SDK})
     set(VULKAN_SDK_PATH $ENV{VULKAN_SDK})
     
     # Look for SDL2 in Vulkan SDK Third-Party folder
@@ -204,29 +213,39 @@ if(WIN32 AND DEFINED ENV{VULKAN_SDK})
     
     if(SDL2_INCLUDE_DIR AND SDL2_LIBRARY)
         set(SDL2_FOUND TRUE)
-        set(SDL2_INCLUDE_DIRS ${SDL2_INCLUDE_DIR})
-        set(SDL2_LIBRARIES ${SDL2_LIBRARY})
-        if(SDL2MAIN_LIBRARY)
-            list(APPEND SDL2_LIBRARIES ${SDL2MAIN_LIBRARY})
-        endif()
         message(STATUS "Found SDL2 in Vulkan SDK: ${VULKAN_SDK_PATH}")
-        message(STATUS "  Include: ${SDL2_INCLUDE_DIRS}")
-        message(STATUS "  Libraries: ${SDL2_LIBRARIES}")
-        
-        # Create imported target for modern CMake
-        add_library(SDL2 INTERFACE IMPORTED)
-        set_target_properties(SDL2 PROPERTIES
+        message(STATUS "  Include: ${SDL2_INCLUDE_DIR}")
+        message(STATUS "  Library: ${SDL2_LIBRARY}")
+
+        add_library(SDL2::SDL2 UNKNOWN IMPORTED)
+        set_target_properties(SDL2::SDL2 PROPERTIES
+            IMPORTED_LOCATION "${SDL2_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIR}"
+        )
+
+        if(SDL2MAIN_LIBRARY)
+            add_library(SDL2::SDL2main UNKNOWN IMPORTED)
+            set_target_properties(SDL2::SDL2main PROPERTIES
+                IMPORTED_LOCATION "${SDL2MAIN_LIBRARY}"
+            )
+        endif()
+    endif()
+else()
+    find_package(SDL2 REQUIRED)
+    if(TARGET SDL2::SDL2)
+        set(SDL2_FOUND TRUE)
+    elseif(SDL2_INCLUDE_DIRS AND SDL2_LIBRARIES)
+        set(SDL2_FOUND TRUE)
+        add_library(SDL2::SDL2 INTERFACE IMPORTED)
+        set_target_properties(SDL2::SDL2 PROPERTIES
             INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIRS}"
             INTERFACE_LINK_LIBRARIES "${SDL2_LIBRARIES}"
         )
     endif()
-else()
-    # On non-Windows platforms, use standard find_package
-    find_package(SDL2 REQUIRED)
 endif()
 
 if(NOT SDL2_FOUND)
-    message(FATAL_ERROR "SDL2 not found! On Windows, ensure VULKAN_SDK environment variable is set. On Linux, install libsdl2-dev.")
+    message(FATAL_ERROR "SDL2 not found! Use the vendored SDL checkout, install SDL2, or set VULKAN_SDK so the bundled SDL2 can be located.")
 endif()
 
 find_package(Threads REQUIRED)
@@ -288,11 +307,8 @@ target_include_directories(Tremor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/taffy
     ${CMAKE_CURRENT_SOURCE_DIR}/audio
     ${CMAKE_CURRENT_SOURCE_DIR}/editor
-    ${CMAKE_CURRENT_SOURCE_DIR}/../build/_deps/spirv-cross-src
-    ${CMAKE_CURRENT_SOURCE_DIR}/../build/_deps/glslang-src/glslang
     ${TAFFY_INCLUDE_DIR}
     ${Vulkan_INCLUDE_DIRS}
-    ${SDL2_INCLUDE_DIRS}
     ${asio_SOURCE_DIR}/asio/include
 )
 
@@ -320,6 +336,10 @@ target_link_libraries(Tremor PRIVATE
     glslang::glslang
     Jolt
 )
+
+if(TARGET SDL2::SDL2main)
+    target_link_libraries(Tremor PRIVATE SDL2::SDL2main)
+endif()
 
 
 
@@ -352,13 +372,13 @@ set_target_properties(Tremor PROPERTIES
 add_custom_command(TARGET Tremor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${CMAKE_CURRENT_SOURCE_DIR}/assets
-    ${CMAKE_BINARY_DIR}/bin/assets
+    $<TARGET_FILE_DIR:Tremor>/assets
 )
 
 add_custom_command(TARGET Tremor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders
-    ${CMAKE_BINARY_DIR}/bin/shaders
+    $<TARGET_FILE_DIR:Tremor>/shaders
 )
 
 # Shader compilation with SPIRV-Tools integration

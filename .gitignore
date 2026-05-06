@@ -45,3 +45,4 @@ Tremor/**
 *.app
 
 *.ipch
+/build-vs18

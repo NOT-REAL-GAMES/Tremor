@@ -17,6 +17,7 @@
 #include <spirv_msl.hpp>
 
 #include <memory>
+#include <unordered_set>
 
 #include "gfx.h"
 #include "quan.h"
@@ -655,6 +656,8 @@ namespace tremor::gfx {
         uint32_t primitive_count;
         uint32_t vertex_stride_floats;
         uint32_t index_offset_bytes;
+        uint32_t overlay_flags;
+        uint32_t overlay_data_offset;
     };
 
     /**
@@ -771,6 +774,7 @@ namespace tremor::gfx {
             VkPipeline pipeline = VK_NULL_HANDLE;
             VkPipelineLayout layout = VK_NULL_HANDLE;
             VkShaderModule taskShader = VK_NULL_HANDLE;
+            VkShaderModule vertexShader = VK_NULL_HANDLE;
             VkShaderModule meshShader = VK_NULL_HANDLE;
             VkShaderModule fragmentShader = VK_NULL_HANDLE;
             std::string vertexShaderHash;
@@ -792,6 +796,7 @@ namespace tremor::gfx {
         std::unordered_map<std::string, MeshAssetGPUData> gpu_data_cache_;
         std::unordered_map<std::string, PipelineInfo> pipeline_cache_;
         std::unordered_map<std::string, bool> pipeline_rebuild_flags_;
+        std::unordered_set<std::string> failed_asset_loads_;
         
         // Track which overlays are currently applied to which assets
         std::unordered_map<std::string, std::string> applied_overlays_;
@@ -823,6 +828,13 @@ namespace tremor::gfx {
          * @return Created pipeline handle
          */
         VkPipeline createMeshShaderPipeline(const PipelineInfo& pipelineInfo);
+
+        /**
+         * @brief Create a traditional vertex/fragment pipeline
+         * @param pipelineInfo Pipeline info with shader modules
+         * @return Created pipeline handle
+         */
+        VkPipeline createTraditionalPipeline(const PipelineInfo& pipelineInfo);
 
         /**
          * @brief Rebuild a pipeline (e.g., after overlay changes)
@@ -857,6 +869,7 @@ namespace tremor::gfx {
          * @return true if successful
          */
         bool extractShadersFromAsset(const Taffy::Asset& asset,
+            VkShaderModule& vertexShaderModule,
             VkShaderModule& meshShaderModule,
             VkShaderModule& fragmentShaderModule);
 
@@ -894,6 +907,7 @@ namespace tremor::gfx {
          */
         bool extractAndCompileShader(const std::vector<uint8_t>& shader_data,
             uint32_t shader_index,
+            VkShaderModule& vertexShaderModule,
             VkShaderModule& meshShaderModule,
             VkShaderModule& fragmentShaderModule);
     };
@@ -2100,6 +2114,7 @@ namespace tremor::gfx {
         
         // UI control
         void setMainMenuVisible(bool visible);
+        void updateMeshShaderStatusLabel();
         
         // Audio integration
         using SequencerCallback = std::function<void(int)>;
@@ -2187,6 +2202,7 @@ namespace tremor::gfx {
         uint32_t m_toggleOverlayButtonId = 0;
         uint32_t m_modelEditorButtonId = 0;
         uint32_t m_exitButtonId = 0;
+        uint32_t m_meshShaderStatusLabelId = 0;
 
         // Camera
         Camera cam;
@@ -2443,7 +2459,10 @@ namespace tremor::gfx {
 
         VulkanClusteredRenderer(VkDevice device, VkPhysicalDevice physicalDevice,
             VkQueue graphicsQueue, uint32_t graphicsQueueFamily,
-            VkCommandPool commandPool, const ClusterConfig& config);
+            VkCommandPool commandPool, const ClusterConfig& config,
+            VkRenderPass renderPass = VK_NULL_HANDLE,
+            bool useDynamicRendering = true,
+            VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT);
         ~VulkanClusteredRenderer() override;
 
         // Method declarations - implementations go to vk.cpp
@@ -2457,6 +2476,7 @@ namespace tremor::gfx {
         void buildClusters(Camera* camera, Octree<RenderableObject>& octree);
         void updateLights(const std::vector<ClusterLight>& lights) override;
         void render(VkCommandBuffer cmdBuffer, Camera* camera);
+        bool isMeshShaderPathActive() const { return m_lastRenderUsedMeshShaderPath; }
 
         // Simple getter - can stay inline
         VkDevice getDevice() const { return m_device; }
@@ -2479,6 +2499,11 @@ namespace tremor::gfx {
         VkQueue m_graphicsQueue;
         uint32_t m_graphicsQueueFamily;
         uint32_t m_totalClusters;
+        VkRenderPass m_renderPass = VK_NULL_HANDLE;
+        bool m_useDynamicRendering = true;
+        VkSampleCountFlagBits m_sampleCount = VK_SAMPLE_COUNT_1_BIT;
+        bool m_meshShaderSupported = false;
+        bool m_lastRenderUsedMeshShaderPath = false;
 
         // Rendering configuration
         VkFormat* m_colorFormat;
@@ -2490,6 +2515,8 @@ namespace tremor::gfx {
         std::unique_ptr<ShaderModule> m_fragmentShader;
         std::unique_ptr<ShaderModule> m_debugTaskShader;
         std::unique_ptr<ShaderModule> m_debugMeshShader;
+        std::unique_ptr<ShaderModule> m_fallbackVertexShader;
+        std::unique_ptr<ShaderModule> m_fallbackFragmentShader;
 
         // Pipeline resources
         std::unique_ptr<PipelineLayoutResource> m_pipelineLayout;
@@ -2499,6 +2526,8 @@ namespace tremor::gfx {
         std::unique_ptr<PipelineResource> m_testBufferPipeline;
         std::unique_ptr<PipelineResource> m_workingMeshPipeline;
         std::unique_ptr<PipelineLayoutResource> m_workingMeshPipelineLayout;
+        std::unique_ptr<PipelineResource> m_fallbackPipeline;
+        std::unique_ptr<PipelineLayoutResource> m_fallbackPipelineLayout;
 
         // Descriptor resources
         std::unique_ptr<DescriptorSetLayoutResource> m_descriptorSetLayout;
@@ -2512,6 +2541,7 @@ namespace tremor::gfx {
         std::unique_ptr<Buffer> m_indexBuffer;
         std::unique_ptr<Buffer> m_uniformBuffer;
         std::unique_ptr<Buffer> m_vertexBuffer;
+        std::unique_ptr<Buffer> m_fallbackVertexBuffer;
         std::unique_ptr<Buffer> m_meshIndexBuffer;
         std::unique_ptr<Buffer> m_meshInfoBuffer;
         std::unique_ptr<Buffer> m_materialBuffer;
@@ -2525,7 +2555,10 @@ namespace tremor::gfx {
 
         // Private method declarations - implementations go to vk.cpp
         bool createMeshBuffers();
+        bool createFallbackPipeline();
         bool createDefaultTextures();
+        bool supportsMeshShaderPath() const;
+        void renderFallback(VkCommandBuffer cmdBuffer, Camera* camera);
         void updateUniformBuffers(Camera* camera);
         void updateMeshBuffers();
         void updateMaterialBuffer();
