@@ -276,6 +276,8 @@ FetchContent_MakeAvailable(assimp)
 add_executable(Tremor
     main.cpp
     vk.cpp
+    flecs_interpreter.cpp
+    ui_message_center.cpp
     volk.c
     vm.cpp
     vm_bytecode.cpp

@@ -2,6 +2,7 @@
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE  // Important for Vulkan depth range
 
 #include "vk.h"
+#include "ui_message_center.h"
 #include "quan.h"
 #include "renderer/taffy_integration.h"
 #include "renderer/sdf_text_renderer.h"
@@ -6819,6 +6820,7 @@ namespace tremor::gfx {
 				// Create orthographic projection for UI 
 				
 				// Render UI in the depth-less pass
+                updateUiMessageOverlay();
 				m_uiRenderer->render(m_commandBuffers[currentFrame], orthoProjection, vkSwapchain->extent());
 				
 				// Unblock grid rendering after UI is complete
@@ -7179,6 +7181,7 @@ namespace tremor::gfx {
                     0xFF4040FF,
                     0.7f
                 );
+                initializeUiMessageOverlay();
             }
 
             initializeOverlaySystem();
@@ -7196,6 +7199,63 @@ namespace tremor::gfx {
             return true;
         };
         void VulkanBackend::shutdown() {};
+
+        void VulkanBackend::enqueueUiMessage(const std::string& text, float durationSeconds, uint32_t color) {
+            tremor::UiMessageCenter::instance().enqueue(text, durationSeconds, color);
+        }
+
+        void VulkanBackend::initializeUiMessageOverlay() {
+            if (!m_uiRenderer || !m_uiMessageLabelIds.empty()) {
+                return;
+            }
+
+            for (size_t i = 0; i < tremor::UiMessageCenter::MaxVisibleMessages; ++i) {
+                const float verticalOffset = static_cast<float>(tremor::UiMessageCenter::MaxVisibleMessages - 1 - i) * 34.0f;
+                uint32_t labelId = m_uiRenderer->addLabel(
+                    "",
+                    glm::vec2(24.0f, 680.0f - verticalOffset),
+                    0xFFD060FF,
+                    0.55f
+                );
+                m_uiRenderer->setElementVisible(labelId, false);
+                m_uiMessageLabelIds.push_back(labelId);
+            }
+        }
+
+        void VulkanBackend::updateUiMessageOverlay() {
+            if (!m_uiRenderer || m_uiMessageLabelIds.empty()) {
+                return;
+            }
+
+            static auto lastUpdateTime = std::chrono::high_resolution_clock::now();
+            const auto currentTime = std::chrono::high_resolution_clock::now();
+            const float deltaTimeSeconds = std::chrono::duration<float>(currentTime - lastUpdateTime).count();
+            lastUpdateTime = currentTime;
+
+            auto& messageCenter = tremor::UiMessageCenter::instance();
+            messageCenter.update(deltaTimeSeconds);
+
+            if (!messageCenter.consumeDirty()) {
+                return;
+            }
+
+            const std::vector<tremor::UiMessage> visibleMessages = messageCenter.snapshotVisibleMessages();
+            const size_t hiddenLabelCount = m_uiMessageLabelIds.size() - visibleMessages.size();
+
+            for (size_t labelIndex = 0; labelIndex < m_uiMessageLabelIds.size(); ++labelIndex) {
+                const uint32_t labelId = m_uiMessageLabelIds[labelIndex];
+                if (labelIndex < hiddenLabelCount) {
+                    m_uiRenderer->setElementText(labelId, "");
+                    m_uiRenderer->setElementVisible(labelId, false);
+                    continue;
+                }
+
+                const tremor::UiMessage& message = visibleMessages[labelIndex - hiddenLabelCount];
+                m_uiRenderer->setElementText(labelId, message.text);
+                m_uiRenderer->setElementTextColor(labelId, message.color);
+                m_uiRenderer->setElementVisible(labelId, true);
+            }
+        }
         
         void VulkanBackend::handleInput(const SDL_Event& event) {
             // Pass input to UI renderer first (UI elements take priority)

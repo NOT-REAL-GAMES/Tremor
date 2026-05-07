@@ -2160,6 +2160,7 @@ namespace tremor::gfx {
         VkExtent2D getSwapchainExtent() const { return vkSwapchain ? vkSwapchain->extent() : VkExtent2D{1920, 1080}; }
         UIRenderer* getUIRenderer() const { return m_uiRenderer.get(); }
         VulkanClusteredRenderer* getClusteredRenderer() const { return m_clusteredRenderer.get(); }
+        void enqueueUiMessage(const std::string& text, float durationSeconds = 4.0f, uint32_t color = 0xFFD060FF);
 
         std::unique_ptr<TaffyOverlayManager> m_overlayManager;
 
@@ -2184,6 +2185,8 @@ namespace tremor::gfx {
         void createDevelopmentOverlays();
         void loadTestAssetWithOverlays();
         void updateOverlaySystem();
+        void initializeUiMessageOverlay();
+        void updateUiMessageOverlay();
         void createTestMasterAssetFromGLSL();
         void renderWithOverlays(VkCommandBuffer cmdBuffer);
         void demonstrateOverlayControls();
@@ -2226,6 +2229,7 @@ namespace tremor::gfx {
         uint32_t m_modelEditorButtonId = 0;
         uint32_t m_exitButtonId = 0;
         uint32_t m_meshShaderStatusLabelId = 0;
+        std::vector<uint32_t> m_uiMessageLabelIds;
 
         // Camera
         Camera cam;

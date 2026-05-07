@@ -10,6 +10,8 @@
 #include <glm/gtx/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include "../Taffy/include/quan.h"
+#include "flecs_interpreter.h"
+#include "ui_message_center.h"
 #include "vk.h"  // Include VulkanBackend for rendering
 #include "dmc_physics.h"  // Include Jolt Physics integration
 #include <random>
@@ -269,6 +271,7 @@ private:
     std::uniform_real_distribution<float> radiusDist{15.0f, 25.0f};
     float gameTime = 0.0f;
     std::vector<flecs::entity> entitiesMarkedForDeletion;
+    std::unique_ptr<tremor::script::FlecsInterpreterHost> interpreterHost;
 
     // Jolt Physics integration
     std::unique_ptr<DMCSurvivors::PhysicsWorld> physicsWorld;
@@ -279,9 +282,14 @@ public:
         initializePhysics();
 
         setupComponents();
+        setupInterpreterHost();
         setupSystems();
         createPlayer();
         createWaveSpawner();
+        loadBuiltInInterpreterPrograms();
+        if (interpreterHost) {
+            interpreterHost->emitEvent("game_start");
+        }
     }
 
     void update(float deltaTime) {
@@ -293,6 +301,9 @@ public:
         }
 
         world.progress(deltaTime);
+        if (interpreterHost) {
+            interpreterHost->update(deltaTime);
+        }
 
         // Process entity deletion queue after all systems have run
         for (auto& entity : entitiesMarkedForDeletion) {
@@ -429,6 +440,208 @@ public:
     }
 
 private:
+    static std::string trimCopy(std::string_view value) {
+        size_t start = 0;
+        while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
+            ++start;
+        }
+
+        size_t end = value.size();
+        while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+            --end;
+        }
+
+        return std::string(value.substr(start, end - start));
+    }
+
+    static std::vector<std::string> splitUiMessagePayload(std::string_view payload) {
+        std::vector<std::string> parts;
+        size_t start = 0;
+        while (start <= payload.size()) {
+            size_t separator = payload.find('|', start);
+            if (separator == std::string_view::npos) {
+                parts.push_back(trimCopy(payload.substr(start)));
+                break;
+            }
+
+            parts.push_back(trimCopy(payload.substr(start, separator - start)));
+            start = separator + 1;
+        }
+
+        return parts;
+    }
+
+    static std::optional<float> tryParseMessageDuration(const std::string& value) {
+        if (value.empty()) {
+            return std::nullopt;
+        }
+
+        try {
+            float duration = std::stof(value);
+            if (duration <= 0.0f) {
+                return std::nullopt;
+            }
+            return duration;
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
+    static std::optional<uint32_t> tryParseMessageColor(std::string value) {
+        value = trimCopy(value);
+        if (value.empty()) {
+            return std::nullopt;
+        }
+
+        if (!value.empty() && value[0] == '#') {
+            value.erase(0, 1);
+        }
+
+        if (value.size() != 8) {
+            return std::nullopt;
+        }
+
+        for (char ch : value) {
+            if (std::isxdigit(static_cast<unsigned char>(ch)) == 0) {
+                return std::nullopt;
+            }
+        }
+
+        try {
+            return static_cast<uint32_t>(std::stoul(value, nullptr, 16));
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
+    void setupInterpreterHost() {
+        interpreterHost = std::make_unique<tremor::script::FlecsInterpreterHost>(world);
+
+        interpreterHost->registerCommand("set_wave_spawn_interval", [this](
+            const tremor::script::CommandContext&,
+            std::string_view argument
+        ) {
+            try {
+                const float interval = std::stof(std::string(argument));
+                world.each([interval](flecs::entity, WaveSpawner& spawner) {
+                    spawner.spawnInterval = std::max(0.1f, interval);
+                });
+                Logger::get().info("Interpreter set wave spawn interval to {}", interval);
+                return true;
+            } catch (const std::exception&) {
+                Logger::get().error("Interpreter failed to parse wave spawn interval '{}'", argument);
+                return false;
+            }
+        });
+
+        interpreterHost->registerCommand("set_wave_enemy_count", [this](
+            const tremor::script::CommandContext&,
+            std::string_view argument
+        ) {
+            try {
+                const int enemiesPerWave = std::max(1, std::stoi(std::string(argument)));
+                world.each([enemiesPerWave](flecs::entity, WaveSpawner& spawner) {
+                    spawner.enemiesPerWave = enemiesPerWave;
+                });
+                Logger::get().info("Interpreter set enemies per wave to {}", enemiesPerWave);
+                return true;
+            } catch (const std::exception&) {
+                Logger::get().error("Interpreter failed to parse enemies per wave '{}'", argument);
+                return false;
+            }
+        });
+
+        interpreterHost->registerCommand("spawn_enemy", [this](
+            const tremor::script::CommandContext&,
+            std::string_view
+        ) {
+            world.each([this](flecs::entity, WaveSpawner& spawner) {
+                spawnEnemy(spawner.currentWave, spawner.waveIntensity);
+            });
+            Logger::get().info("Interpreter requested an enemy spawn");
+            return true;
+        });
+
+        interpreterHost->registerCommand("emit_ui_message", [this](
+            const tremor::script::CommandContext&,
+            std::string_view argument
+        ) {
+            const std::vector<std::string> payloadParts = splitUiMessagePayload(argument);
+            if (payloadParts.empty() || payloadParts[0].empty()) {
+                Logger::get().warning("Interpreter emit_ui_message received an empty message");
+                return false;
+            }
+
+            const std::string& messageText = payloadParts[0];
+            float durationSeconds = 4.0f;
+            uint32_t messageColor = 0xFFD060FF;
+
+            if (payloadParts.size() >= 2 && !payloadParts[1].empty()) {
+                auto parsedDuration = tryParseMessageDuration(payloadParts[1]);
+                if (parsedDuration) {
+                    durationSeconds = *parsedDuration;
+                } else {
+                    Logger::get().warning(
+                        "Interpreter emit_ui_message could not parse duration '{}', using default",
+                        payloadParts[1]
+                    );
+                }
+            }
+
+            if (payloadParts.size() >= 3 && !payloadParts[2].empty()) {
+                auto parsedColor = tryParseMessageColor(payloadParts[2]);
+                if (parsedColor) {
+                    messageColor = *parsedColor;
+                } else {
+                    Logger::get().warning(
+                        "Interpreter emit_ui_message could not parse color '{}', using default",
+                        payloadParts[2]
+                    );
+                }
+            }
+
+            tremor::UiMessageCenter::instance().enqueue(messageText, durationSeconds, messageColor);
+            Logger::get().info(
+                "Interpreter UI message: '{}' (duration {:.2f}s, color 0x{:08X})",
+                messageText,
+                durationSeconds,
+                messageColor
+            );
+            return true;
+        });
+    }
+
+    void loadBuiltInInterpreterPrograms() {
+        if (!interpreterHost) {
+            return;
+        }
+
+        static constexpr std::string_view kBuiltInInterpreterScript = R"SCRIPT(
+program dmc_bootstrap
+
+rule host_online
+on_load
+action log interpreter_host_online
+
+rule announce_game_start
+on_event game_start
+action log game_start_received
+action command emit_ui_message gameplay package loaded
+
+rule announce_wave_start
+on_event wave_started
+action log wave_started_received
+action command emit_ui_message wave advanced
+)SCRIPT";
+
+        interpreterHost->loadProgramFromText(kBuiltInInterpreterScript, "builtin://dmc_bootstrap.tafscript");
+
+        const std::filesystem::path gameplayPackage = std::filesystem::path("assets") / "gameplay.taf";
+        if (std::filesystem::exists(gameplayPackage)) {
+            interpreterHost->loadProgramsFromPackage(gameplayPackage);
+        }
+    }
+
     void setupComponents() {
         world.component<Position>();
         world.component<Velocity>();
@@ -658,11 +871,32 @@ private:
                         spawner.enemiesSpawned++;
                     } else {
                         // Wave complete
+                        if (interpreterHost) {
+                            interpreterHost->emitEvent({
+                                "wave_completed",
+                                {
+                                    {"wave", std::to_string(spawner.currentWave)},
+                                    {"enemies_spawned", std::to_string(spawner.enemiesSpawned)}
+                                }
+                            });
+                        }
+
                         spawner.currentWave++;
                         spawner.enemiesSpawned = 0;
                         spawner.enemiesPerWave = 5 + spawner.currentWave * 2;
                         spawner.waveIntensity *= 1.15f;
                         spawner.spawnInterval = std::max(1.0f, 3.0f - spawner.currentWave * 0.1f);
+
+                        if (interpreterHost) {
+                            interpreterHost->emitEvent({
+                                "wave_started",
+                                {
+                                    {"wave", std::to_string(spawner.currentWave)},
+                                    {"enemies_per_wave", std::to_string(spawner.enemiesPerWave)},
+                                    {"spawn_interval", std::to_string(spawner.spawnInterval)}
+                                }
+                            });
+                        }
                     }
                 }
             });
@@ -758,6 +992,17 @@ private:
             .set<Enemy>({})
             .set<EnemyAI>({player, 30.0f, 2.0f})
             .set<MeshRenderer>({1, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f)});
+
+        if (interpreterHost) {
+            interpreterHost->emitEvent({
+                "enemy_spawned",
+                {
+                    {"wave", std::to_string(wave)},
+                    {"intensity", std::to_string(intensity)},
+                    {"entity_id", std::to_string(static_cast<uint64_t>(enemy.id()))}
+                }
+            });
+        }
     }
 
     void spawnRedOrb(const glm::vec3& position, float value) {

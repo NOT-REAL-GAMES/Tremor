@@ -1,0 +1,12 @@
+program gameplay_loose
+
+rule loose_loaded
+on_load
+action log gameplay_loose_script_loaded
+action command set_blackboard loose_script loaded
+action command emit_ui_message loose gameplay script loaded|5.0|60FF90FF
+
+rule observe_wave_completion
+on_event wave_completed
+action log gameplay_loose_wave_completed
+action command emit_ui_message loose script saw wave completion|5.5|30FFB0FF

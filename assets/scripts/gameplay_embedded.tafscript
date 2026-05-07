@@ -1,0 +1,19 @@
+program gameplay_embedded
+
+rule embedded_loaded
+on_load
+action log gameplay_package_embedded_loaded
+action command set_blackboard gameplay_mode packaged
+action command emit_ui_message embedded gameplay script loaded|5.5|FFD060FF
+
+rule configure_first_wave
+on_event game_start
+action command set_wave_enemy_count 6
+action log gameplay_package_applied_wave_count
+action command emit_ui_message gameplay package adjusted first wave|6.0|FFB040FF
+
+rule tighten_spawn_cadence
+on_event wave_started
+action command set_wave_spawn_interval 2.5
+action log gameplay_package_tuned_spawn_interval
+action command emit_ui_message gameplay package tightened spawn cadence|4.0|40D0FFFF
