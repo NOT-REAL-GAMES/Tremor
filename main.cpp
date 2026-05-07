@@ -21,18 +21,10 @@
 // AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF 
 // OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS 
 // IN THE SOFTWARE.
-
-// This file is part of Tremor: a game engine built on a """rewrite/
-// reconceptualization""" of the Quake Engine as a foundation. Think 
-// "Ship of Theseus", but the ship is made into a cool yacht that's 
-// got a wood veneer that kind of reminds you of the original? I'm 
-// coining that concept because I think it's funny.
-
-// The original Quake Engine is licensed under the GPLv2 license. 
-// Parts of its code have been used as inspiration for Tremor, much
-// less copied directly, for the sake of modernization and legality.
-// The Tremor project is not affiliated with or endorsed by id Software.
-// idTech 2's dependencies on Quake will be gradually phased out of the Tremor project. 
+//
+// Tremor is an original engine project inspired by classic FPS engine architecture,
+// including ideas historically associated with Quake. It is not affiliated with or
+// endorsed by id Software. Any third-party code remains subject to its original license.
 
 
 

@@ -656,8 +656,12 @@ namespace tremor::gfx {
         uint32_t primitive_count;
         uint32_t vertex_stride_floats;
         uint32_t index_offset_bytes;
-        uint32_t overlay_flags;
+        uint32_t overlay_flags; // Bit 0: meshlet debug tint
         uint32_t overlay_data_offset;
+        uint32_t meshlet_count;
+        uint32_t meshlet_desc_offset_bytes;
+        uint32_t meshlet_vertex_index_offset_bytes;
+        uint32_t meshlet_primitive_index_offset_bytes;
     };
 
     /**
@@ -669,6 +673,8 @@ namespace tremor::gfx {
      */
     class TaffyOverlayManager {
     public:
+        static constexpr uint32_t OverlayFlag_DebugMeshlets = 1u << 0;
+
         /**
          * @brief GPU data for mesh shader assets
          */
@@ -681,6 +687,10 @@ namespace tremor::gfx {
             uint32_t vertexStrideFloats = 0;
             uint32_t indexOffset = 0;  // Offset in bytes where indices start in the storage buffer
             uint32_t indexCount = 0;   // Number of indices
+            uint32_t meshletCount = 0;
+            uint32_t meshletDescOffset = 0;
+            uint32_t meshletVertexIndexOffset = 0;
+            uint32_t meshletPrimitiveIndexOffset = 0;
             bool usesMeshShader = false;
         };
 
@@ -704,6 +714,18 @@ namespace tremor::gfx {
          * @brief Destructor - cleans up all Vulkan resources including pipelines
          */
         ~TaffyOverlayManager();
+
+        void setMeshletDebugColorsEnabled(bool enabled) {
+            if (enabled) {
+                meshShaderOverlayFlags_ |= OverlayFlag_DebugMeshlets;
+            } else {
+                meshShaderOverlayFlags_ &= ~OverlayFlag_DebugMeshlets;
+            }
+        }
+
+        bool areMeshletDebugColorsEnabled() const {
+            return (meshShaderOverlayFlags_ & OverlayFlag_DebugMeshlets) != 0;
+        }
 
         // Simplified rendering interface
         /**
@@ -800,6 +822,7 @@ namespace tremor::gfx {
         
         // Track which overlays are currently applied to which assets
         std::unordered_map<std::string, std::string> applied_overlays_;
+        uint32_t meshShaderOverlayFlags_ = 0;
 
         /**
          * @brief Ensure an asset is loaded and ready for rendering

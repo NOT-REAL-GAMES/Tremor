@@ -860,8 +860,12 @@ namespace tremor::gfx {
             pushConstants.primitive_count = gpuData.primitiveCount;
             pushConstants.vertex_stride_floats = gpuData.vertexStrideFloats;
             pushConstants.index_offset_bytes = gpuData.indexOffset;
-            pushConstants.overlay_flags = 0;
+            pushConstants.overlay_flags = meshShaderOverlayFlags_;
             pushConstants.overlay_data_offset = 0;
+            pushConstants.meshlet_count = gpuData.meshletCount;
+            pushConstants.meshlet_desc_offset_bytes = gpuData.meshletDescOffset;
+            pushConstants.meshlet_vertex_index_offset_bytes = gpuData.meshletVertexIndexOffset;
+            pushConstants.meshlet_primitive_index_offset_bytes = gpuData.meshletPrimitiveIndexOffset;
 
             if (gpuData.usesMeshShader) {
                 if (!vkCmdDrawMeshTasksEXT) {
@@ -878,7 +882,8 @@ namespace tremor::gfx {
                     sizeof(pushConstants),
                     &pushConstants);
 
-                vkCmdDrawMeshTasksEXT(cmd, 8, 1, 1);
+                uint32_t workgroupCountX = gpuData.meshletCount > 0 ? gpuData.meshletCount : 1u;
+                vkCmdDrawMeshTasksEXT(cmd, workgroupCountX, 1, 1);
                 return;
             }
 
@@ -950,7 +955,9 @@ namespace tremor::gfx {
                 // Calculate index data size and offset
                 size_t indexDataSize = geomHeader.index_count * sizeof(uint32_t);
                 size_t indexDataOffset = vertexDataOffset + vertexDataSize;
-                size_t totalBufferSize = vertexDataSize + indexDataSize;
+                size_t extraDataOffset = indexDataOffset + indexDataSize;
+                size_t extraDataSize = geomData->size() > extraDataOffset ? (geomData->size() - extraDataOffset) : 0;
+                size_t totalBufferSize = vertexDataSize + indexDataSize + extraDataSize;
 
                 //std::cout << "  GeometryChunk size: " << sizeof(Taffy::GeometryChunk) << " bytes" << std::endl;
                 //std::cout << "  Vertex data offset: " << vertexDataOffset << " bytes" << std::endl;
@@ -1037,19 +1044,10 @@ namespace tremor::gfx {
 
                 vkBindBufferMemory(device_, gpuData.vertexStorageBuffer, gpuData.vertexStorageMemory, 0);
 
-                // Copy vertex and index data to buffer
+                // Copy the full geometry payload after the header so appended meshlet data stays intact.
                 void* mappedData;
                 vkMapMemory(device_, gpuData.vertexStorageMemory, 0, totalBufferSize, 0, &mappedData);
-                
-                // Copy vertex data first
-                std::memcpy(mappedData, vertexData, vertexDataSize);
-                
-                // Copy index data after vertices if present
-                if (geomHeader.index_count > 0) {
-                    const uint8_t* indexData = geomData->data() + indexDataOffset;
-                    std::memcpy((uint8_t*)mappedData + vertexDataSize, indexData, indexDataSize);
-                    //std::cout << "✅ Copied " << geomHeader.index_count << " indices to storage buffer" << std::endl;
-                }
+                std::memcpy(mappedData, geomData->data() + vertexDataOffset, totalBufferSize);
                 
                 vkUnmapMemory(device_, gpuData.vertexStorageMemory);
 
@@ -1127,6 +1125,14 @@ namespace tremor::gfx {
                 // Calculate index offset (indices come after vertices in the buffer)
                 gpuData.indexOffset = vertexDataSize;
                 gpuData.indexCount = geomHeader.index_count;
+                gpuData.meshletCount = geomHeader.reserved[0];
+                if (gpuData.meshletCount > 0) {
+                    gpuData.meshletDescOffset = static_cast<uint32_t>(vertexDataSize + indexDataSize);
+                    gpuData.meshletVertexIndexOffset = gpuData.meshletDescOffset +
+                        gpuData.meshletCount * sizeof(uint32_t) * 4;
+                    gpuData.meshletPrimitiveIndexOffset = gpuData.meshletVertexIndexOffset +
+                        geomHeader.reserved[1] * sizeof(uint32_t);
+                }
 
                 //std::cout << "📊 Mesh shader parameters:" << std::endl;
                 //std::cout << "  Vertex count: " << gpuData.vertexCount << std::endl;
@@ -6537,6 +6543,8 @@ namespace tremor::gfx {
 			}
 			
             //hot_pink_enabled = std::chrono::steady_clock::now().time_since_epoch().count() % 1000000000 > 500000000;
+
+            hot_pink_enabled = false;
             
             static bool last_hot_pink_enabled = false;
             if (hot_pink_enabled != last_hot_pink_enabled) {

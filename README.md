@@ -2,6 +2,9 @@
 
 Tremor is a modern game engine built on a reimagined foundation inspired by the Quake Engine, featuring Vulkan-based clustered rendering and integration with the Taffy asset format.
 
+Think "Ship of Theseus", but the ship is made into a cool yacht that's got a wood veneer that kind of reminds you of the original? I'm coining that concept because I think it's funny.
+
+
 ## Prerequisites
 
 ### All Platforms
