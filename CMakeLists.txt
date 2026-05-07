@@ -278,6 +278,7 @@ add_executable(Tremor
     vk.cpp
     flecs_interpreter.cpp
     ui_message_center.cpp
+    ui_message_commands.cpp
     volk.c
     vm.cpp
     vm_bytecode.cpp

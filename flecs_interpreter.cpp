@@ -3,6 +3,7 @@
 #include "../Taffy/include/asset.h"
 #include "../Taffy/include/taffy_streaming.h"
 #include "main.h"
+#include "ui_message_commands.h"
 
 #include <cctype>
 #include <fstream>
@@ -109,6 +110,26 @@ FlecsInterpreterHost::FlecsInterpreterHost(flecs::world& world)
         }
 
         Logger::get().info("Interpreter blackboard '{}': {}", key, found->second);
+        return true;
+    });
+
+    registerCommand("emit_ui_message", [](const CommandContext&, std::string_view argument) {
+        UiMessageCommandParseResult result;
+        if (!enqueueUiMessageCommand(argument, &result)) {
+            Logger::get().warning("Interpreter emit_ui_message {}", result.error);
+            return false;
+        }
+
+        for (const std::string& warning : result.warnings) {
+            Logger::get().warning("Interpreter emit_ui_message {}", warning);
+        }
+
+        Logger::get().info(
+            "Interpreter UI message: '{}' (duration {:.2f}s, color 0x{:08X})",
+            result.message.text,
+            result.message.durationSeconds,
+            result.message.color
+        );
         return true;
     });
 }
