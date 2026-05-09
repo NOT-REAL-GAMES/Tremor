@@ -3,10 +3,18 @@ program gameplay_loose
 rule loose_loaded
 on_load
 action log gameplay_loose_script_loaded
-action command set_blackboard loose_script loaded
+action set loose_state { status: loaded, last_completed_wave: 0 }
+action set loose_state.wave_formatter fn(wave) { wave }
+action command log_blackboard loose_state.wave_formatter
+
+rule loose_loaded_confirmed
+on_load
+if var.loose_state.status == loaded
 action command emit_ui_message loose gameplay script loaded|5.0|60FF90FF
 
 rule observe_wave_completion
 on_event wave_completed
+if event.wave >= 1
+action set loose_state.last_completed_wave event.wave
 action log gameplay_loose_wave_completed
-action command emit_ui_message loose script saw wave completion|5.5|30FFB0FF
+action command emit_ui_message loose script saw wave ${var.loose_state.last_completed_wave} complete|5.5|30FFB0FF

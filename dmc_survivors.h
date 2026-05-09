@@ -14,9 +14,11 @@
 #include "vk.h"  // Include VulkanBackend for rendering
 #include "dmc_physics.h"  // Include Jolt Physics integration
 #include <random>
+#include <cmath>
 #include <string>
 #include <deque>
 #include <vector>
+#include "logger.h"
 
 namespace DMCSurvivors {
 
@@ -287,6 +289,8 @@ public:
         createWaveSpawner();
         loadBuiltInInterpreterPrograms();
         if (interpreterHost) {
+            interpreterHost->update(0.0f);
+            primeInitialWaveFromScript();
             interpreterHost->emitEvent("game_start");
         }
     }
@@ -485,6 +489,201 @@ private:
             });
             Logger::get().info("Interpreter requested an enemy spawn");
             return true;
+        });
+    }
+
+    void applyWaveSpawnIntervalPolicy(WaveSpawner& spawner, float baseInterval) {
+        if (!interpreterHost || !interpreterHost->hasBoundHostCallback("wave_spawn_interval_policy")) {
+            return;
+        }
+
+        tremor::script::ValueMap callbackArgs;
+        callbackArgs.emplace("wave", tremor::script::Value(static_cast<double>(spawner.currentWave)));
+        callbackArgs.emplace("base_interval", tremor::script::Value(static_cast<double>(baseInterval)));
+        callbackArgs.emplace("wave_intensity", tremor::script::Value(static_cast<double>(spawner.waveIntensity)));
+        callbackArgs.emplace("enemies_per_wave", tremor::script::Value(static_cast<double>(spawner.enemiesPerWave)));
+
+        std::string callbackError;
+        std::optional<tremor::script::Value> callbackResult = interpreterHost->invokeHostCallback(
+            "wave_spawn_interval_policy",
+            callbackArgs,
+            &callbackError
+        );
+        if (!callbackResult) {
+            Logger::get().warn("Interpreter wave_spawn_interval_policy failed: {}", callbackError);
+            return;
+        }
+
+        const std::optional<double> intervalValue = callbackResult->asNumber();
+        if (!intervalValue) {
+            Logger::get().warn(
+                "Interpreter wave_spawn_interval_policy returned non-numeric value {}",
+                callbackResult->debugString()
+            );
+            return;
+        }
+
+        spawner.spawnInterval = std::max(0.1f, static_cast<float>(*intervalValue));
+        Logger::get().info(
+            "Interpreter host bridge set wave {} spawn interval to {}",
+            spawner.currentWave,
+            spawner.spawnInterval
+        );
+    }
+
+    void applyWaveEnemyCountPolicy(WaveSpawner& spawner, int baseCount) {
+        if (!interpreterHost || !interpreterHost->hasBoundHostCallback("wave_enemy_count_policy")) {
+            return;
+        }
+
+        tremor::script::ValueMap callbackArgs;
+        callbackArgs.emplace("wave", tremor::script::Value(static_cast<double>(spawner.currentWave)));
+        callbackArgs.emplace("base_count", tremor::script::Value(static_cast<double>(baseCount)));
+        callbackArgs.emplace("wave_intensity", tremor::script::Value(static_cast<double>(spawner.waveIntensity)));
+        callbackArgs.emplace("spawn_interval", tremor::script::Value(static_cast<double>(spawner.spawnInterval)));
+
+        std::string callbackError;
+        std::optional<tremor::script::Value> callbackResult = interpreterHost->invokeHostCallback(
+            "wave_enemy_count_policy",
+            callbackArgs,
+            &callbackError
+        );
+        if (!callbackResult) {
+            Logger::get().warn("Interpreter wave_enemy_count_policy failed: {}", callbackError);
+            return;
+        }
+
+        const std::optional<double> countValue = callbackResult->asNumber();
+        if (!countValue) {
+            Logger::get().warn(
+                "Interpreter wave_enemy_count_policy returned non-numeric value {}",
+                callbackResult->debugString()
+            );
+            return;
+        }
+
+        spawner.enemiesPerWave = std::max(1, static_cast<int>(std::lround(*countValue)));
+        Logger::get().info(
+            "Interpreter host bridge set wave {} enemy count to {}",
+            spawner.currentWave,
+            spawner.enemiesPerWave
+        );
+    }
+
+    void syncWaveStateToInterpreter(
+        const WaveSpawner& spawner,
+        int defaultEnemyCount = -1,
+        float defaultSpawnInterval = -1.0f,
+        float defaultWaveIntensity = -1.0f
+    ) {
+        if (!interpreterHost) {
+            return;
+        }
+
+        std::string ignoredError;
+        interpreterHost->setBlackboardValue("wave_state.current_wave", tremor::script::Value(static_cast<double>(spawner.currentWave)), &ignoredError);
+        interpreterHost->setBlackboardValue("wave_state.enemies_spawned", tremor::script::Value(static_cast<double>(spawner.enemiesSpawned)), &ignoredError);
+        interpreterHost->setBlackboardValue("wave_state.enemies_per_wave", tremor::script::Value(static_cast<double>(spawner.enemiesPerWave)), &ignoredError);
+        interpreterHost->setBlackboardValue("wave_state.wave_intensity", tremor::script::Value(static_cast<double>(spawner.waveIntensity)), &ignoredError);
+        interpreterHost->setBlackboardValue("wave_state.spawn_interval", tremor::script::Value(static_cast<double>(spawner.spawnInterval)), &ignoredError);
+
+        if (defaultEnemyCount >= 0) {
+            interpreterHost->setBlackboardValue("wave_state.default_enemy_count", tremor::script::Value(static_cast<double>(defaultEnemyCount)), &ignoredError);
+        }
+        if (defaultSpawnInterval >= 0.0f) {
+            interpreterHost->setBlackboardValue("wave_state.default_spawn_interval", tremor::script::Value(static_cast<double>(defaultSpawnInterval)), &ignoredError);
+        }
+        if (defaultWaveIntensity >= 0.0f) {
+            interpreterHost->setBlackboardValue("wave_state.default_wave_intensity", tremor::script::Value(static_cast<double>(defaultWaveIntensity)), &ignoredError);
+        }
+    }
+
+    void applyWaveDescriptorPolicy(
+        WaveSpawner& spawner,
+        int defaultEnemyCount,
+        float defaultSpawnInterval,
+        float defaultWaveIntensity
+    ) {
+        if (!interpreterHost) {
+            return;
+        }
+
+        syncWaveStateToInterpreter(
+            spawner,
+            defaultEnemyCount,
+            defaultSpawnInterval,
+            defaultWaveIntensity
+        );
+
+        if (interpreterHost->hasBoundHostCallback("wave_descriptor_policy")) {
+            std::string callbackError;
+            std::optional<tremor::script::Value> callbackResult = interpreterHost->invokeHostCallback(
+                "wave_descriptor_policy",
+                {},
+                &callbackError
+            );
+            if (!callbackResult) {
+                Logger::get().warn("Interpreter wave_descriptor_policy failed: {}", callbackError);
+            } else if (const tremor::script::ObjectValue* descriptor = callbackResult->asObject()) {
+                const auto applyNumericField = [descriptor](std::string_view name) -> std::optional<double> {
+                    const auto found = descriptor->fields.find(std::string(name));
+                    if (found == descriptor->fields.end()) {
+                        return std::nullopt;
+                    }
+                    return found->second.asNumber();
+                };
+
+                if (const std::optional<double> enemyCount = applyNumericField("enemy_count")) {
+                    spawner.enemiesPerWave = std::max(1, static_cast<int>(std::lround(*enemyCount)));
+                }
+                if (const std::optional<double> spawnInterval = applyNumericField("spawn_interval")) {
+                    spawner.spawnInterval = std::max(0.1f, static_cast<float>(*spawnInterval));
+                }
+                if (const std::optional<double> waveIntensity = applyNumericField("wave_intensity")) {
+                    spawner.waveIntensity = std::max(0.1f, static_cast<float>(*waveIntensity));
+                }
+
+                Logger::get().info(
+                    "Interpreter wave descriptor applied: wave={} enemies={} interval={} intensity={}",
+                    spawner.currentWave,
+                    spawner.enemiesPerWave,
+                    spawner.spawnInterval,
+                    spawner.waveIntensity
+                );
+            } else {
+                Logger::get().warn(
+                    "Interpreter wave_descriptor_policy returned non-object value {}",
+                    callbackResult->debugString()
+                );
+            }
+
+            syncWaveStateToInterpreter(
+                spawner,
+                defaultEnemyCount,
+                defaultSpawnInterval,
+                defaultWaveIntensity
+            );
+            return;
+        }
+
+        applyWaveEnemyCountPolicy(spawner, defaultEnemyCount);
+        applyWaveSpawnIntervalPolicy(spawner, defaultSpawnInterval);
+        syncWaveStateToInterpreter(
+            spawner,
+            defaultEnemyCount,
+            defaultSpawnInterval,
+            defaultWaveIntensity
+        );
+    }
+
+    void primeInitialWaveFromScript() {
+        world.each([this](flecs::entity, WaveSpawner& spawner) {
+            applyWaveDescriptorPolicy(
+                spawner,
+                spawner.enemiesPerWave,
+                spawner.spawnInterval,
+                spawner.waveIntensity
+            );
         });
     }
 
@@ -746,31 +945,50 @@ action command emit_ui_message wave advanced
                     if (spawner.enemiesSpawned < spawner.enemiesPerWave) {
                         spawnEnemy(spawner.currentWave, spawner.waveIntensity);
                         spawner.enemiesSpawned++;
+                        syncWaveStateToInterpreter(spawner);
                     } else {
                         // Wave complete
+                        syncWaveStateToInterpreter(spawner);
                         if (interpreterHost) {
                             interpreterHost->emitEvent({
                                 "wave_completed",
                                 {
                                     {"wave", std::to_string(spawner.currentWave)},
-                                    {"enemies_spawned", std::to_string(spawner.enemiesSpawned)}
+                                    {"enemies_spawned", std::to_string(spawner.enemiesSpawned)},
+                                    {"enemies_per_wave", std::to_string(spawner.enemiesPerWave)},
+                                    {"spawn_interval", std::to_string(spawner.spawnInterval)},
+                                    {"wave_intensity", std::to_string(spawner.waveIntensity)}
                                 }
                             });
                         }
 
                         spawner.currentWave++;
                         spawner.enemiesSpawned = 0;
-                        spawner.enemiesPerWave = 5 + spawner.currentWave * 2;
-                        spawner.waveIntensity *= 1.15f;
-                        spawner.spawnInterval = std::max(1.0f, 3.0f - spawner.currentWave * 0.1f);
+                        const int defaultEnemyCount = 5 + spawner.currentWave * 2;
+                        spawner.enemiesPerWave = defaultEnemyCount;
+                        const float defaultWaveIntensity = spawner.waveIntensity * 1.15f;
+                        spawner.waveIntensity = defaultWaveIntensity;
+                        const float defaultSpawnInterval = std::max(1.0f, 3.0f - spawner.currentWave * 0.1f);
+                        spawner.spawnInterval = defaultSpawnInterval;
+                        applyWaveDescriptorPolicy(
+                            spawner,
+                            defaultEnemyCount,
+                            defaultSpawnInterval,
+                            defaultWaveIntensity
+                        );
 
                         if (interpreterHost) {
                             interpreterHost->emitEvent({
                                 "wave_started",
                                 {
                                     {"wave", std::to_string(spawner.currentWave)},
+                                    {"enemies_spawned", std::to_string(spawner.enemiesSpawned)},
                                     {"enemies_per_wave", std::to_string(spawner.enemiesPerWave)},
-                                    {"spawn_interval", std::to_string(spawner.spawnInterval)}
+                                    {"spawn_interval", std::to_string(spawner.spawnInterval)},
+                                    {"wave_intensity", std::to_string(spawner.waveIntensity)},
+                                    {"default_enemy_count", std::to_string(defaultEnemyCount)},
+                                    {"default_spawn_interval", std::to_string(defaultSpawnInterval)},
+                                    {"default_wave_intensity", std::to_string(defaultWaveIntensity)}
                                 }
                             });
                         }
@@ -830,8 +1048,16 @@ action command emit_ui_message wave advanced
     }
 
     void createWaveSpawner() {
+        WaveSpawner spawner{};
+        syncWaveStateToInterpreter(
+            spawner,
+            spawner.enemiesPerWave,
+            spawner.spawnInterval,
+            spawner.waveIntensity
+        );
+
         world.entity("WaveSpawner")
-            .set<WaveSpawner>({});
+            .set<WaveSpawner>(spawner);
     }
 
     void spawnEnemy(int wave, float intensity) {

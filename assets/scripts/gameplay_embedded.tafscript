@@ -3,17 +3,39 @@ program gameplay_embedded
 rule embedded_loaded
 on_load
 action log gameplay_package_embedded_loaded
-action command set_blackboard gameplay_mode packaged
+action set package_state { gameplay_mode: packaged, base_wave_enemy_count: 6, base_spawn_interval: 2.5 }
+action set wave_state { current_wave: 1, enemies_spawned: 0, enemies_per_wave: var.package_state.base_wave_enemy_count, wave_intensity: 1.0, spawn_interval: var.package_state.base_spawn_interval }
+action set package_state.wave_descriptor_policy fn() { { enemy_count: var.package_state.base_wave_enemy_count + (var.wave_state.current_wave - 1), spawn_interval: var.package_state.base_spawn_interval - (var.wave_state.current_wave * 0.12), wave_intensity: var.wave_state.default_wave_intensity } }
+action command bind_host_callback wave_descriptor_policy package_state.wave_descriptor_policy
+action command log_blackboard wave_state
+action command log_blackboard package_state.wave_descriptor_policy
+
+rule embedded_mode_confirmed
+on_load
+if var.package_state.gameplay_mode == packaged
 action command emit_ui_message embedded gameplay script loaded|5.5|FFD060FF
 
 rule configure_first_wave
 on_event game_start
-action command set_wave_enemy_count 6
-action log gameplay_package_applied_wave_count
-action command emit_ui_message gameplay package adjusted first wave|6.0|FFB040FF
+action log gameplay_package_primed_wave_state
+action command emit_ui_message gameplay package primed wave ${var.wave_state.current_wave} with ${var.wave_state.enemies_per_wave} enemies|6.0|FFB040FF
 
 rule tighten_spawn_cadence
 on_event wave_started
-action command set_wave_spawn_interval 2.5
-action log gameplay_package_tuned_spawn_interval
-action command emit_ui_message gameplay package tightened spawn cadence|4.0|40D0FFFF
+if event.wave >= 2
+action set package_state.current_wave event.wave
+action set wave_state.current_wave event.wave
+action set wave_state.enemies_spawned event.enemies_spawned
+action set wave_state.enemies_per_wave event.enemies_per_wave
+action set wave_state.spawn_interval event.spawn_interval
+action set wave_state.wave_intensity event.wave_intensity
+action set wave_state.default_enemy_count event.default_enemy_count
+action set wave_state.default_spawn_interval event.default_spawn_interval
+action set wave_state.default_wave_intensity event.default_wave_intensity
+action log gameplay_package_synchronized_wave_state
+action command emit_ui_message gameplay package set wave ${var.wave_state.current_wave} to ${var.wave_state.enemies_per_wave} enemies at ${var.wave_state.spawn_interval}s|4.0|40D0FFFF
+
+rule track_completed_wave
+on_event wave_completed
+action set wave_state.last_completed_wave event.wave
+action set wave_state.last_spawn_count event.enemies_spawned

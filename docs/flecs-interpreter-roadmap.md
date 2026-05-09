@@ -42,6 +42,9 @@ It should not try to be:
 - a JIT/runtime compiler project
 - a replacement for all C++ gameplay code
 
+For the concrete 1.0 expression and assignment scope, see
+`docs/taffyscript-mini-spec.md`.
+
 ## Recommended Shape
 
 The best first version is not "a language" so much as "an ECS rule and command

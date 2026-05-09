@@ -303,6 +303,10 @@ add_executable(Tremor
     editor/file_dialog.cpp
 )
 
+if(MSVC)
+    target_compile_options(Tremor PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+endif()
+
 # Include directories
 target_include_directories(Tremor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
