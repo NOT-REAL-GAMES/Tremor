@@ -84,6 +84,16 @@ bool shouldTreatAsScriptDependency(const Taffy::DependencyChunk::Entry& entry) {
            entry.usage == Taffy::DependencyChunk::Usage::Generic;
 }
 
+std::vector<std::string> splitWords(std::string_view text) {
+    std::vector<std::string> words;
+    std::istringstream stream{std::string(text)};
+    std::string word;
+    while (stream >> word) {
+        words.push_back(std::move(word));
+    }
+    return words;
+}
+
 std::filesystem::path resolveDependencyPath(
     const std::filesystem::path& packagePath,
     const Taffy::DependencyChunk::Entry& entry
@@ -115,6 +125,14 @@ std::vector<std::string> splitPath(std::string_view path) {
     }
 
     return segments;
+}
+
+std::string stripVarPrefix(std::string_view path) {
+    std::string result = trimCopy(path);
+    if (startsWith(result, "var.")) {
+        result.erase(0, 4);
+    }
+    return result;
 }
 
 const Value* resolveBlackboardPath(
@@ -217,6 +235,98 @@ bool assignBlackboardPath(
     return true;
 }
 
+std::optional<flecs::entity_t> parseEntityId(std::string_view text) {
+    std::string value = trimCopy(text);
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    if (value.front() == '#') {
+        value.erase(0, 1);
+    }
+
+    try {
+        size_t consumed = 0;
+        const uint64_t parsed = std::stoull(value, &consumed);
+        if (consumed == value.size()) {
+            return static_cast<flecs::entity_t>(parsed);
+        }
+    } catch (const std::exception&) {
+    }
+
+    return std::nullopt;
+}
+
+std::optional<flecs::entity> resolveEntityRef(
+    flecs::world& world,
+    const ValueMap& blackboard,
+    std::string_view reference,
+    std::string* outError
+) {
+    const std::string text = trimCopy(reference);
+    if (text.empty()) {
+        if (outError != nullptr) {
+            *outError = "entity reference is empty";
+        }
+        return std::nullopt;
+    }
+
+    if (startsWith(text, "var.")) {
+        const Value* value = resolveBlackboardPath(blackboard, text.substr(4));
+        if (value == nullptr) {
+            if (outError != nullptr) {
+                *outError = std::format("blackboard entity reference '{}' is unset", text);
+            }
+            return std::nullopt;
+        }
+
+        const std::optional<flecs::entity_t> entityId = value->asEntityId();
+        if (!entityId) {
+            if (outError != nullptr) {
+                *outError = std::format(
+                    "blackboard value '{}' is not an entity, got {}",
+                    text,
+                    value->debugString()
+                );
+            }
+            return std::nullopt;
+        }
+
+        flecs::entity entity(world, *entityId);
+        if (!entity.is_alive()) {
+            if (outError != nullptr) {
+                *outError = std::format("entity '{}' is not alive", text);
+            }
+            return std::nullopt;
+        }
+        return entity;
+    }
+
+    if (const std::optional<flecs::entity_t> entityId = parseEntityId(text)) {
+        flecs::entity entity(world, *entityId);
+        if (!entity.is_alive()) {
+            if (outError != nullptr) {
+                *outError = std::format("entity id '{}' is not alive", text);
+            }
+            return std::nullopt;
+        }
+        return entity;
+    }
+
+    flecs::entity entity = world.lookup(text.c_str());
+    if (!entity || !entity.is_alive()) {
+        if (outError != nullptr) {
+            *outError = std::format("entity '{}' was not found", text);
+        }
+        return std::nullopt;
+    }
+    return entity;
+}
+
+flecs::entity getOrCreateTag(flecs::world& world, std::string_view name) {
+    const std::string tagName = trimCopy(name);
+    return world.entity(tagName.c_str());
+}
+
 std::optional<Value> evaluateExpression(
     std::string_view expression,
     const InterpreterEvent* event,
@@ -251,6 +361,11 @@ bool valueEquals(const Value& left, const Value& right) {
         case ValueType::Object:
         case ValueType::Lambda:
             return left.storage == right.storage;
+        case ValueType::Entity: {
+            const auto lhs = left.asEntityId();
+            const auto rhs = right.asEntityId();
+            return lhs && rhs && *lhs == *rhs;
+        }
     }
 
     return false;
@@ -274,6 +389,7 @@ bool coerceValueToBool(const Value& value) {
         }
         case ValueType::Object:
         case ValueType::Lambda:
+        case ValueType::Entity:
             return true;
     }
 
@@ -875,7 +991,10 @@ ValueType Value::type() const {
     if (std::holds_alternative<ObjectPtr>(storage)) {
         return ValueType::Object;
     }
-    return ValueType::Lambda;
+    if (std::holds_alternative<LambdaPtr>(storage)) {
+        return ValueType::Lambda;
+    }
+    return ValueType::Entity;
 }
 
 bool Value::isNull() const {
@@ -931,6 +1050,13 @@ LambdaValue* Value::asLambda() {
     return nullptr;
 }
 
+std::optional<flecs::entity_t> Value::asEntityId() const {
+    if (const flecs::entity_t* entity = std::get_if<flecs::entity_t>(&storage)) {
+        return *entity;
+    }
+    return std::nullopt;
+}
+
 std::string Value::toString() const {
     if (const double* number = std::get_if<double>(&storage)) {
         return std::format("{}", *number);
@@ -956,6 +1082,9 @@ std::string Value::toString() const {
         }
         return std::format("[lambda:{} params={}]", debugName, lambda->parameters.size());
     }
+    if (const auto entity = asEntityId()) {
+        return std::format("#{}", static_cast<uint64_t>(*entity));
+    }
     return "null";
 }
 
@@ -973,6 +1102,8 @@ std::string Value::debugString() const {
             return std::format("object({})", toString());
         case ValueType::Lambda:
             return std::format("lambda({})", toString());
+        case ValueType::Entity:
+            return std::format("entity({})", toString());
     }
 
     return "unknown";
@@ -1114,6 +1245,222 @@ FlecsInterpreterHost::FlecsInterpreterHost(flecs::world& world)
         }
 
         return bindHostCallback(std::move(callbackName), callbackPath);
+    });
+
+    registerCommand("ecs_create_entity", [this](const CommandContext&, std::string_view argument) {
+        const std::vector<std::string> args = splitWords(argument);
+        if (args.empty() || args.size() > 2) {
+            recordError(std::format(
+                "ecs_create_entity expects '<blackboard_path> [entity_name]', got '{}'",
+                trimCopy(argument)
+            ));
+            return false;
+        }
+
+        flecs::entity entity = args.size() == 2
+            ? world_.entity(args[1].c_str())
+            : world_.entity();
+
+        std::string assignmentError;
+        const std::string targetPath = stripVarPrefix(args[0]);
+        if (!assignBlackboardPath(blackboard_, targetPath, Value(entity.id()), &assignmentError)) {
+            recordError(std::format(
+                "ecs_create_entity failed to assign '{}': {}",
+                targetPath,
+                assignmentError
+            ));
+            return false;
+        }
+
+        Logger::get().info(
+            "Interpreter ECS created entity '{}' as {}",
+            args.size() == 2 ? args[1] : std::string("<unnamed>"),
+            static_cast<uint64_t>(entity.id())
+        );
+        return true;
+    });
+
+    registerCommand("ecs_find_entity", [this](const CommandContext&, std::string_view argument) {
+        const std::vector<std::string> args = splitWords(argument);
+        if (args.size() != 2) {
+            recordError(std::format(
+                "ecs_find_entity expects '<blackboard_path> <entity_name>', got '{}'",
+                trimCopy(argument)
+            ));
+            return false;
+        }
+
+        const std::string targetPath = stripVarPrefix(args[0]);
+        flecs::entity entity = world_.lookup(args[1].c_str());
+        Value value = entity && entity.is_alive()
+            ? Value(entity.id())
+            : Value(nullptr);
+
+        std::string assignmentError;
+        if (!assignBlackboardPath(blackboard_, targetPath, std::move(value), &assignmentError)) {
+            recordError(std::format(
+                "ecs_find_entity failed to assign '{}': {}",
+                targetPath,
+                assignmentError
+            ));
+            return false;
+        }
+
+        Logger::get().info(
+            "Interpreter ECS lookup '{}' -> {}",
+            args[1],
+            entity && entity.is_alive() ? std::format("#{}", static_cast<uint64_t>(entity.id())) : "null"
+        );
+        return true;
+    });
+
+    registerCommand("ecs_destroy_entity", [this](const CommandContext&, std::string_view argument) {
+        std::string error;
+        std::optional<flecs::entity> entity = resolveEntityRef(world_, blackboard_, argument, &error);
+        if (!entity) {
+            recordError(std::format("ecs_destroy_entity failed: {}", error));
+            return false;
+        }
+
+        const flecs::entity_t id = entity->id();
+        entity->destruct();
+        Logger::get().info("Interpreter ECS destroyed entity #{}", static_cast<uint64_t>(id));
+        return true;
+    });
+
+    registerCommand("ecs_add_tag", [this](const CommandContext&, std::string_view argument) {
+        const std::vector<std::string> args = splitWords(argument);
+        if (args.size() != 2) {
+            recordError(std::format(
+                "ecs_add_tag expects '<entity_ref> <tag_name>', got '{}'",
+                trimCopy(argument)
+            ));
+            return false;
+        }
+
+        std::string error;
+        std::optional<flecs::entity> entity = resolveEntityRef(world_, blackboard_, args[0], &error);
+        if (!entity) {
+            recordError(std::format("ecs_add_tag failed: {}", error));
+            return false;
+        }
+
+        flecs::entity tag = getOrCreateTag(world_, args[1]);
+        entity->add(tag);
+        Logger::get().info(
+            "Interpreter ECS added tag '{}' to #{}",
+            args[1],
+            static_cast<uint64_t>(entity->id())
+        );
+        return true;
+    });
+
+    registerCommand("ecs_remove_tag", [this](const CommandContext&, std::string_view argument) {
+        const std::vector<std::string> args = splitWords(argument);
+        if (args.size() != 2) {
+            recordError(std::format(
+                "ecs_remove_tag expects '<entity_ref> <tag_name>', got '{}'",
+                trimCopy(argument)
+            ));
+            return false;
+        }
+
+        std::string error;
+        std::optional<flecs::entity> entity = resolveEntityRef(world_, blackboard_, args[0], &error);
+        if (!entity) {
+            recordError(std::format("ecs_remove_tag failed: {}", error));
+            return false;
+        }
+
+        flecs::entity tag = world_.lookup(args[1].c_str());
+        if (!tag) {
+            Logger::get().info("Interpreter ECS tag '{}' is unset; remove skipped", args[1]);
+            return true;
+        }
+
+        entity->remove(tag);
+        Logger::get().info(
+            "Interpreter ECS removed tag '{}' from #{}",
+            args[1],
+            static_cast<uint64_t>(entity->id())
+        );
+        return true;
+    });
+
+    registerCommand("ecs_has_tag", [this](const CommandContext&, std::string_view argument) {
+        const std::vector<std::string> args = splitWords(argument);
+        if (args.size() != 3) {
+            recordError(std::format(
+                "ecs_has_tag expects '<blackboard_path> <entity_ref> <tag_name>', got '{}'",
+                trimCopy(argument)
+            ));
+            return false;
+        }
+
+        std::string error;
+        std::optional<flecs::entity> entity = resolveEntityRef(world_, blackboard_, args[1], &error);
+        if (!entity) {
+            recordError(std::format("ecs_has_tag failed: {}", error));
+            return false;
+        }
+
+        flecs::entity tag = world_.lookup(args[2].c_str());
+        const bool hasTag = tag && entity->has(tag);
+
+        std::string assignmentError;
+        const std::string targetPath = stripVarPrefix(args[0]);
+        if (!assignBlackboardPath(blackboard_, targetPath, Value(hasTag), &assignmentError)) {
+            recordError(std::format(
+                "ecs_has_tag failed to assign '{}': {}",
+                targetPath,
+                assignmentError
+            ));
+            return false;
+        }
+
+        Logger::get().info(
+            "Interpreter ECS has_tag #{} {} -> {}",
+            static_cast<uint64_t>(entity->id()),
+            args[2],
+            hasTag ? "true" : "false"
+        );
+        return true;
+    });
+
+    registerCommand("ecs_store_entity_id", [this](const CommandContext&, std::string_view argument) {
+        const std::vector<std::string> args = splitWords(argument);
+        if (args.size() != 2) {
+            recordError(std::format(
+                "ecs_store_entity_id expects '<blackboard_path> <entity_ref>', got '{}'",
+                trimCopy(argument)
+            ));
+            return false;
+        }
+
+        std::string error;
+        std::optional<flecs::entity> entity = resolveEntityRef(world_, blackboard_, args[1], &error);
+        if (!entity) {
+            recordError(std::format("ecs_store_entity_id failed: {}", error));
+            return false;
+        }
+
+        std::string assignmentError;
+        const std::string targetPath = stripVarPrefix(args[0]);
+        if (!assignBlackboardPath(
+                blackboard_,
+                targetPath,
+                Value(std::format("{}", static_cast<uint64_t>(entity->id()))),
+                &assignmentError
+            )) {
+            recordError(std::format(
+                "ecs_store_entity_id failed to assign '{}': {}",
+                targetPath,
+                assignmentError
+            ));
+            return false;
+        }
+
+        return true;
     });
 }
 

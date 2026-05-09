@@ -24,6 +24,7 @@ enum class ValueType : uint8_t {
     String,
     Object,
     Lambda,
+    Entity,
 };
 
 struct ObjectValue;
@@ -32,7 +33,7 @@ struct LambdaValue;
 struct Value {
     using ObjectPtr = std::shared_ptr<ObjectValue>;
     using LambdaPtr = std::shared_ptr<LambdaValue>;
-    using Storage = std::variant<std::monostate, double, bool, std::string, ObjectPtr, LambdaPtr>;
+    using Storage = std::variant<std::monostate, double, bool, std::string, ObjectPtr, LambdaPtr, flecs::entity_t>;
 
     Storage storage{};
 
@@ -44,6 +45,7 @@ struct Value {
     Value(const char* text) : storage(std::string(text)) {}
     Value(ObjectPtr object) : storage(std::move(object)) {}
     Value(LambdaPtr lambda) : storage(std::move(lambda)) {}
+    Value(flecs::entity_t entity) : storage(entity) {}
 
     ValueType type() const;
     bool isNull() const;
@@ -54,6 +56,7 @@ struct Value {
     ObjectValue* asObject();
     const LambdaValue* asLambda() const;
     LambdaValue* asLambda();
+    std::optional<flecs::entity_t> asEntityId() const;
     std::string toString() const;
     std::string debugString() const;
 

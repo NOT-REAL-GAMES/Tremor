@@ -13,11 +13,14 @@
 #include "flecs_interpreter.h"
 #include "vk.h"  // Include VulkanBackend for rendering
 #include "dmc_physics.h"  // Include Jolt Physics integration
+#include "jolt_physics_adapter.h"
+#include "physics_interop.h"
 #include <random>
 #include <cmath>
 #include <string>
 #include <deque>
 #include <vector>
+#include <utility>
 #include "logger.h"
 
 namespace DMCSurvivors {
@@ -276,6 +279,8 @@ private:
 
     // Jolt Physics integration
     std::unique_ptr<DMCSurvivors::PhysicsWorld> physicsWorld;
+    std::unique_ptr<tremor::physics::JoltPhysicsAdapter> physicsAdapter;
+    tremor::physics::PhysicsLayerConfigBuilder physicsLayerConfig;
 
 public:
     Game() {
@@ -445,6 +450,7 @@ public:
 private:
     void setupInterpreterHost() {
         interpreterHost = std::make_unique<tremor::script::FlecsInterpreterHost>(world);
+        tremor::physics::registerPhysicsLayerConfigCommands(*interpreterHost, physicsLayerConfig);
 
         interpreterHost->registerCommand("set_wave_spawn_interval", [this](
             const tremor::script::CommandContext&,
@@ -490,6 +496,11 @@ private:
             Logger::get().info("Interpreter requested an enemy spawn");
             return true;
         });
+
+        if (physicsWorld) {
+            physicsAdapter = std::make_unique<tremor::physics::JoltPhysicsAdapter>(*physicsWorld);
+            tremor::physics::registerPhysicsInteropCommands(*interpreterHost, *physicsAdapter);
+        }
     }
 
     void applyWaveSpawnIntervalPolicy(WaveSpawner& spawner, float baseInterval) {
@@ -1347,7 +1358,12 @@ action command emit_ui_message wave advanced
     void initializePhysics() {
         Logger::get().info("🎯 Initializing Jolt Physics for DMC Survivors...");
 
-        physicsWorld = std::make_unique<DMCSurvivors::PhysicsWorld>();
+        tremor::physics::JoltPhysicsSettings settings;
+        if (!physicsLayerConfig.empty()) {
+            settings.layers = physicsLayerConfig.build();
+        }
+
+        physicsWorld = std::make_unique<DMCSurvivors::PhysicsWorld>(std::move(settings));
         if (!physicsWorld->Initialize()) {
             Logger::get().error("Failed to initialize Jolt Physics!");
             physicsWorld.reset();

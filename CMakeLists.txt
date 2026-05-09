@@ -283,6 +283,9 @@ add_executable(Tremor
     vm.cpp
     vm_bytecode.cpp
     dmc_physics.cpp
+    jolt_physics_world.cpp
+    physics_interop.cpp
+    jolt_physics_adapter.cpp
     renderer/taffy_integration.cpp
     renderer/taffy_mesh.cpp
     renderer/sdf_text_renderer.cpp
