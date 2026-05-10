@@ -176,8 +176,10 @@ namespace tremor::gfx {
 } // namespace tremor::gfx
 
 #if defined(USING_VULKAN)
- // Template for RAII Vulkan objects with type-based specialization
-template<typename T>
+ // Template for RAII Vulkan objects with explicit deleter tags.
+ // Some Vulkan platforms alias non-dispatchable handles to the same raw type,
+ // so the deleter tag keeps each resource wrapper distinct.
+template<typename T, typename Destroyer>
 class VulkanResource {
 private:
     VkDevice m_device = VK_NULL_HANDLE;
@@ -219,7 +221,7 @@ public:
     operator T() const {
         if (this == nullptr) {            
             Logger::get().error("RESOURCE DOES NOT EXIST. FUCK");
-            return nullptr;
+            return VK_NULL_HANDLE;
         }
         return m_handle; }
 
@@ -242,99 +244,48 @@ public:
 private:
     void cleanup() {
         if (m_handle != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
-            destroy(m_device, m_handle);
+            Destroyer::destroy(m_device, m_handle);
         }
     }
-
-    static void destroy(VkDevice device, T handle);
 };
 
-// Specializations for each Vulkan type
-template<> inline void VulkanResource<VkImage>::destroy(VkDevice device, VkImage handle) {
-    vkDestroyImage(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkImageView>::destroy(VkDevice device, VkImageView handle) {
-    vkDestroyImageView(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkBuffer>::destroy(VkDevice device, VkBuffer handle) {
-    vkDestroyBuffer(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkDeviceMemory>::destroy(VkDevice device, VkDeviceMemory handle) {
-    vkFreeMemory(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkPipeline>::destroy(VkDevice device, VkPipeline handle) {
-    vkDestroyPipeline(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkShaderModule>::destroy(VkDevice device, VkShaderModule handle) {
-    vkDestroyShaderModule(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkDescriptorSetLayout>::destroy(VkDevice device, VkDescriptorSetLayout handle) {
-    vkDestroyDescriptorSetLayout(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkPipelineLayout>::destroy(VkDevice device, VkPipelineLayout handle) {
-    vkDestroyPipelineLayout(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkSampler>::destroy(VkDevice device, VkSampler handle) {
-    vkDestroySampler(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkSwapchainKHR>::destroy(VkDevice device, VkSwapchainKHR handle) {
-}
-
-template<> inline void VulkanResource<VkCommandPool>::destroy(VkDevice device, VkCommandPool handle) {
-    vkDestroyCommandPool(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkFence>::destroy(VkDevice device, VkFence handle) {
-    vkDestroyFence(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkSemaphore>::destroy(VkDevice device, VkSemaphore handle) {
-    vkDestroySemaphore(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkFramebuffer>::destroy(VkDevice device, VkFramebuffer handle) {
-    vkDestroyFramebuffer(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkRenderPass>::destroy(VkDevice device, VkRenderPass handle) {
-    vkDestroyRenderPass(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkDescriptorPool>::destroy(VkDevice device, VkDescriptorPool handle) {
-    vkDestroyDescriptorPool(device, handle, nullptr);
-}
-
-template<> inline void VulkanResource<VkDescriptorSet>::destroy(VkDevice device, VkDescriptorSet handle) {
-}
+struct DestroyVkImage { static void destroy(VkDevice device, VkImage handle) { vkDestroyImage(device, handle, nullptr); } };
+struct DestroyVkImageView { static void destroy(VkDevice device, VkImageView handle) { vkDestroyImageView(device, handle, nullptr); } };
+struct DestroyVkBuffer { static void destroy(VkDevice device, VkBuffer handle) { vkDestroyBuffer(device, handle, nullptr); } };
+struct DestroyVkDeviceMemory { static void destroy(VkDevice device, VkDeviceMemory handle) { vkFreeMemory(device, handle, nullptr); } };
+struct DestroyVkPipeline { static void destroy(VkDevice device, VkPipeline handle) { vkDestroyPipeline(device, handle, nullptr); } };
+struct DestroyVkShaderModule { static void destroy(VkDevice device, VkShaderModule handle) { vkDestroyShaderModule(device, handle, nullptr); } };
+struct DestroyVkDescriptorSetLayout { static void destroy(VkDevice device, VkDescriptorSetLayout handle) { vkDestroyDescriptorSetLayout(device, handle, nullptr); } };
+struct DestroyVkPipelineLayout { static void destroy(VkDevice device, VkPipelineLayout handle) { vkDestroyPipelineLayout(device, handle, nullptr); } };
+struct DestroyVkSampler { static void destroy(VkDevice device, VkSampler handle) { vkDestroySampler(device, handle, nullptr); } };
+struct DestroyVkSwapchain { static void destroy(VkDevice, VkSwapchainKHR) {} };
+struct DestroyVkCommandPool { static void destroy(VkDevice device, VkCommandPool handle) { vkDestroyCommandPool(device, handle, nullptr); } };
+struct DestroyVkFence { static void destroy(VkDevice device, VkFence handle) { vkDestroyFence(device, handle, nullptr); } };
+struct DestroyVkSemaphore { static void destroy(VkDevice device, VkSemaphore handle) { vkDestroySemaphore(device, handle, nullptr); } };
+struct DestroyVkFramebuffer { static void destroy(VkDevice device, VkFramebuffer handle) { vkDestroyFramebuffer(device, handle, nullptr); } };
+struct DestroyVkRenderPass { static void destroy(VkDevice device, VkRenderPass handle) { vkDestroyRenderPass(device, handle, nullptr); } };
+struct DestroyVkDescriptorPool { static void destroy(VkDevice device, VkDescriptorPool handle) { vkDestroyDescriptorPool(device, handle, nullptr); } };
+struct DestroyVkDescriptorSet { static void destroy(VkDevice, VkDescriptorSet) {} };
 
 
 // Type aliases for convenience
-using ImageResource = VulkanResource<VkImage>;
-using ImageViewResource = VulkanResource<VkImageView>;
-using BufferResource = VulkanResource<VkBuffer>;
-using DeviceMemoryResource = VulkanResource<VkDeviceMemory>;
-using PipelineResource = VulkanResource<VkPipeline>;
-using ShaderModuleResource = VulkanResource<VkShaderModule>;
-using DescriptorSetLayoutResource = VulkanResource<VkDescriptorSetLayout>;
-using DescriptorPoolResource = VulkanResource<VkDescriptorPool>;
-using DescriptorSetResource = VulkanResource<VkDescriptorSet>;
-using PipelineLayoutResource = VulkanResource<VkPipelineLayout>;
-using SamplerResource = VulkanResource<VkSampler>;
-using SwapchainResource = VulkanResource<VkSwapchainKHR>;
-using CommandPoolResource = VulkanResource<VkCommandPool>;
-using FenceResource = VulkanResource<VkFence>;
-using SemaphoreResource = VulkanResource<VkSemaphore>;
-using FramebufferResource = VulkanResource<VkFramebuffer>;
-using RenderPassResource = VulkanResource<VkRenderPass>;
+using ImageResource = VulkanResource<VkImage, DestroyVkImage>;
+using ImageViewResource = VulkanResource<VkImageView, DestroyVkImageView>;
+using BufferResource = VulkanResource<VkBuffer, DestroyVkBuffer>;
+using DeviceMemoryResource = VulkanResource<VkDeviceMemory, DestroyVkDeviceMemory>;
+using PipelineResource = VulkanResource<VkPipeline, DestroyVkPipeline>;
+using ShaderModuleResource = VulkanResource<VkShaderModule, DestroyVkShaderModule>;
+using DescriptorSetLayoutResource = VulkanResource<VkDescriptorSetLayout, DestroyVkDescriptorSetLayout>;
+using DescriptorPoolResource = VulkanResource<VkDescriptorPool, DestroyVkDescriptorPool>;
+using DescriptorSetResource = VulkanResource<VkDescriptorSet, DestroyVkDescriptorSet>;
+using PipelineLayoutResource = VulkanResource<VkPipelineLayout, DestroyVkPipelineLayout>;
+using SamplerResource = VulkanResource<VkSampler, DestroyVkSampler>;
+using SwapchainResource = VulkanResource<VkSwapchainKHR, DestroyVkSwapchain>;
+using CommandPoolResource = VulkanResource<VkCommandPool, DestroyVkCommandPool>;
+using FenceResource = VulkanResource<VkFence, DestroyVkFence>;
+using SemaphoreResource = VulkanResource<VkSemaphore, DestroyVkSemaphore>;
+using FramebufferResource = VulkanResource<VkFramebuffer, DestroyVkFramebuffer>;
+using RenderPassResource = VulkanResource<VkRenderPass, DestroyVkRenderPass>;
 #endif
 
 namespace tremor::gfx {

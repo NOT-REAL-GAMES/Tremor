@@ -2158,6 +2158,7 @@ namespace tremor::gfx {
         VkQueue getGraphicsQueue() const { return graphicsQueue; }
         VkCommandBuffer getCurrentCommandBuffer() const { return m_commandBuffers[currentFrame]; }
         VkExtent2D getSwapchainExtent() const { return vkSwapchain ? vkSwapchain->extent() : VkExtent2D{1920, 1080}; }
+        bool isFrameReady() const { return m_frameReady; }
         UIRenderer* getUIRenderer() const { return m_uiRenderer.get(); }
         VulkanClusteredRenderer* getClusteredRenderer() const { return m_clusteredRenderer.get(); }
         void enqueueUiMessage(const std::string& text, float durationSeconds = 4.0f, uint32_t color = 0xFFD060FF);
@@ -2346,6 +2347,8 @@ namespace tremor::gfx {
         // Frame tracking
         size_t currentFrame = 0;
         uint32_t m_currentImageIndex = 0;
+        bool m_frameReady = false;
+        bool m_framebufferResized = false;
 
         // === FRAMEBUFFERS ===
 
@@ -2386,6 +2389,7 @@ namespace tremor::gfx {
         bool createDepthResources();
         bool createRenderPass();
         bool createFramebuffers();
+        bool recreateSwapchainResources();
         
         // === MULTISAMPLING METHODS ===
         

@@ -189,7 +189,14 @@ public:
             Logger::get().critical("SDL INITIALIZATION FAILED.");
         }
 
-        window = SDL_CreateWindow("Tremor", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 1280, 720, SDL_WINDOW_VULKAN);
+        window = SDL_CreateWindow(
+            "Tremor",
+            SDL_WINDOWPOS_UNDEFINED,
+            SDL_WINDOWPOS_UNDEFINED,
+            1280,
+            720,
+            SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE
+        );
         Logger::get().critical("Creating RenderBackend...");
         rb = tremor::gfx::RenderBackend::create(window);
         Logger::get().critical("RenderBackend created: {}", (void*)rb.get());
@@ -487,6 +494,7 @@ public:
             Logger::get().critical("About to call beginFrame, count {}", renderCallCount);
         }
 
+        auto* vulkanBackend = static_cast<tremor::gfx::VulkanBackend*>(rb.get());
         rb.get()->beginFrame();
 
         if (renderCallCount < 5) {
@@ -494,7 +502,7 @@ public:
         }
 
         // Render game entities AFTER beginFrame but BEFORE endFrame
-        if (game) {
+        if (game && vulkanBackend->isFrameReady()) {
             game->renderEntities(rb.get());
         }
 
@@ -502,7 +510,9 @@ public:
             Logger::get().critical("entities rendered, about to call endFrame");
         }
 
-        rb.get()->endFrame();
+        if (vulkanBackend->isFrameReady()) {
+            rb.get()->endFrame();
+        }
         
         if (renderCallCount < 5) {
             Logger::get().critical("endFrame returned, render loop iteration {} complete", renderCallCount);

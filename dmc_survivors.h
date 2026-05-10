@@ -15,8 +15,12 @@
 #include "dmc_physics.h"  // Include Jolt Physics integration
 #include "jolt_physics_adapter.h"
 #include "physics_interop.h"
+#include "render_interop.h"
+#include "script_ecs_components.h"
+#include "script_render_system.h"
 #include <random>
 #include <cmath>
+#include <optional>
 #include <string>
 #include <deque>
 #include <vector>
@@ -281,6 +285,8 @@ private:
     std::unique_ptr<DMCSurvivors::PhysicsWorld> physicsWorld;
     std::unique_ptr<tremor::physics::JoltPhysicsAdapter> physicsAdapter;
     tremor::physics::PhysicsLayerConfigBuilder physicsLayerConfig;
+    tremor::render::RenderInteropRegistry renderRegistry;
+    tremor::render::ScriptRenderCamera renderCamera;
 
 public:
     Game() {
@@ -371,6 +377,10 @@ public:
 
     // Render all entities - called from main loop
     void renderEntities(void* renderBackend) {
+        if (tremor::render::renderScriptFrame(renderRegistry, renderCamera, world, renderBackend)) {
+            return;
+        }
+
         // Cast to VulkanBackend for mesh rendering
         auto* vulkanBackend = static_cast<tremor::gfx::VulkanBackend*>(renderBackend);
         if (!vulkanBackend) return;
@@ -450,7 +460,9 @@ public:
 private:
     void setupInterpreterHost() {
         interpreterHost = std::make_unique<tremor::script::FlecsInterpreterHost>(world);
+        tremor::ecs::registerScriptComponentCommands(*interpreterHost);
         tremor::physics::registerPhysicsLayerConfigCommands(*interpreterHost, physicsLayerConfig);
+        tremor::render::registerScriptRenderFrameCommands(*interpreterHost, renderRegistry, renderCamera);
 
         interpreterHost->registerCommand("set_wave_spawn_interval", [this](
             const tremor::script::CommandContext&,

@@ -179,74 +179,74 @@ if(NOT Vulkan_FOUND)
 endif()
 
 # Find SDL2
-set(SDL2_FOUND FALSE)
-if(TARGET SDL2::SDL2)
-    set(SDL2_FOUND TRUE)
-    message(STATUS "Using vendored SDL2 target")
-elseif(WIN32 AND DEFINED ENV{VULKAN_SDK})
-    set(VULKAN_SDK_PATH $ENV{VULKAN_SDK})
-    
-    # Look for SDL2 in Vulkan SDK Third-Party folder
-    find_path(SDL2_INCLUDE_DIR
-        NAMES SDL.h
-        PATHS 
-            ${VULKAN_SDK_PATH}/Include
-            ${VULKAN_SDK_PATH}/Include/SDL2
-        NO_DEFAULT_PATH
-    )
-    
-    find_library(SDL2_LIBRARY
-        NAMES SDL2
-        PATHS
-            ${VULKAN_SDK_PATH}/Bin
-            ${VULKAN_SDK_PATH}/Lib
-        NO_DEFAULT_PATH
-    )
-    
-    find_library(SDL2MAIN_LIBRARY
-        NAMES SDL2main
-        PATHS
-            ${VULKAN_SDK_PATH}/Bin
-            ${VULKAN_SDK_PATH}/Lib
-        NO_DEFAULT_PATH
-    )
-    
-    if(SDL2_INCLUDE_DIR AND SDL2_LIBRARY)
-        set(SDL2_FOUND TRUE)
-        message(STATUS "Found SDL2 in Vulkan SDK: ${VULKAN_SDK_PATH}")
-        message(STATUS "  Include: ${SDL2_INCLUDE_DIR}")
-        message(STATUS "  Library: ${SDL2_LIBRARY}")
+#set(SDL2_FOUND FALSE)
+#if(TARGET SDL2::SDL2)
+#    set(SDL2_FOUND TRUE)
+#    message(STATUS "Using vendored SDL2 target")
+#elseif(WIN32 AND DEFINED ENV{VULKAN_SDK})
+#    set(VULKAN_SDK_PATH $ENV{VULKAN_SDK})
+#    
+#    # Look for SDL2 in Vulkan SDK Third-Party folder
+#    find_path(SDL2_INCLUDE_DIR
+#        NAMES SDL.h
+#        PATHS 
+#            ${VULKAN_SDK_PATH}/Include
+#            ${VULKAN_SDK_PATH}/Include/SDL2
+#        NO_DEFAULT_PATH
+#    )
+#    
+#    find_library(SDL2_LIBRARY
+#        NAMES SDL2
+#        PATHS
+#            ${VULKAN_SDK_PATH}/Bin
+#            ${VULKAN_SDK_PATH}/Lib
+#        NO_DEFAULT_PATH
+#    )
+#    
+#    find_library(SDL2MAIN_LIBRARY
+#        NAMES SDL2main
+#        PATHS
+#            ${VULKAN_SDK_PATH}/Bin
+#            ${VULKAN_SDK_PATH}/Lib
+#        NO_DEFAULT_PATH
+#    )
+#    
+#    if(SDL2_INCLUDE_DIR AND SDL2_LIBRARY)
+#        set(SDL2_FOUND TRUE)
+#        message(STATUS "Found SDL2 in Vulkan SDK: ${VULKAN_SDK_PATH}")
+#        message(STATUS "  Include: ${SDL2_INCLUDE_DIR}")
+#        message(STATUS "  Library: ${SDL2_LIBRARY}")
+#
+#        add_library(SDL2::SDL2 UNKNOWN IMPORTED)
+#        set_target_properties(SDL2::SDL2 PROPERTIES
+#            IMPORTED_LOCATION "${SDL2_LIBRARY}"
+#            INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIR}"
+#        )
+#
+#        if(SDL2MAIN_LIBRARY)
+#            add_library(SDL2::SDL2main UNKNOWN IMPORTED)
+#            set_target_properties(SDL2::SDL2main PROPERTIES
+#                IMPORTED_LOCATION "${SDL2MAIN_LIBRARY}"
+#            )
+#        endif()
+#    endif()
+#else()
+#    find_package(SDL2 REQUIRED)
+#    if(TARGET SDL2::SDL2)
+#        set(SDL2_FOUND TRUE)
+#    elseif(SDL2_INCLUDE_DIRS AND SDL2_LIBRARIES)
+#        set(SDL2_FOUND TRUE)
+#        add_library(SDL2::SDL2 INTERFACE IMPORTED)
+#        set_target_properties(SDL2::SDL2 PROPERTIES
+#            INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIRS}"
+#            INTERFACE_LINK_LIBRARIES "${SDL2_LIBRARIES}"
+#        )
+#    endif()
+#endif()
 
-        add_library(SDL2::SDL2 UNKNOWN IMPORTED)
-        set_target_properties(SDL2::SDL2 PROPERTIES
-            IMPORTED_LOCATION "${SDL2_LIBRARY}"
-            INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIR}"
-        )
-
-        if(SDL2MAIN_LIBRARY)
-            add_library(SDL2::SDL2main UNKNOWN IMPORTED)
-            set_target_properties(SDL2::SDL2main PROPERTIES
-                IMPORTED_LOCATION "${SDL2MAIN_LIBRARY}"
-            )
-        endif()
-    endif()
-else()
-    find_package(SDL2 REQUIRED)
-    if(TARGET SDL2::SDL2)
-        set(SDL2_FOUND TRUE)
-    elseif(SDL2_INCLUDE_DIRS AND SDL2_LIBRARIES)
-        set(SDL2_FOUND TRUE)
-        add_library(SDL2::SDL2 INTERFACE IMPORTED)
-        set_target_properties(SDL2::SDL2 PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "${SDL2_INCLUDE_DIRS}"
-            INTERFACE_LINK_LIBRARIES "${SDL2_LIBRARIES}"
-        )
-    endif()
-endif()
-
-if(NOT SDL2_FOUND)
-    message(FATAL_ERROR "SDL2 not found! Use the vendored SDL checkout, install SDL2, or set VULKAN_SDK so the bundled SDL2 can be located.")
-endif()
+#if(NOT SDL2_FOUND)
+#    message(FATAL_ERROR "SDL2 not found! Use the vendored SDL checkout, install SDL2, or set VULKAN_SDK so the bundled SDL2 can be located.")
+#endif()
 
 find_package(Threads REQUIRED)
 
@@ -286,6 +286,9 @@ add_executable(Tremor
     jolt_physics_world.cpp
     physics_interop.cpp
     jolt_physics_adapter.cpp
+    script_ecs_components.cpp
+    render_interop.cpp
+    script_render_system.cpp
     renderer/taffy_integration.cpp
     renderer/taffy_mesh.cpp
     renderer/sdf_text_renderer.cpp

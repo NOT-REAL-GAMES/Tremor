@@ -6306,11 +6306,58 @@ namespace tremor::gfx {
             return true;
         }
 
+        bool VulkanBackend::recreateSwapchainResources() {
+            if (!vkSwapchain) {
+                return false;
+            }
+
+            int width = 0;
+            int height = 0;
+            SDL_Vulkan_GetDrawableSize(w, &width, &height);
+            if (width <= 0 || height <= 0) {
+                return false;
+            }
+
+            vkDeviceWaitIdle(device);
+
+            m_framebuffers.clear();
+            m_depthImageView.reset();
+            m_depthImage.reset();
+            m_depthImageMemory.reset();
+            m_colorImageView.reset();
+            m_colorImage.reset();
+            m_colorImageMemory.reset();
+
+            vkSwapchain->recreate(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+
+            if (!createDepthResources()) {
+                return false;
+            }
+            if (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT && !createColorResources()) {
+                return false;
+            }
+            if (!vkDevice->capabilities().dynamicRendering && !createFramebuffers()) {
+                return false;
+            }
+            if (m_overlayManager) {
+                m_overlayManager->updateSwapchainExtent(vkSwapchain->extent());
+            }
+
+            cam.extent = vkSwapchain->extent();
+            m_framebufferResized = false;
+            return true;
+        }
+
 
         void VulkanBackend::beginFrame() {
+            m_frameReady = false;
             static int frameCount = 0;
             if (frameCount < 5) {
                 Logger::get().critical("beginFrame() called, frame {}", frameCount++);
+            }
+
+            if (m_framebufferResized && !recreateSwapchainResources()) {
+                return;
             }
 
             updateOverlaySystem();
@@ -6386,10 +6433,7 @@ namespace tremor::gfx {
                 imageIndex);
 
             if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
-                // Recreate swapchain and return
-                int width, height;
-                SDL_GetWindowSize(w, &width, &height);
-                vkSwapchain.get()->recreate(width, height);
+                recreateSwapchainResources();
                 return;
             }
             else if (result != VK_SUCCESS) {
@@ -6466,6 +6510,7 @@ namespace tremor::gfx {
 
                 // Store current image index for endFrame
                 m_currentImageIndex = imageIndex;
+                m_frameReady = true;
             }
             else {
 
@@ -6490,6 +6535,7 @@ namespace tremor::gfx {
 
                 // Store the current image index for use in endFrame
                 m_currentImageIndex = imageIndex;
+                m_frameReady = true;
             }
 
 
@@ -6723,6 +6769,9 @@ namespace tremor::gfx {
         }
 
         void VulkanBackend::endFrame() {
+        if (!m_frameReady) {
+            return;
+        }
         static int endFrameCount = 0;
         if (endFrameCount < 50) {
             //Logger::get().critical("endFrame() called, count {}", endFrameCount++);
@@ -6909,10 +6958,7 @@ namespace tremor::gfx {
             //Logger::get().info("Present result: {}", static_cast<int>(presentResult));
 
             if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
-                //Logger::get().info("Recreating swapchain");
-                int width, height;
-                SDL_GetWindowSize(w, &width, &height);
-                vkSwapchain.get()->recreate(width, height);
+                recreateSwapchainResources();
             }
             else if (presentResult != VK_SUCCESS) {
                 //Logger::get().error("Failed to present: {}", static_cast<int>(presentResult));
@@ -6925,6 +6971,7 @@ namespace tremor::gfx {
 
             // Move to next frame
             currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+            m_frameReady = false;
         }
 
 
@@ -7258,6 +7305,12 @@ namespace tremor::gfx {
         }
         
         void VulkanBackend::handleInput(const SDL_Event& event) {
+            if (event.type == SDL_WINDOWEVENT &&
+                    (event.window.event == SDL_WINDOWEVENT_RESIZED ||
+                     event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)) {
+                m_framebufferResized = true;
+            }
+
             // Pass input to UI renderer first (UI elements take priority)
             if (m_uiRenderer) {
                 m_uiRenderer->updateInput(event);
@@ -7515,13 +7568,40 @@ namespace tremor::gfx {
                 }
             }
 #endif
-            VkSurfaceKHR surf;
-            if (!SDL_Vulkan_CreateSurface(w, instance, &surf)) {
-                //Logger::get().error("Failed to create Vulkan surface : {}", (int)err);
+#if defined(_WIN32)
+            SDL_SysWMinfo wmInfo{};
+            SDL_VERSION(&wmInfo.version);
+            if (!SDL_GetWindowWMInfo(w, &wmInfo) || wmInfo.subsystem != SDL_SYSWM_WINDOWS) {
                 return false;
             }
 
-            surface = SurfaceResource(instance, surf);
+            VkWin32SurfaceCreateInfoKHR surfaceInfo{};
+            surfaceInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+            surfaceInfo.hinstance = wmInfo.info.win.hinstance
+                ? wmInfo.info.win.hinstance
+                : GetModuleHandleW(nullptr);
+            surfaceInfo.hwnd = wmInfo.info.win.window;
+
+            auto createWin32Surface = reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(
+                vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR"));
+            if (!createWin32Surface) {
+                return false;
+            }
+
+            VkSurfaceKHR surfaceHandle = VK_NULL_HANDLE;
+            err = createWin32Surface(instance, &surfaceInfo, nullptr, &surfaceHandle);
+            if (err != VK_SUCCESS) {
+                return false;
+            }
+            surface = SurfaceResource(instance, surfaceHandle);
+#else
+            SDL_vulkanSurface surfaceHandle = VK_NULL_HANDLE;
+            if (!SDL_Vulkan_CreateSurface(w, instance, &surfaceHandle)) {
+                return false;
+            }
+
+            surface = SurfaceResource(instance, static_cast<VkSurfaceKHR>(surfaceHandle));
+#endif
 
             //Logger::get().info("Vulkan surface created successfully");
 
