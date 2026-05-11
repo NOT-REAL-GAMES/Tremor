@@ -2,7 +2,7 @@
 
 #include "../../../tremor_core.h"
 #include "include/taffy.h"
-#include "../../../quan.h"
+#include "include/quan.h"
 #include "../../../gfx.h"
 
 // Forward declaration
