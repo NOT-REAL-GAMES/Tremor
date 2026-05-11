@@ -391,6 +391,13 @@ public:
 
         // Get current command buffer and create a view-projection matrix that follows the player
         VkCommandBuffer cmd = vulkanBackend->getCurrentCommandBuffer();
+        const VkExtent2D swapchainExtent = vulkanBackend->getSwapchainExtent();
+        if (swapchainExtent.width == 0 || swapchainExtent.height == 0) {
+            return;
+        }
+        const float aspectRatio =
+            static_cast<float>(swapchainExtent.width) /
+            static_cast<float>(swapchainExtent.height);
 
         // Get player position for camera following
         glm::vec3 playerPos{0.0f, 0.0f, 0.0f};
@@ -410,7 +417,7 @@ public:
         );
         glm::mat4 proj = glm::perspectiveZO(
             glm::radians(45.0f),   // FOV
-            16.0f/9.0f,           // Aspect ratio
+            aspectRatio,          // Aspect ratio
             100000.0f,                 // Near plane
             0.1f               // Far plane
         );

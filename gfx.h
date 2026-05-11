@@ -1,6 +1,7 @@
 #pragma once
 
-#include "main.h"
+#include "tremor_core.h"
+#include "tremor_graphics_platform.h"
 #include "quan.h"
 
 #include <glm/glm.hpp>
@@ -632,6 +633,15 @@ namespace tremor::gfx {
         m_nearZ = nearZ;
         m_farZ = farZ;
         updateProjectionMatrix();
+    }
+
+    inline void Camera::setAspectRatio(float aspectRatio) {
+        if (aspectRatio <= 0.0f) {
+            return;
+        }
+        m_aspectRatio = aspectRatio;
+        m_projDirty = true;
+        m_vpDirty = true;
     }
 
     inline void Camera::updateViewMatrix() const {

@@ -46,3 +46,4 @@ Tremor/**
 
 *.ipch
 /build-vs18
+/out

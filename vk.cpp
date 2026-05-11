@@ -4,11 +4,12 @@
 #include "vk.h"
 #include "ui_message_center.h"
 #include "quan.h"
-#include "renderer/taffy_integration.h"
+#include "Source/Runtime/TremorRenderer/taffy_integration.h"
 #include "renderer/sdf_text_renderer.h"
 #include "renderer/ui_renderer.h"
 #include "renderer/sequencer_ui.h"
 #include "editor/grid_renderer.h"
+#include "editor/model_editor_integration.h"
 #include "tools.h"
 #include "asset.h"
 #include "overlay.h"
@@ -393,6 +394,28 @@ namespace tremor::gfx {
                 if (needsRebuild) {
                     rebuildPipeline(path);
                     needsRebuild = false;
+                }
+            }
+        }
+
+        void TaffyOverlayManager::onSwapchainRecreated(VkRenderPass renderPass, VkExtent2D newExtent,
+                                                       VkFormat swapchainFormat, VkFormat depthFormat,
+                                                       VkSampleCountFlagBits sampleCount) {
+            const bool pipelineStateChanged =
+                render_pass_ != renderPass ||
+                swapchain_format_ != swapchainFormat ||
+                depth_format_ != depthFormat ||
+                sample_count_ != sampleCount;
+
+            render_pass_ = renderPass;
+            swapchain_extent_ = newExtent;
+            swapchain_format_ = swapchainFormat;
+            depth_format_ = depthFormat;
+            sample_count_ = sampleCount;
+
+            if (pipelineStateChanged) {
+                for (const auto& [path, _] : pipeline_cache_) {
+                    pipeline_rebuild_flags_[path] = true;
                 }
             }
         }
@@ -2670,8 +2693,8 @@ namespace tremor::gfx {
         return;  // Skip all normal clustering logic
     }
     bool VulkanClusteredRenderer::initialize(Format color, Format depth) {
-        m_colorFormat = &color.format;
-        m_depthFormat = &depth.format;
+        m_colorFormat = color.format;
+        m_depthFormat = depth.format;
 
         //Logger::get().info("Initializing VulkanClusteredRenderer...");
 
@@ -2707,6 +2730,19 @@ namespace tremor::gfx {
             Logger::get().error("Exception during VulkanClusteredRenderer initialization: {}", e.what());
             return false;
         }
+    }
+
+    bool VulkanClusteredRenderer::onSwapchainRecreated(VkRenderPass renderPass, Format colorFormat, Format depthFormat,
+                                                       VkSampleCountFlagBits sampleCount) {
+        m_renderPass = renderPass;
+        m_useDynamicRendering = (renderPass == VK_NULL_HANDLE);
+        m_sampleCount = sampleCount;
+        m_colorFormat = colorFormat.format;
+        m_depthFormat = depthFormat.format;
+
+        m_fallbackPipeline.reset();
+        m_fallbackPipelineLayout.reset();
+        return createFallbackPipeline();
     }
 
     bool VulkanClusteredRenderer::supportsMeshShaderPath() const {
@@ -2835,8 +2871,8 @@ namespace tremor::gfx {
         if (m_useDynamicRendering) {
             renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
             renderingInfo.colorAttachmentCount = 1;
-            renderingInfo.pColorAttachmentFormats = m_colorFormat;
-            renderingInfo.depthAttachmentFormat = *m_depthFormat;
+            renderingInfo.pColorAttachmentFormats = &m_colorFormat;
+            renderingInfo.depthAttachmentFormat = m_depthFormat;
             pipelineInfo.pNext = &renderingInfo;
         }
 
@@ -3978,13 +4014,21 @@ namespace tremor::gfx {
 
         // Setup color and depth attachment references
         VkAttachmentReference colorAttachmentRef{};
-        colorAttachmentRef.attachment = 0;  // First attachment
+        colorAttachmentRef.attachment = createInfo.colorAttachmentIndex;
         colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
         VkAttachmentReference depthAttachmentRef{};
-        if (attachmentDescriptions.size() > 1) {
-            depthAttachmentRef.attachment = 1;  // Second attachment for depth
+        if (createInfo.depthAttachmentIndex && *createInfo.depthAttachmentIndex < attachmentDescriptions.size()) {
+            depthAttachmentRef.attachment = *createInfo.depthAttachmentIndex;
             depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        }
+
+        VkAttachmentReference resolveAttachmentRef{};
+        const VkAttachmentReference* resolveAttachmentPtr = nullptr;
+        if (createInfo.resolveAttachmentIndex && *createInfo.resolveAttachmentIndex < attachmentDescriptions.size()) {
+            resolveAttachmentRef.attachment = *createInfo.resolveAttachmentIndex;
+            resolveAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            resolveAttachmentPtr = &resolveAttachmentRef;
         }
 
         // Configure two subpasses: 3D geometry and UI overlay
@@ -3994,13 +4038,15 @@ namespace tremor::gfx {
         subpasses[0].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
         subpasses[0].colorAttachmentCount = (attachmentDescriptions.size() > 0) ? 1 : 0;
         subpasses[0].pColorAttachments = (attachmentDescriptions.size() > 0) ? &colorAttachmentRef : nullptr;
-        subpasses[0].pDepthStencilAttachment = (attachmentDescriptions.size() > 1) ? &depthAttachmentRef : nullptr;
+        subpasses[0].pDepthStencilAttachment = createInfo.depthAttachmentIndex ? &depthAttachmentRef : nullptr;
+        subpasses[0].pResolveAttachments = resolveAttachmentPtr;
         
         // Subpass 1: UI overlay without depth testing
         subpasses[1].pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
         subpasses[1].colorAttachmentCount = (attachmentDescriptions.size() > 0) ? 1 : 0;
         subpasses[1].pColorAttachments = (attachmentDescriptions.size() > 0) ? &colorAttachmentRef : nullptr;
         subpasses[1].pDepthStencilAttachment = nullptr; // No depth attachment for UI
+        subpasses[1].pResolveAttachments = resolveAttachmentPtr;
 
         // Configure dependencies
         std::vector<VkSubpassDependency> dependencies;
@@ -4145,12 +4191,25 @@ namespace tremor::gfx {
         createInfo.preferredFormat = m_imageFormat;
         createInfo.preferredColorSpace = m_colorSpace;
 
-        // Clean up existing swap chain
-        cleanup();
+        // Keep the old swapchain alive long enough for Vulkan to migrate safely.
+        m_imageViews.clear();
+        m_images.clear();
+        VkSwapchainKHR oldSwapchain = m_swapChain.release();
 
-        // Create new swap chain
-        createSwapChain(createInfo);
-        createImageViews();
+        try {
+            createSwapChain(createInfo, oldSwapchain);
+            createImageViews();
+        } catch (...) {
+            cleanup();
+            if (oldSwapchain != VK_NULL_HANDLE) {
+                vkDestroySwapchainKHR(m_device.device(), oldSwapchain, nullptr);
+            }
+            throw;
+        }
+
+        if (oldSwapchain != VK_NULL_HANDLE) {
+            vkDestroySwapchainKHR(m_device.device(), oldSwapchain, nullptr);
+        }
 
         //Logger::get().info("Swap chain recreated: {}x{}", m_extent.width, m_extent.height);
 
@@ -4175,7 +4234,7 @@ namespace tremor::gfx {
         return vkQueuePresentKHR(m_device.graphicsQueue(), &presentInfo);
     }
 
-    void SwapChain::createSwapChain(const CreateInfo& createInfo) {
+    void SwapChain::createSwapChain(const CreateInfo& createInfo, VkSwapchainKHR oldSwapchain) {
         // Query surface capabilities
         VkSurfaceCapabilitiesKHR capabilities;
         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_device.physicalDevice(), m_surface, &capabilities);
@@ -4229,17 +4288,26 @@ namespace tremor::gfx {
         swapchainInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         swapchainInfo.presentMode = presentMode;
         swapchainInfo.clipped = VK_TRUE;
-        swapchainInfo.oldSwapchain = VK_NULL_HANDLE;
+        swapchainInfo.oldSwapchain = oldSwapchain;
 
         // Check for HDR support if requested
         m_hdr = createInfo.hdr && (surfaceFormat.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
 
         // Create the swap chain
-        if (vkCreateSwapchainKHR(m_device.device(), &swapchainInfo, nullptr, &m_swapChain.handle()) != VK_SUCCESS) {
+        VkResult swapchainResult = vkCreateSwapchainKHR(m_device.device(), &swapchainInfo, nullptr, &m_swapChain.handle());
+        if (swapchainResult != VK_SUCCESS) {
+            Logger::get().error(
+                "Failed to create swapchain (VkResult={}, extent={}x{}, imageCount={}, format={}, colorspace={}, presentMode={}, oldSwapchain={})",
+                static_cast<int>(swapchainResult),
+                extent.width,
+                extent.height,
+                imageCount,
+                static_cast<uint32_t>(surfaceFormat.format),
+                static_cast<uint32_t>(surfaceFormat.colorSpace),
+                static_cast<uint32_t>(presentMode),
+                oldSwapchain != VK_NULL_HANDLE ? 1 : 0);
             throw std::runtime_error("Failed to create swap chain");
         }
-
-        m_swapChain = SwapchainResource(m_device.device(), m_swapChain.handle());
 
         // Get swap chain images
         vkGetSwapchainImagesKHR(m_device.device(), m_swapChain, &imageCount, nullptr);
@@ -6022,11 +6090,19 @@ namespace tremor::gfx {
 
             // Create a framebuffer for each swapchain image view
             for (size_t i = 0; i < swapchainImages.size(); i++) {
-                // Each framebuffer needs the color and depth attachments
-                std::vector<VkImageView> attachments = {
-                    swapchainImages[i],        // Color attachment
-                    *m_depthImageView           // Depth attachment
-                };
+                std::vector<VkImageView> attachments;
+                if (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT && m_colorImageView) {
+                    attachments = {
+                        *m_colorImageView,      // Multisampled color attachment
+                        *m_depthImageView,      // Depth attachment
+                        swapchainImages[i]      // Resolve attachment
+                    };
+                } else {
+                    attachments = {
+                        swapchainImages[i],     // Color attachment
+                        *m_depthImageView       // Depth attachment
+                    };
+                }
 
                 Framebuffer::CreateInfo framebufferInfo{};
                 framebufferInfo.renderPass = *rp;
@@ -6069,22 +6145,24 @@ namespace tremor::gfx {
             // Create render pass configuration
             RenderPass::CreateInfo renderPassInfo{};
 
-            // Color attachment (will be the swapchain image)
+            const bool useMsaa = (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT);
+
+            // Color attachment (multisampled color target when MSAA is enabled)
             RenderPass::Attachment colorAttachment{};
             colorAttachment.format = vkSwapchain.get()->imageFormat();  // Use swapchain format
-            colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+            colorAttachment.samples = m_msaaSamples;
             colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;  // Clear on load
-            colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;  // Store after use
+            colorAttachment.storeOp = useMsaa ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
             colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // No stencil for color
             colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // No stencil for color
             colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // Don't care about initial layout
-            colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;  // Ready for presentation
+            colorAttachment.finalLayout = useMsaa ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
             renderPassInfo.attachments.push_back(colorAttachment);
 
             // Depth attachment
             RenderPass::Attachment depthAttachment{};
             depthAttachment.format = m_depthFormat;  // Use the depth format you selected
-            depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+            depthAttachment.samples = m_msaaSamples;
             depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;  // Clear depth on load
             depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;  // No need to store depth
             depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;  // Depends on if stencil used
@@ -6092,6 +6170,23 @@ namespace tremor::gfx {
             depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // Don't care about initial layout
             depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;  // Optimal for depth
             renderPassInfo.attachments.push_back(depthAttachment);
+
+            if (useMsaa) {
+                RenderPass::Attachment resolveAttachment{};
+                resolveAttachment.format = vkSwapchain.get()->imageFormat();
+                resolveAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+                resolveAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                resolveAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                resolveAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                resolveAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                resolveAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                resolveAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                renderPassInfo.attachments.push_back(resolveAttachment);
+                renderPassInfo.resolveAttachmentIndex = 2;
+            }
+
+            renderPassInfo.colorAttachmentIndex = 0;
+            renderPassInfo.depthAttachmentIndex = 1;
 
             // Add dependencies for proper synchronization
 
@@ -6330,6 +6425,13 @@ namespace tremor::gfx {
 
             vkSwapchain->recreate(static_cast<uint32_t>(width), static_cast<uint32_t>(height));
 
+            if (!vkDevice->capabilities().dynamicRendering) {
+                rp.reset();
+                if (!createRenderPass()) {
+                    return false;
+                }
+            }
+
             if (!createDepthResources()) {
                 return false;
             }
@@ -6339,12 +6441,60 @@ namespace tremor::gfx {
             if (!vkDevice->capabilities().dynamicRendering && !createFramebuffers()) {
                 return false;
             }
-            if (m_overlayManager) {
-                m_overlayManager->updateSwapchainExtent(vkSwapchain->extent());
+            if (!refreshSwapchainDependents()) {
+                return false;
             }
 
             cam.extent = vkSwapchain->extent();
+            if (cam.extent.height != 0) {
+                cam.setAspectRatio(
+                    static_cast<float>(cam.extent.width) /
+                    static_cast<float>(cam.extent.height));
+            }
             m_framebufferResized = false;
+            return true;
+        }
+
+        bool VulkanBackend::refreshSwapchainDependents() {
+            const VkRenderPass currentRenderPass =
+                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp;
+            const VkExtent2D extent = vkSwapchain->extent();
+
+            if (m_overlayManager) {
+                m_overlayManager->onSwapchainRecreated(
+                    currentRenderPass,
+                    extent,
+                    vkSwapchain->imageFormat(),
+                    vkDevice->depthFormat(),
+                    m_msaaSamples);
+            }
+            if (m_clusteredRenderer) {
+                if (!m_clusteredRenderer->onSwapchainRecreated(
+                        currentRenderPass,
+                        Format(vkDevice->colorFormat()),
+                        Format(vkDevice->depthFormat()),
+                        m_msaaSamples)) {
+                    return false;
+                }
+            }
+            if (m_textRenderer) {
+                if (!m_textRenderer->onSwapchainRecreated(
+                        currentRenderPass,
+                        vkSwapchain->imageFormat(),
+                        m_msaaSamples,
+                        extent)) {
+                    return false;
+                }
+            }
+            if (m_uiRenderer) {
+                if (!m_uiRenderer->onSwapchainRecreated(
+                        currentRenderPass,
+                        vkSwapchain->imageFormat(),
+                        m_msaaSamples,
+                        extent)) {
+                    return false;
+                }
+            }
             return true;
         }
 
@@ -6374,6 +6524,11 @@ namespace tremor::gfx {
             }
 
             cam.extent = vkSwapchain.get()->extent();
+            if (cam.extent.height != 0) {
+                cam.setAspectRatio(
+                    static_cast<float>(cam.extent.width) /
+                    static_cast<float>(cam.extent.height));
+            }
 
             updateUniformBuffer();
             updateLight();
@@ -6523,11 +6678,12 @@ namespace tremor::gfx {
                 renderPassInfo.renderArea.extent = vkSwapchain.get()->extent();
 
                 // Clear values for each attachment
-                std::array<VkClearValue, 2> clearValues{};
-                clearValues[0].color = { {1.0f, 0.0f, 0.3f, 1.0f} };  // Dark blue
+                std::array<VkClearValue, 3> clearValues{};
+                clearValues[0].color = { {1.0f, 0.0f, 0.3f, 1.0f} };
                 clearValues[1].depthStencil = { 0.0f, 0 }; // Inverse Z: clear to far plane
+                clearValues[2].color = { {0.0f, 0.0f, 0.0f, 0.0f} };
 
-                renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+                renderPassInfo.clearValueCount = (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT) ? 3u : 2u;
                 renderPassInfo.pClearValues = clearValues.data();
 
                 // Begin the render pass using the command buffer
@@ -6821,8 +6977,9 @@ namespace tremor::gfx {
 					colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 					colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; // Load existing content
 					colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+					colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
 					colorAttachment.resolveImageView = vkSwapchain.get()->imageViews()[m_currentImageIndex];
-					colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+					colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 					colorAttachment.clearValue = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
 				} else {
 					colorAttachment.imageView = vkSwapchain.get()->imageViews()[m_currentImageIndex];
@@ -6888,7 +7045,7 @@ namespace tremor::gfx {
 				glm::mat4 orthoProjection = glm::orthoZO(0.0f, width, 0.0f, height, -10.0f, 1.0f);
 				
 
-				m_textRenderer->render(m_commandBuffers[currentFrame], orthoProjection);
+				m_textRenderer->render(m_commandBuffers[currentFrame], orthoProjection, vkSwapchain->extent());
 			}
 
 			// UI rendering complete
@@ -7048,6 +7205,12 @@ namespace tremor::gfx {
             createMaterialBuffer();
 
             cam = tremor::gfx::Camera(10.0f, 16.0f / 9.0f, 0.1f, 100.0f);
+            cam.extent = vkSwapchain->extent();
+            if (cam.extent.height != 0) {
+                cam.setAspectRatio(
+                    static_cast<float>(cam.extent.width) /
+                    static_cast<float>(cam.extent.height));
+            }
 
             cam.setPosition(glm::vec3(0.0f, 0.0f, 5.0f));
             cam.lookAt(glm::vec3(0.0f, 0.0f, 0.0f));

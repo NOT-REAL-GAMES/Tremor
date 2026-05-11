@@ -271,43 +271,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(assimp)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/TremorModules.cmake)
 
 # Create executable
 add_executable(Tremor
-    main.cpp
-    vk.cpp
-    flecs_interpreter.cpp
-    ui_message_center.cpp
-    ui_message_commands.cpp
-    volk.c
-    vm.cpp
-    vm_bytecode.cpp
-    dmc_physics.cpp
-    jolt_physics_world.cpp
-    physics_interop.cpp
-    jolt_physics_adapter.cpp
-    script_ecs_components.cpp
-    render_interop.cpp
-    script_render_system.cpp
-    renderer/taffy_integration.cpp
-    renderer/taffy_mesh.cpp
-    renderer/sdf_text_renderer.cpp
-    renderer/ui_renderer.cpp
-    renderer/sequencer_ui.cpp
-    audio/taffy_audio_processor.cpp
-    audio/taffy_polyphonic_processor.cpp
-    editor/model_editor.cpp
-    editor/model_editor_ui.cpp
-    editor/editor_viewport.cpp
-    editor/editor_tools.cpp
-    editor/editable_model.cpp
-    editor/grid_renderer.cpp
-    editor/gizmo_renderer.cpp
-    editor/model_editor_integration_impl.cpp
-    gltf_importer.cpp
-    editor/model_editor_main_integration.cpp
-    editor/file_dialog.cpp
+    ${TREMOR_ALL_SOURCES}
+    ${TREMOR_ALL_HEADERS}
 )
+
+tremor_assign_source_groups()
 
 if(MSVC)
     target_compile_options(Tremor PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)

@@ -28,6 +28,8 @@ namespace tremor::gfx {
         // Initialize with render pass info
         bool initialize(VkRenderPass renderPass, VkFormat colorFormat, 
                        VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT);
+        bool onSwapchainRecreated(VkRenderPass renderPass, VkFormat colorFormat,
+                                 VkSampleCountFlagBits sampleCount, VkExtent2D extent);
         
         // Load a font from TAF file
         bool loadFont(const std::string& fontPath);
@@ -40,9 +42,11 @@ namespace tremor::gfx {
         void beginPersistentText();  // Start building persistent text
         void endPersistentText();    // Finish and cache the text
         void renderPersistent(VkCommandBuffer commandBuffer, const glm::mat4& projection);
+        void renderPersistent(VkCommandBuffer commandBuffer, const glm::mat4& projection, VkExtent2D extent);
         
         // Render all queued text
         void render(VkCommandBuffer commandBuffer, const glm::mat4& projection);
+        void render(VkCommandBuffer commandBuffer, const glm::mat4& projection, VkExtent2D extent);
         
         // Text measurement
         glm::vec2 measureText(const std::string& text, float scale);
@@ -53,6 +57,10 @@ namespace tremor::gfx {
         VkCommandPool commandPool_;
         VkQueue graphicsQueue_;
         VkSampleCountFlagBits sampleCount_;
+        VkExtent2D currentExtent_ = {1280, 720};
+        VkRenderPass renderPass_ = VK_NULL_HANDLE;
+        VkFormat colorFormat_ = VK_FORMAT_UNDEFINED;
+        bool useDynamicRendering_ = false;
         
         // Font data
         struct FontData {
@@ -109,6 +117,7 @@ namespace tremor::gfx {
         
         // Helper functions
         bool createPipeline(VkRenderPass renderPass, VkFormat colorFormat);
+        void destroyPipelineResources();
         bool createDescriptorSets();
         bool createVertexBuffer(size_t size);
         void updateVertexBuffer();

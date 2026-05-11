@@ -1,6 +1,7 @@
 #include "taffy_polyphonic_processor.h"
 #include "tools.h"
 #include <cstring>
+#include "logger.h"
 
 namespace tremor::audio {
 

@@ -73,6 +73,9 @@ namespace tremor::gfx {
         Logger::get().info("🔤 Initializing SDF Text Renderer with {}x MSAA...", 
                           static_cast<uint32_t>(sampleCount));
         sampleCount_ = sampleCount;
+        renderPass_ = renderPass;
+        colorFormat_ = colorFormat;
+        useDynamicRendering_ = (renderPass == VK_NULL_HANDLE);
         
         // Create descriptor set layout
         VkDescriptorSetLayoutBinding uniformBinding{};
@@ -99,11 +102,6 @@ namespace tremor::gfx {
             return false;
         }
         
-        // Create pipeline
-        if (!createPipeline(renderPass, colorFormat)) {
-            return false;
-        }
-        
         // Create descriptor pool
         std::array<VkDescriptorPoolSize, 2> poolSizes{};
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -125,13 +123,8 @@ namespace tremor::gfx {
             return false;
         }
         
-        // Handle dynamic rendering - pass VK_NULL_HANDLE for render pass
-        bool useDynamicRendering = (renderPass == VK_NULL_HANDLE);
-        if (!useDynamicRendering) {
-            // Create pipeline for traditional rendering
-            if (!createPipeline(renderPass, colorFormat)) {
-                return false;
-            }
+        if (!createPipeline(renderPass, colorFormat)) {
+            return false;
         }
         
         // Create uniform buffer
@@ -184,6 +177,29 @@ namespace tremor::gfx {
         
         Logger::get().info("✅ SDF Text Renderer initialized");
         return true;
+    }
+
+    bool SDFTextRenderer::onSwapchainRecreated(VkRenderPass renderPass, VkFormat colorFormat,
+                                               VkSampleCountFlagBits sampleCount, VkExtent2D extent) {
+        renderPass_ = renderPass;
+        colorFormat_ = colorFormat;
+        sampleCount_ = sampleCount;
+        currentExtent_ = extent;
+        useDynamicRendering_ = (renderPass == VK_NULL_HANDLE);
+
+        destroyPipelineResources();
+        return createPipeline(renderPass_, colorFormat_);
+    }
+
+    void SDFTextRenderer::destroyPipelineResources() {
+        if (pipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, pipeline_, nullptr);
+            pipeline_ = VK_NULL_HANDLE;
+        }
+        if (pipelineLayout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
+            pipelineLayout_ = VK_NULL_HANDLE;
+        }
     }
 
     bool SDFTextRenderer::loadFont(const std::string& fontPath) {
@@ -734,6 +750,14 @@ namespace tremor::gfx {
         pipelineInfo.layout = pipelineLayout_;
         pipelineInfo.renderPass = renderPass;
         pipelineInfo.subpass = 0;
+
+        VkPipelineRenderingCreateInfo renderingInfo{};
+        if (renderPass == VK_NULL_HANDLE) {
+            renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+            renderingInfo.colorAttachmentCount = 1;
+            renderingInfo.pColorAttachmentFormats = &colorFormat;
+            pipelineInfo.pNext = &renderingInfo;
+        }
         
         if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline_) != VK_SUCCESS) {
             Logger::get().error("Failed to create graphics pipeline");
@@ -977,6 +1001,10 @@ namespace tremor::gfx {
     }
 
     void SDFTextRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& projection) {
+        render(commandBuffer, projection, currentExtent_);
+    }
+
+    void SDFTextRenderer::render(VkCommandBuffer commandBuffer, const glm::mat4& projection, VkExtent2D extent) {
         //Logger::get().info("SDFTextRenderer::render called");
         //Logger::get().info("  Text instances: {}", textInstances_.size());
         //Logger::get().info("  Current font: {}", currentFont_ ? "YES" : "NO");
@@ -1023,11 +1051,12 @@ namespace tremor::gfx {
                                pipelineLayout_, 0, 1, &descriptorSet_, 0, nullptr);
         
         // Set viewport
+        currentExtent_ = extent;
         VkViewport viewport{};
         viewport.x = 0.0f;
         viewport.y = 0.0f;
-        viewport.width = 1280.0f;  // TODO: Get from swapchain
-        viewport.height = 720.0f;
+        viewport.width = static_cast<float>(extent.width);
+        viewport.height = static_cast<float>(extent.height);
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -1037,7 +1066,7 @@ namespace tremor::gfx {
         // Set scissor
         VkRect2D scissor{};
         scissor.offset = {0, 0};
-        scissor.extent = {1280, 720};  // TODO: Get from swapchain
+        scissor.extent = extent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
         
         // Set push constants for text rendering parameters
@@ -1114,8 +1143,12 @@ namespace tremor::gfx {
     }
     
     void SDFTextRenderer::renderPersistent(VkCommandBuffer commandBuffer, const glm::mat4& projection) {
+        renderPersistent(commandBuffer, projection, currentExtent_);
+    }
+
+    void SDFTextRenderer::renderPersistent(VkCommandBuffer commandBuffer, const glm::mat4& projection, VkExtent2D extent) {
         // TODO: Implement proper persistent text caching
-        render(commandBuffer, projection);
+        render(commandBuffer, projection, extent);
     }
 
 } // namespace tremor::gfx

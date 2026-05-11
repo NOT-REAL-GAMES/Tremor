@@ -1,5 +1,5 @@
 #include "ui_renderer.h"
-#include "../main.h"  // For Logger
+#include "../logger.h"
 #include <iostream>
 #include <cstring>
 #include <algorithm>
@@ -58,6 +58,9 @@ namespace tremor::gfx {
                                VkSampleCountFlagBits sampleCount) {
         Logger::get().info("🖱️ Initializing UI Renderer...");
         m_sampleCount = sampleCount;
+        m_renderPass = renderPass;
+        m_colorFormat = colorFormat;
+        m_useDynamicRendering = (renderPass == VK_NULL_HANDLE);
         
         // Create descriptor set layout
         VkDescriptorSetLayoutBinding uniformBinding{};
@@ -157,6 +160,29 @@ namespace tremor::gfx {
         
         Logger::get().info("✅ UI Renderer initialized");
         return true;
+    }
+
+    bool UIRenderer::onSwapchainRecreated(VkRenderPass renderPass, VkFormat colorFormat,
+                                          VkSampleCountFlagBits sampleCount, VkExtent2D extent) {
+        m_renderPass = renderPass;
+        m_colorFormat = colorFormat;
+        m_sampleCount = sampleCount;
+        m_currentExtent = extent;
+        m_useDynamicRendering = (renderPass == VK_NULL_HANDLE);
+
+        destroyPipelineResources();
+        return createPipeline(m_renderPass, m_colorFormat);
+    }
+
+    void UIRenderer::destroyPipelineResources() {
+        if (m_pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(m_device, m_pipeline, nullptr);
+            m_pipeline = VK_NULL_HANDLE;
+        }
+        if (m_pipelineLayout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
+            m_pipelineLayout = VK_NULL_HANDLE;
+        }
     }
 
     bool UIRenderer::createPipeline(VkRenderPass renderPass, VkFormat colorFormat) {
@@ -335,8 +361,16 @@ namespace tremor::gfx {
         pipelineInfo.pDynamicState = &dynamicState;
         pipelineInfo.layout = m_pipelineLayout;
         pipelineInfo.renderPass = renderPass;
-        pipelineInfo.subpass = 1; // UI renders in subpass 1
-        
+        pipelineInfo.subpass = (renderPass == VK_NULL_HANDLE) ? 0 : 1;
+
+        VkPipelineRenderingCreateInfo renderingInfo{};
+        if (renderPass == VK_NULL_HANDLE) {
+            renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+            renderingInfo.colorAttachmentCount = 1;
+            renderingInfo.pColorAttachmentFormats = &colorFormat;
+            pipelineInfo.pNext = &renderingInfo;
+        }
+
         if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline) != VK_SUCCESS) {
             Logger::get().error("Failed to create graphics pipeline");
             vkDestroyShaderModule(m_device, vertShader, nullptr);

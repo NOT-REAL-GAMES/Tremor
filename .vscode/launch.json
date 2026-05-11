@@ -1,29 +1,21 @@
 {
+    "version": "0.2.0",
     "configurations": [
         {
-            "name": "(gdb) Launch",
-            "type": "cppdbg",
+            "name": "Debug Tremor",
+            "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/bin/Debug/Tremor.exe",
-            "args": [],
-            "stopAtEntry": false,
-            "cwd": "${fileDirname}",
-            "environment": [],
-            "externalConsole": false,
-            "MIMode": "gdb",
-            "miDebuggerPath": "/path/to/gdb",
-            "setupCommands": [
-                {
-                    "description": "Enable pretty-printing for gdb",
-                    "text": "-enable-pretty-printing",
-                    "ignoreFailures": true
-                },
-                {
-                    "description": "Set Disassembly Flavor to Intel",
-                    "text": "-gdb-set disassembly-flavor intel",
-                    "ignoreFailures": true
-                }
-            ]
+            "program": "C:\\Projects\\Tremor\\build\\bin\\Tremor.exe",
+            "cwd": "C:\\Projects\\Tremor\\build\\bin",
+            "symbolSearchPath": "C:\\Projects\\Tremor\\build\\bin;C:\\Projects\\Tremor\\build",
+            "requireExactSource": false,
+            "stopAtEntry": true,
+            "sourceFileMap": {
+                "C:\\Projects\\Tremor": "C:\\Projects\\Tremor",
+                "C:/Projects/Tremor": "C:\\Projects\\Tremor",
+                "C:\\Users\\rbwld\\.codex\\worktrees\\ecbb\\Tremor": "C:\\Projects\\Tremor",
+                "C:/Users/rbwld/.codex/worktrees/ecbb/Tremor": "C:\\Projects\\Tremor"
+            }
         }
     ]
 }

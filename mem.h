@@ -1,6 +1,6 @@
 #pragma once
 
-#include "main.h"
+#include "tremor_core.h"
 
 namespace tremor::mem {
 

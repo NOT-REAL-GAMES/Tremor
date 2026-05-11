@@ -113,6 +113,8 @@ namespace tremor::gfx {
         // Initialize with render pass info
         bool initialize(VkRenderPass renderPass, VkFormat colorFormat,
                        VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT);
+        bool onSwapchainRecreated(VkRenderPass renderPass, VkFormat colorFormat,
+                                 VkSampleCountFlagBits sampleCount, VkExtent2D extent);
 
         // Set text renderer (must be called before rendering)
         void setTextRenderer(SDFTextRenderer* textRenderer) { 
@@ -204,6 +206,9 @@ namespace tremor::gfx {
         
         // Current render extent for viewport/scissor
         VkExtent2D m_currentExtent = {1280, 720};
+        VkRenderPass m_renderPass = VK_NULL_HANDLE;
+        VkFormat m_colorFormat = VK_FORMAT_UNDEFINED;
+        bool m_useDynamicRendering = false;
         
         // Dirty flags for optimization
         bool m_textDirty = true;  // True when text needs to be regenerated
@@ -231,6 +236,7 @@ namespace tremor::gfx {
         
         // Helper functions
         bool createPipeline(VkRenderPass renderPass, VkFormat colorFormat);
+        void destroyPipelineResources();
         bool createDescriptorSets();
         bool createVertexBuffer(size_t size);
         void updateVertexBuffer();

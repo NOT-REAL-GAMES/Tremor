@@ -11,7 +11,7 @@
 #include <queue>
 #include "taffy.h"
 #include "taffy_streaming.h"
-#include "../res.h"
+#include "logger.h"
 
 namespace tremor::audio {
 

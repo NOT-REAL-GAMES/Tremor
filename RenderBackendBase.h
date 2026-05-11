@@ -1,5 +1,6 @@
 #pragma once
-#include "main.h"
+#include "tremor_core.h"
+#include "tremor_graphics_platform.h"
 
 namespace tremor::gfx {
     class RenderBackend {
