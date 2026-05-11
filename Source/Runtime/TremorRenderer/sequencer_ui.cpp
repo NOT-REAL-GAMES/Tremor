@@ -1,5 +1,5 @@
 #include "sequencer_ui.h"
-#include "../main.h"
+#include "../../../logger.h"
 
 namespace tremor::gfx {
 

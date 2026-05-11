@@ -110,15 +110,18 @@ set(TREMOR_RUNTIME_RHI_HEADERS
 set(TREMOR_RUNTIME_RENDERER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/taffy_integration.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/taffy_mesh.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/renderer/sdf_text_renderer.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/renderer/ui_renderer.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/renderer/sequencer_ui.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/sdf_text_renderer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/ui_renderer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/sequencer_ui.cpp
 )
 
 set(TREMOR_RUNTIME_RENDERER_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/vk_renderer_support.h
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/taffy_integration.h
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/taffy_mesh.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/sdf_text_renderer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/ui_renderer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/sequencer_ui.h
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderCore/gfx_resource_types.h
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderCore/gfx_resource_handles.h
     ${CMAKE_CURRENT_SOURCE_DIR}/vk_renderer_support.h

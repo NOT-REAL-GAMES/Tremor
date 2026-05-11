@@ -1,5 +1,5 @@
 #include "sdf_text_renderer.h"
-#include "asset.h"
+#include "include/asset.h"
 #include <iostream>
 #include <cstring>
 #include <fstream>

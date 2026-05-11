@@ -1,5 +1,5 @@
 #include "taffy_polyphonic_processor.h"
-#include "tools.h"
+#include "include/tools.h"
 #include <cstring>
 #include "logger.h"
 

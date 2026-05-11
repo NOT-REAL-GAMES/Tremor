@@ -142,7 +142,7 @@ bool renderScriptFrame(
     }
 
     auto* vulkanBackend = static_cast<tremor::gfx::VulkanBackend*>(renderBackend);
-    if (vulkanBackend == nullptr || vulkanBackend->m_overlayManager == nullptr) {
+    if (vulkanBackend == nullptr || vulkanBackend->getOverlayManager() == nullptr) {
         return false;
     }
 
@@ -167,7 +167,7 @@ bool renderScriptFrame(
 
     renderScriptEntities(registry, {
         .world = world,
-        .overlayManager = *vulkanBackend->m_overlayManager,
+        .overlayManager = *vulkanBackend->getOverlayManager(),
         .commandBuffer = vulkanBackend->getCurrentCommandBuffer(),
         .viewProjection = projection * view,
         .origin = origin,

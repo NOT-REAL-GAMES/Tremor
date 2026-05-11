@@ -32,8 +32,8 @@
 #include "audio/taffy_audio_processor.h"
 #include "audio/taffy_polyphonic_processor.h"
 #include "renderer/taffy_integration.h"
-#include "../Taffy/include/taffy_audio_tools.h"
-#include "../Taffy/include/taffy_streaming.h"
+#include "include/taffy_audio_tools.h"
+#include "include/taffy_streaming.h"
 #include "dmc_survivors.h"
 #include <filesystem>
 #include <cstring>

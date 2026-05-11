@@ -1,7 +1,7 @@
 #include "flecs_interpreter.h"
 
-#include "../Taffy/include/asset.h"
-#include "../Taffy/include/taffy_streaming.h"
+#include "include/asset.h"
+#include "include/taffy_streaming.h"
 #include "logger.h"
 #include "ui_message_commands.h"
 

@@ -9,7 +9,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include "../Taffy/include/quan.h"
+#include "include/quan.h"
 #include "flecs_interpreter.h"
 #include "vk.h"  // Include VulkanBackend for rendering
 #include "dmc_physics.h"  // Include Jolt Physics integration
@@ -386,7 +386,7 @@ public:
         if (!vulkanBackend) return;
 
         // Get overlay manager for rendering TAF assets
-        auto* overlayManager = vulkanBackend->m_overlayManager.get();
+        auto* overlayManager = vulkanBackend->getOverlayManager();
         if (!overlayManager) return;
 
         // Get current command buffer and create a view-projection matrix that follows the player

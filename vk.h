@@ -26,13 +26,13 @@
 #include <unordered_set>
 
 #include "gfx.h"
-#include "quan.h"
+#include "include/quan.h"
 #include "handle.h"
-#include "taffy.h"
-#include "tools.h"
+#include "include/taffy.h"
+#include "include/tools.h"
 #include "Source/Runtime/TremorRenderer/taffy_mesh.h"
 #include "Source/Runtime/TremorRenderer/taffy_integration.h"
-#include "asset.h"
+#include "include/asset.h"
 
 namespace tremor::editor{
     class ModelEditorIntegration;
@@ -760,9 +760,6 @@ namespace tremor::gfx {
         VulkanBackend();
         ~VulkanBackend() override;
 
-        bool hot_pink_enabled = true;
-        bool reload_assets_requested = false;
-
         // RenderBackend interface implementation
         bool initialize(SDL_Window* window) override;
         void shutdown() override;
@@ -774,7 +771,6 @@ namespace tremor::gfx {
         
         // UI control
         void setMainMenuVisible(bool visible);
-        void updateMeshShaderStatusLabel();
         
         // Audio integration
         using SequencerCallback = std::function<void(int)>;
@@ -798,36 +794,8 @@ namespace tremor::gfx {
         bool isFrameReady() const { return m_frameReady; }
         UIRenderer* getUIRenderer() const { return m_uiRenderer.get(); }
         VulkanClusteredRenderer* getClusteredRenderer() const { return m_clusteredRenderer.get(); }
+        TaffyOverlayManager* getOverlayManager() const { return m_overlayManager.get(); }
         void enqueueUiMessage(const std::string& text, float durationSeconds = 4.0f, uint32_t color = 0xFFD060FF);
-
-        std::unique_ptr<TaffyOverlayManager> m_overlayManager;
-
-        // Scene management
-        void createEnhancedScene();
-        void createTaffyScene();
-        void createSceneLighting();
-        void simpleColorCyclingTest();
-
-        void initializeOverlayWorkflow();
-
-        VkShaderModule loadShader(const std::string& filename);
-
-        std::unique_ptr<TaffyMeshShaderManager> m_taffyMeshShaderManager;
-        PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT_ = nullptr;
-
-        std::chrono::steady_clock::time_point last_overlay_check_;
-        const std::chrono::milliseconds overlay_check_interval_{ 1000 };
-
-        // ADD THESE NEW METHODS FOR OVERLAY SUPPORT:
-        void initializeOverlaySystem();
-        void createDevelopmentOverlays();
-        void loadTestAssetWithOverlays();
-        void updateOverlaySystem();
-        void initializeUiMessageOverlay();
-        void updateUiMessageOverlay();
-        void createTestMasterAssetFromGLSL();
-        void renderWithOverlays(VkCommandBuffer cmdBuffer);
-        void demonstrateOverlayControls();
 
 
     private:
@@ -1004,6 +972,15 @@ namespace tremor::gfx {
         // Taffy asset system
         std::unique_ptr<Tremor::TaffyAssetLoader> taffy_loader_;
         std::vector<std::unique_ptr<Tremor::TaffyAssetLoader::LoadedAsset>> loaded_assets_;
+        std::unique_ptr<TaffyOverlayManager> m_overlayManager;
+        std::unique_ptr<TaffyMeshShaderManager> m_taffyMeshShaderManager;
+        PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT_ = nullptr;
+
+        // Development/debug overlay state
+        bool hot_pink_enabled = true;
+        bool reload_assets_requested = false;
+        std::chrono::steady_clock::time_point last_overlay_check_;
+        const std::chrono::milliseconds overlay_check_interval_{ 1000 };
 
         // === DEBUG AND VALIDATION ===
 
@@ -1054,6 +1031,22 @@ namespace tremor::gfx {
         // === TAFFY ASSET METHODS ===
 
         void createTaffyMeshes();
+        void createEnhancedScene();
+        void createTaffyScene();
+        void createSceneLighting();
+        void simpleColorCyclingTest();
+        void initializeOverlayWorkflow();
+        void initializeOverlaySystem();
+        void createDevelopmentOverlays();
+        void loadTestAssetWithOverlays();
+        void updateOverlaySystem();
+        void initializeUiMessageOverlay();
+        void updateUiMessageOverlay();
+        void createTestMasterAssetFromGLSL();
+        void renderWithOverlays(VkCommandBuffer cmdBuffer);
+        void demonstrateOverlayControls();
+        void updateMeshShaderStatusLabel();
+        VkShaderModule loadShader(const std::string& filename);
 
         // === UPDATE METHODS ===
 

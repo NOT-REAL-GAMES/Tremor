@@ -2,7 +2,7 @@
 
 #include "tremor_core.h"
 #include "tremor_graphics_platform.h"
-#include "quan.h"
+#include "include/quan.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>

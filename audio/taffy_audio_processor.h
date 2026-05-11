@@ -9,8 +9,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <queue>
-#include "taffy.h"
-#include "taffy_streaming.h"
+#include "include/taffy.h"
+#include "include/taffy_streaming.h"
 #include "logger.h"
 
 namespace tremor::audio {

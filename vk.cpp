@@ -3,18 +3,18 @@
 
 #include "vk.h"
 #include "ui_message_center.h"
-#include "quan.h"
+#include "include/quan.h"
 #include "Source/Runtime/TremorRenderer/taffy_integration.h"
-#include "renderer/sdf_text_renderer.h"
-#include "renderer/ui_renderer.h"
-#include "renderer/sequencer_ui.h"
+#include "Source/Runtime/TremorRenderer/sdf_text_renderer.h"
+#include "Source/Runtime/TremorRenderer/ui_renderer.h"
+#include "Source/Runtime/TremorRenderer/sequencer_ui.h"
 #include "editor/grid_renderer.h"
 #include "editor/model_editor_integration.h"
-#include "tools.h"
-#include "asset.h"
+#include "include/tools.h"
+#include "include/asset.h"
 #include "overlay.h"
-#include "taffy_font_tools.h"
-#include "taffy_audio_tools.h"
+#include "include/taffy_font_tools.h"
+#include "include/taffy_audio_tools.h"
 #include <iomanip>
 
 static bool meshShadersActive = false;

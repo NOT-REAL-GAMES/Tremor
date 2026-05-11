@@ -6,7 +6,7 @@
 #include "../renderer/taffy_mesh.h"
 #include "grid_renderer.h"
 #include "gizmo_renderer.h"
-#include "taffy.h"
+#include "include/taffy.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <memory>

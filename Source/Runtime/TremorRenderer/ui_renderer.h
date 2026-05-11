@@ -1,0 +1,253 @@
+#pragma once
+
+#include "../../../vk.h"
+#include "../../../gfx.h"
+#include "sdf_text_renderer.h"
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
+#include <SDL2/SDL.h>
+#include <string>
+#include <vector>
+#include <functional>
+#include <memory>
+
+namespace tremor::gfx {
+
+    class SDFTextRenderer;
+
+    // UI Element types
+    enum class UIElementType {
+        Button,
+        Label,
+        Panel,
+        Rectangle,
+        Checkbox,
+        Slider
+    };
+
+    // UI Element state
+    enum class UIElementState {
+        Normal,
+        Hovered,
+        Pressed,
+        Disabled
+    };
+
+    // Base UI Element
+    struct UIElement {
+        UIElementType type;
+        UIElementState state = UIElementState::Normal;
+        glm::vec2 position;
+        glm::vec2 size;
+        bool visible = true;
+        bool enabled = true;
+        uint32_t id;
+        
+        // Transform matrix for this element
+        glm::mat4 transform = glm::mat4(1.0f); // Identity matrix by default
+        
+        // Visual properties
+        uint32_t backgroundColor = 0x202020FF;
+        uint32_t hoverColor = 0x303030FF;
+        uint32_t pressedColor = 0x404040FF;
+        uint32_t borderColor = 0x505050FF;
+        float borderWidth = 1.0f;
+        
+        // Callbacks
+        std::function<void()> onClick;
+        std::function<void()> onHover;
+        
+        // Check if point is inside element
+        bool contains(glm::vec2 point) const {
+            // Extract actual position from transform matrix
+            glm::vec3 scale, translation, skew;
+            glm::vec4 perspective;
+            glm::quat rotation;
+            glm::decompose(transform, scale, rotation, translation, skew, perspective);
+            
+            // Use the transformed position for hit testing
+            float transformedX = translation.x;
+            float transformedY = translation.y;
+            
+            return point.x >= transformedX && point.x <= transformedX + size.x &&
+                   point.y >= transformedY && point.y <= transformedY + size.y;
+        }
+    };
+
+    // Button element
+    struct UIButton : UIElement {
+        std::string text;
+        uint32_t textColor = 0xFFFFFFFF;
+        float textScale = 0.5f;
+        glm::vec2 textPadding = glm::vec2(10, 10);
+        
+        UIButton() { type = UIElementType::Button; }
+    };
+
+    // Label element
+    struct UILabel : UIElement {
+        std::string text;
+        uint32_t textColor = 0xFFFFFFFF;
+        float textScale = 0.5f;
+        
+        UILabel() { type = UIElementType::Label; }
+    };
+
+    // Rectangle element
+    struct UIRect : UIElement {
+        uint32_t fillColor = 0xFFFFFFFF;
+        uint32_t borderColor = 0x000000FF;
+        float borderWidth = 0.0f;
+        
+        UIRect() { type = UIElementType::Rectangle; }
+    };
+
+    // UI Renderer class
+    class UIRenderer {
+    public:
+        UIRenderer(VkDevice device, VkPhysicalDevice physicalDevice,
+                  VkCommandPool commandPool, VkQueue graphicsQueue);
+        ~UIRenderer();
+
+        // Initialize with render pass info
+        bool initialize(VkRenderPass renderPass, VkFormat colorFormat,
+                       VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT);
+        bool onSwapchainRecreated(VkRenderPass renderPass, VkFormat colorFormat,
+                                 VkSampleCountFlagBits sampleCount, VkExtent2D extent);
+
+        // Set text renderer (must be called before rendering)
+        void setTextRenderer(SDFTextRenderer* textRenderer) { 
+            m_textRenderer = textRenderer; 
+        }
+
+        // Element management
+        uint32_t addButton(const std::string& text, glm::vec2 position, glm::vec2 size,
+                          std::function<void()> onClick = nullptr);
+        uint32_t addLabel(const std::string& text, glm::vec2 position, uint32_t color = 0xFFFFFFFF, float scale = 1.0f);
+        uint32_t addRect(glm::vec2 position, glm::vec2 size, uint32_t fillColor = 0xFFFFFFFF,
+                        uint32_t borderColor = 0x000000FF, float borderWidth = 0.0f);
+        
+        void removeElement(uint32_t id);
+        void clearElements();
+        
+        // Update UI state with input
+        void updateInput(const SDL_Event& event);
+        void updateMousePosition(int x, int y);
+        
+        // Render all UI elements
+        void render(VkCommandBuffer commandBuffer, const glm::mat4& projection);
+        void render(VkCommandBuffer commandBuffer, const glm::mat4& projection, VkExtent2D extent);
+        
+        // Get/Set element properties
+        UIElement* getElement(uint32_t id);
+        const UIElement* getElement(uint32_t id) const;
+        void setElementVisible(uint32_t id, bool visible);
+        void setElementEnabled(uint32_t id, bool enabled);
+        void setElementText(uint32_t id, const std::string& text);
+        void setElementTextColor(uint32_t id, uint32_t color);
+        
+        // Per-element transform controls
+        void setElementTransform(uint32_t id, const glm::mat4& transform);
+        void setElementScale(uint32_t id, float scale);
+        void setElementScale(uint32_t id, float scaleX, float scaleY);
+        void setElementPosition(uint32_t id, glm::vec2 position);
+        void setElementRotation(uint32_t id, float angleRadians);
+        void resetElementTransform(uint32_t id);
+        const glm::mat4* getElementTransform(uint32_t id) const;
+        
+        // Per-element transform component getters
+        glm::vec2 getElementPosition(uint32_t id) const;
+        glm::vec2 getElementScale(uint32_t id) const;
+        float getElementRotation(uint32_t id) const;
+        
+        // Global UI renderer transform controls (for entire UI)
+        void setTransform(const glm::mat4& transform);
+        void setScale(float scale);
+        void setScale(float scaleX, float scaleY);
+        void setPosition(float x, float y);
+        void setRotation(float angleRadians);
+        void resetTransform();
+        const glm::mat4& getTransform() const { return m_transform; }
+        
+    private:
+        // Vertex structure for UI quads
+        struct UIVertex {
+            glm::vec2 position;
+            glm::vec2 texCoord;
+            uint32_t color;
+        };
+        
+        // Quad rendering
+        void updateQuadBuffer();
+        void renderQuads(VkCommandBuffer commandBuffer, const glm::mat4& projection);
+        
+        VkDevice m_device;
+        VkPhysicalDevice m_physicalDevice;
+        VkCommandPool m_commandPool;
+        VkQueue m_graphicsQueue;
+        VkSampleCountFlagBits m_sampleCount;
+        
+        // UI elements storage
+        std::vector<std::unique_ptr<UIElement>> m_elements;
+        uint32_t m_nextElementId = 1;
+        
+        // Input state
+        glm::vec2 m_mousePosition;
+        bool m_mousePressed = false;
+        UIElement* m_hoveredElement = nullptr;
+        UIElement* m_pressedElement = nullptr;
+        
+        // Text renderer reference
+        SDFTextRenderer* m_textRenderer = nullptr;
+        
+        // Transform matrix for the entire UI
+        glm::mat4 m_transform = glm::mat4(1.0f); // Identity matrix by default
+        
+        // Current render extent for viewport/scissor
+        VkExtent2D m_currentExtent = {1280, 720};
+        VkRenderPass m_renderPass = VK_NULL_HANDLE;
+        VkFormat m_colorFormat = VK_FORMAT_UNDEFINED;
+        bool m_useDynamicRendering = false;
+        
+        // Dirty flags for optimization
+        bool m_textDirty = true;  // True when text needs to be regenerated
+        bool m_quadsDirty = true; // True when quads need to be regenerated
+        
+        // Track previous frame's element states for optimization
+        std::vector<UIElementState> m_previousStates;
+        
+        // Rendering resources
+        VkPipeline m_pipeline;
+        VkPipelineLayout m_pipelineLayout;
+        VkDescriptorSetLayout m_descriptorSetLayout;
+        VkDescriptorPool m_descriptorPool;
+        VkDescriptorSet m_descriptorSet;
+        
+        // Vertex buffer for UI quads
+        VkBuffer m_vertexBuffer;
+        VkDeviceMemory m_vertexBufferMemory;
+        size_t m_vertexBufferSize;
+        std::vector<UIVertex> m_quadVertices;
+        
+        // Uniform buffer
+        VkBuffer m_uniformBuffer;
+        VkDeviceMemory m_uniformBufferMemory;
+        
+        // Helper functions
+        bool createPipeline(VkRenderPass renderPass, VkFormat colorFormat);
+        void destroyPipelineResources();
+        bool createDescriptorSets();
+        bool createVertexBuffer(size_t size);
+        void updateVertexBuffer();
+        void renderQuad(VkCommandBuffer commandBuffer, glm::vec2 position, 
+                       glm::vec2 size, uint32_t color);
+        
+        // Update element states based on mouse
+        void updateElementStates();
+        
+        // Get appropriate color for element based on state
+        uint32_t getElementColor(const UIElement* element) const;
+    };
+
+} // namespace tremor::gfx
