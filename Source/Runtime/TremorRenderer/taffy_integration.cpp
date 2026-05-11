@@ -1,6 +1,6 @@
 // tremor/src/renderer/taffy_integration.cpp
 #include "taffy_integration.h"
-#include "../vk.h"  // Include full VulkanClusteredRenderer definition
+#include "../../../vk.h"
 #include <iostream>
 
 namespace Tremor {
