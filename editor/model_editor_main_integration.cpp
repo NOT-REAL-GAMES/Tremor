@@ -2,7 +2,8 @@
 // This shows how to modify main.cpp to include the model editor
 
 #include "model_editor_integration.h"
-#include "../main.h"
+#include "../logger.h"
+#include "../vk_backend_controls.h"
 
 /*
 To integrate the model editor into the main engine, modify the Engine class in main.cpp as follows:
@@ -44,7 +45,8 @@ To integrate the model editor into the main engine, modify the Engine class in m
 
            // Pass event to render backend for UI handling
            if (rb) {
-               static_cast<tremor::gfx::VulkanBackend*>(rb.get())->handleInput(event);
+               tremor::gfx::VulkanBackendControls::handleInput(
+                   *static_cast<tremor::gfx::VulkanBackend*>(rb.get()), event);
            }
            
            // ... existing input handling ...

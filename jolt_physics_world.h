@@ -14,88 +14,20 @@
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
-#include <array>
+#include "Source/Runtime/TremorPhysics/physics_backend.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <memory>
-#include <optional>
 #include <string>
-#include <string_view>
-#include <unordered_map>
 #include <vector>
 
 namespace tremor::physics {
 
-namespace DefaultPhysicsLayers {
-    static constexpr JPH::ObjectLayer Static = 0;
-    static constexpr JPH::ObjectLayer Dynamic = 1;
-    static constexpr JPH::ObjectLayer Player = 2;
-    static constexpr JPH::ObjectLayer Enemy = 3;
-    static constexpr JPH::ObjectLayer Projectile = 4;
-    static constexpr JPH::ObjectLayer Pickup = 5;
-    static constexpr JPH::ObjectLayer Count = 6;
-}
+using JoltPhysicsBody = PhysicsBody;
+using JoltPhysicsSettings = PhysicsSettings;
 
-struct JoltPhysicsBody {
-    JPH::BodyID bodyId;
-    bool isKinematic = false;
-
-    JoltPhysicsBody() = default;
-    JoltPhysicsBody(JPH::BodyID id, bool kinematic = false)
-        : bodyId(id), isKinematic(kinematic) {
-    }
-};
-
-struct PhysicsLayerConfig {
-    struct Layer {
-        std::string name;
-        JPH::BroadPhaseLayer broadPhase;
-    };
-
-    std::vector<Layer> layers;
-    std::vector<std::vector<bool>> objectCollisions;
-    std::vector<std::vector<bool>> broadPhaseCollisions;
-
-    static PhysicsLayerConfig makeDefault();
-};
-
-class PhysicsLayerConfigBuilder {
-public:
-    PhysicsLayerConfigBuilder();
-
-    void clear();
-    bool empty() const;
-    bool defineLayer(std::string_view name, std::string_view broadPhaseName = {});
-    bool allowCollision(std::string_view left, std::string_view right);
-    bool blockCollision(std::string_view left, std::string_view right);
-    std::optional<JPH::ObjectLayer> findLayer(std::string_view nameOrNumber) const;
-    PhysicsLayerConfig build() const;
-
-private:
-    struct DraftLayer {
-        std::string name;
-        std::string broadPhaseName;
-    };
-
-    void resizeCollisionMatrix();
-    bool setCollision(std::string_view left, std::string_view right, bool shouldCollide);
-
-    std::vector<DraftLayer> layers_;
-    std::vector<std::vector<bool>> objectCollisions_;
-};
-
-struct JoltPhysicsSettings {
-    uint32_t maxBodies = 65536;
-    uint32_t numBodyMutexes = 0;
-    uint32_t maxBodyPairs = 65536;
-    uint32_t maxContactConstraints = 10240;
-    uint32_t maxPhysicsJobs = 2048;
-    uint32_t maxPhysicsBarriers = 8;
-    uint32_t collisionSteps = 1;
-    uint32_t tempAllocatorBytes = 32 * 1024 * 1024;
-    glm::vec3 gravity{0.0f, 9.81f, 0.0f};
-    PhysicsLayerConfig layers = PhysicsLayerConfig::makeDefault();
-};
+class JoltPhysicsWorld;
 
 class ConfigurableBroadPhaseLayerInterface final : public JPH::BroadPhaseLayerInterface {
 public:
@@ -135,6 +67,8 @@ private:
 
 class LoggingContactListener : public JPH::ContactListener {
 public:
+    explicit LoggingContactListener(JoltPhysicsWorld& owner);
+
     void OnContactAdded(
         const JPH::Body& left,
         const JPH::Body& right,
@@ -143,101 +77,70 @@ public:
     ) override;
 
     void OnContactRemoved(const JPH::SubShapeIDPair& pair) override;
+
+private:
+    JoltPhysicsWorld& owner_;
 };
 
-class JoltPhysicsWorld {
+class JoltPhysicsWorld final : public PhysicsWorldBackend {
 public:
     explicit JoltPhysicsWorld(JoltPhysicsSettings settings = {});
-    ~JoltPhysicsWorld();
+    ~JoltPhysicsWorld() override;
 
     JoltPhysicsWorld(const JoltPhysicsWorld&) = delete;
     JoltPhysicsWorld& operator=(const JoltPhysicsWorld&) = delete;
 
-    bool initialize();
+    bool initialize() override;
     bool Initialize() { return initialize(); }
 
-    void shutdown();
+    void shutdown() override;
     void Shutdown() { shutdown(); }
 
-    void update(float deltaTime);
+    void update(float deltaTime) override;
     void Update(float deltaTime) { update(deltaTime); }
 
-    JPH::BodyID createDynamicCapsule(
+    PhysicsBodyHandle createDynamicCapsule(
         const glm::vec3& position,
         float radius,
         float height,
-        JPH::ObjectLayer layer = DefaultPhysicsLayers::Dynamic
-    );
-    JPH::BodyID CreateDynamicBody(
-        const glm::vec3& position,
-        float radius,
-        float height,
-        JPH::ObjectLayer layer = DefaultPhysicsLayers::Dynamic
-    ) {
-        return createDynamicCapsule(position, radius, height, layer);
-    }
+        PhysicsObjectLayer layer = DefaultPhysicsLayers::Dynamic
+    ) override;
 
-    JPH::BodyID createKinematicBox(
+    PhysicsBodyHandle createKinematicBox(
         const glm::vec3& position,
         const glm::vec3& halfExtents,
-        JPH::ObjectLayer layer = DefaultPhysicsLayers::Dynamic
-    );
-    JPH::BodyID CreateKinematicBody(
+        PhysicsObjectLayer layer = DefaultPhysicsLayers::Dynamic
+    ) override;
+
+    PhysicsBodyHandle createStaticBox(
         const glm::vec3& position,
         const glm::vec3& halfExtents,
-        JPH::ObjectLayer layer = DefaultPhysicsLayers::Dynamic
-    ) {
-        return createKinematicBox(position, halfExtents, layer);
-    }
+        PhysicsObjectLayer layer = DefaultPhysicsLayers::Static
+    ) override;
 
-    JPH::BodyID createStaticBox(
-        const glm::vec3& position,
-        const glm::vec3& halfExtents,
-        JPH::ObjectLayer layer = DefaultPhysicsLayers::Static
-    );
-    JPH::BodyID CreateStaticBody(
-        const glm::vec3& position,
-        const glm::vec3& halfExtents,
-        JPH::ObjectLayer layer = DefaultPhysicsLayers::Static
-    ) {
-        return createStaticBox(position, halfExtents, layer);
-    }
-
-    glm::vec3 getBodyPosition(JPH::BodyID bodyId) const;
-    glm::vec3 GetBodyPosition(JPH::BodyID bodyId) const { return getBodyPosition(bodyId); }
-
-    void setBodyPosition(JPH::BodyID bodyId, const glm::vec3& position);
-    void SetBodyPosition(JPH::BodyID bodyId, const glm::vec3& position) { setBodyPosition(bodyId, position); }
-
-    glm::vec3 getBodyVelocity(JPH::BodyID bodyId) const;
-    glm::vec3 GetBodyVelocity(JPH::BodyID bodyId) const { return getBodyVelocity(bodyId); }
-
-    void setBodyVelocity(JPH::BodyID bodyId, const glm::vec3& velocity);
-    void SetBodyVelocity(JPH::BodyID bodyId, const glm::vec3& velocity) { setBodyVelocity(bodyId, velocity); }
-
-    void addImpulse(JPH::BodyID bodyId, const glm::vec3& impulse);
-    void AddImpulse(JPH::BodyID bodyId, const glm::vec3& impulse) { addImpulse(bodyId, impulse); }
-
-    void addForce(JPH::BodyID bodyId, const glm::vec3& force);
-    void AddForce(JPH::BodyID bodyId, const glm::vec3& force) { addForce(bodyId, force); }
-
-    void removeBody(JPH::BodyID bodyId);
-    void RemoveBody(JPH::BodyID bodyId) { removeBody(bodyId); }
+    glm::vec3 getBodyPosition(PhysicsBodyHandle bodyId) const override;
+    void setBodyPosition(PhysicsBodyHandle bodyId, const glm::vec3& position) override;
+    glm::vec3 getBodyVelocity(PhysicsBodyHandle bodyId) const override;
+    void setBodyVelocity(PhysicsBodyHandle bodyId, const glm::vec3& velocity) override;
+    void addImpulse(PhysicsBodyHandle bodyId, const glm::vec3& impulse) override;
+    void addForce(PhysicsBodyHandle bodyId, const glm::vec3& force) override;
+    void removeBody(PhysicsBodyHandle bodyId) override;
 
     JPH::PhysicsSystem* getSystem() { return physicsSystem_.get(); }
     JPH::PhysicsSystem* GetSystem() { return getSystem(); }
     JPH::BodyInterface& getBodyInterface() { return physicsSystem_->GetBodyInterface(); }
     JPH::BodyInterface& GetBodyInterface() { return getBodyInterface(); }
 
-    std::optional<JPH::ObjectLayer> findLayer(std::string_view nameOrNumber) const;
-
 private:
+    friend class LoggingContactListener;
+
+    static PhysicsBodyHandle toHandle(JPH::BodyID bodyId);
+    static JPH::BodyID toBodyId(PhysicsBodyHandle handle);
     static JPH::RVec3 toJoltPosition(const glm::vec3& value);
     static JPH::Vec3 toJoltVector(const glm::vec3& value);
     static glm::vec3 fromJolt(const JPH::RVec3& value);
     static glm::vec3 fromJolt(const JPH::Vec3& value);
 
-    JoltPhysicsSettings settings_;
     bool joltRegistered_ = false;
 
     std::unique_ptr<JPH::JobSystemThreadPool> jobSystem_;

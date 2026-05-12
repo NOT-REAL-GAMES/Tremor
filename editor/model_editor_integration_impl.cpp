@@ -1,6 +1,7 @@
 #include "model_editor_integration.h"
 #include "model_editor_ui.h"
-#include "../main.h"
+#include "../logger.h"
+#include "../vk_backend_controls.h"
 
 namespace tremor::editor {
 
@@ -178,7 +179,7 @@ namespace tremor::editor {
         }
         
         // Hide main menu when editor is enabled, show when disabled
-        m_backend.setMainMenuVisible(!m_editorEnabled);
+        tremor::gfx::VulkanBackendControls::setMainMenuVisible(m_backend, !m_editorEnabled);
         
         if (m_editorEnabled) {
             logEditorControls();

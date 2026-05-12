@@ -140,6 +140,18 @@ Priority work:
 - introduce runtime-facing service interfaces for editor rendering and asset
   manipulation
 
+This has started with a small runtime/editor seam:
+
+- [C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_editor_bridge.h](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_editor_bridge.h)
+- [C:\Projects\Tremor\editor\vk_editor_bridge.cpp](C:\Projects\Tremor\editor\vk_editor_bridge.cpp)
+- [C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_overlay_bridge.h](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_overlay_bridge.h)
+- [C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_overlay_bridge.cpp](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_overlay_bridge.cpp)
+- [C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_ui_bridge.h](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_ui_bridge.h)
+- [C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_ui_bridge.cpp](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_ui_bridge.cpp)
+
+The backend now depends on a runtime-facing editor bridge interface rather than
+owning `ModelEditorIntegration` directly.
+
 ### Phase 5: Build Target Split
 
 Once module ownership is physically cleaner:

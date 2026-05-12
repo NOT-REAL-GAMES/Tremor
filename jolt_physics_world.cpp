@@ -11,179 +11,13 @@
 #include <utility>
 
 namespace tremor::physics {
-namespace {
-
-bool matrixValue(const std::vector<std::vector<bool>>& matrix, size_t row, size_t column) {
-    return row < matrix.size() && column < matrix[row].size() && matrix[row][column];
-}
-
-std::vector<std::vector<bool>> makeMatrix(size_t rows, size_t columns, bool value = false) {
-    return std::vector<std::vector<bool>>(rows, std::vector<bool>(columns, value));
-}
-
-} // namespace
-
-PhysicsLayerConfig PhysicsLayerConfig::makeDefault() {
-    PhysicsLayerConfig config;
-    config.layers = {
-        {"static", JPH::BroadPhaseLayer(0)},
-        {"dynamic", JPH::BroadPhaseLayer(1)},
-        {"player", JPH::BroadPhaseLayer(2)},
-        {"enemy", JPH::BroadPhaseLayer(3)},
-        {"projectile", JPH::BroadPhaseLayer(4)},
-        {"pickup", JPH::BroadPhaseLayer(1)},
-    };
-
-    config.objectCollisions = makeMatrix(DefaultPhysicsLayers::Count, DefaultPhysicsLayers::Count, false);
-    config.broadPhaseCollisions = makeMatrix(DefaultPhysicsLayers::Count, DefaultPhysicsLayers::Count, false);
-
-    const auto allowObject = [&config](JPH::ObjectLayer left, JPH::ObjectLayer right) {
-        config.objectCollisions[left][right] = true;
-        config.objectCollisions[right][left] = true;
-    };
-    const auto allowBroadPhase = [&config](JPH::ObjectLayer left, JPH::ObjectLayer right) {
-        config.broadPhaseCollisions[left][right] = true;
-        config.broadPhaseCollisions[right][left] = true;
-    };
-
-    allowObject(DefaultPhysicsLayers::Static, DefaultPhysicsLayers::Dynamic);
-    allowObject(DefaultPhysicsLayers::Static, DefaultPhysicsLayers::Player);
-    allowObject(DefaultPhysicsLayers::Static, DefaultPhysicsLayers::Enemy);
-    allowObject(DefaultPhysicsLayers::Static, DefaultPhysicsLayers::Projectile);
-    allowObject(DefaultPhysicsLayers::Dynamic, DefaultPhysicsLayers::Dynamic);
-    allowObject(DefaultPhysicsLayers::Dynamic, DefaultPhysicsLayers::Player);
-    allowObject(DefaultPhysicsLayers::Dynamic, DefaultPhysicsLayers::Enemy);
-    allowObject(DefaultPhysicsLayers::Dynamic, DefaultPhysicsLayers::Projectile);
-    allowObject(DefaultPhysicsLayers::Dynamic, DefaultPhysicsLayers::Pickup);
-    allowObject(DefaultPhysicsLayers::Player, DefaultPhysicsLayers::Enemy);
-    allowObject(DefaultPhysicsLayers::Player, DefaultPhysicsLayers::Pickup);
-    allowObject(DefaultPhysicsLayers::Enemy, DefaultPhysicsLayers::Projectile);
-    allowObject(DefaultPhysicsLayers::Pickup, DefaultPhysicsLayers::Player);
-
-    for (JPH::ObjectLayer layer = 0; layer < DefaultPhysicsLayers::Count; ++layer) {
-        allowBroadPhase(layer, DefaultPhysicsLayers::Static);
-        allowBroadPhase(layer, DefaultPhysicsLayers::Dynamic);
-        allowBroadPhase(layer, DefaultPhysicsLayers::Player);
-        allowBroadPhase(layer, DefaultPhysicsLayers::Enemy);
-        allowBroadPhase(layer, DefaultPhysicsLayers::Projectile);
-    }
-
-    return config;
-}
-
-PhysicsLayerConfigBuilder::PhysicsLayerConfigBuilder() {
-    clear();
-}
-
-void PhysicsLayerConfigBuilder::clear() {
-    layers_.clear();
-    objectCollisions_.clear();
-}
-
-bool PhysicsLayerConfigBuilder::empty() const {
-    return layers_.empty();
-}
-
-bool PhysicsLayerConfigBuilder::defineLayer(std::string_view name, std::string_view broadPhaseName) {
-    if (name.empty() || findLayer(name)) {
-        return false;
-    }
-
-    const std::string layerName(name);
-    layers_.push_back({
-        layerName,
-        broadPhaseName.empty() ? layerName : std::string(broadPhaseName)
-    });
-    resizeCollisionMatrix();
-    return true;
-}
-
-bool PhysicsLayerConfigBuilder::allowCollision(std::string_view left, std::string_view right) {
-    return setCollision(left, right, true);
-}
-
-bool PhysicsLayerConfigBuilder::blockCollision(std::string_view left, std::string_view right) {
-    return setCollision(left, right, false);
-}
-
-std::optional<JPH::ObjectLayer> PhysicsLayerConfigBuilder::findLayer(std::string_view nameOrNumber) const {
-    const std::string value(nameOrNumber);
-    for (JPH::ObjectLayer index = 0; index < layers_.size(); ++index) {
-        if (layers_[index].name == value) {
-            return index;
-        }
-    }
-
-    try {
-        size_t consumed = 0;
-        const unsigned long parsed = std::stoul(value, &consumed);
-        if (consumed == value.size() && parsed < layers_.size()) {
-            return static_cast<JPH::ObjectLayer>(parsed);
-        }
-    } catch (const std::exception&) {
-    }
-    return std::nullopt;
-}
-
-PhysicsLayerConfig PhysicsLayerConfigBuilder::build() const {
-    PhysicsLayerConfig config;
-
-    std::unordered_map<std::string, JPH::BroadPhaseLayer> broadPhaseLayers;
-    for (const DraftLayer& layer : layers_) {
-        auto found = broadPhaseLayers.find(layer.broadPhaseName);
-        if (found == broadPhaseLayers.end()) {
-            const auto broadPhaseIndex = static_cast<JPH::uint>(broadPhaseLayers.size());
-            found = broadPhaseLayers.emplace(layer.broadPhaseName, JPH::BroadPhaseLayer(broadPhaseIndex)).first;
-        }
-        config.layers.push_back({layer.name, found->second});
-    }
-
-    config.objectCollisions = objectCollisions_;
-    config.broadPhaseCollisions = makeMatrix(
-        layers_.size(),
-        std::max<size_t>(1, broadPhaseLayers.size()),
-        false
-    );
-
-    for (size_t left = 0; left < objectCollisions_.size(); ++left) {
-        for (size_t right = 0; right < objectCollisions_[left].size(); ++right) {
-            if (!objectCollisions_[left][right]) {
-                continue;
-            }
-            const size_t broadPhaseRight = static_cast<size_t>(config.layers[right].broadPhase.GetValue());
-            config.broadPhaseCollisions[left][broadPhaseRight] = true;
-        }
-    }
-
-    return config;
-}
-
-void PhysicsLayerConfigBuilder::resizeCollisionMatrix() {
-    const size_t size = layers_.size();
-    objectCollisions_.resize(size);
-    for (std::vector<bool>& row : objectCollisions_) {
-        row.resize(size, false);
-    }
-}
-
-bool PhysicsLayerConfigBuilder::setCollision(std::string_view left, std::string_view right, bool shouldCollide) {
-    const std::optional<JPH::ObjectLayer> leftLayer = findLayer(left);
-    const std::optional<JPH::ObjectLayer> rightLayer = findLayer(right);
-    if (!leftLayer || !rightLayer) {
-        return false;
-    }
-
-    objectCollisions_[*leftLayer][*rightLayer] = shouldCollide;
-    objectCollisions_[*rightLayer][*leftLayer] = shouldCollide;
-    return true;
-}
 
 ConfigurableBroadPhaseLayerInterface::ConfigurableBroadPhaseLayerInterface(const PhysicsLayerConfig& config) {
     objectToBroadPhase_.resize(config.layers.size(), JPH::BroadPhaseLayer(0));
     broadPhaseNames_.resize(config.layers.size());
     for (size_t index = 0; index < config.layers.size(); ++index) {
-        objectToBroadPhase_[index] = config.layers[index].broadPhase;
-        const size_t broadIndex = static_cast<size_t>(config.layers[index].broadPhase.GetValue());
+        objectToBroadPhase_[index] = JPH::BroadPhaseLayer(config.layers[index].broadPhase);
+        const size_t broadIndex = static_cast<size_t>(config.layers[index].broadPhase);
         if (broadIndex >= broadPhaseNames_.size()) {
             broadPhaseNames_.resize(broadIndex + 1);
         }
@@ -223,7 +57,9 @@ bool ConfigurableObjectVsBroadPhaseLayerFilter::ShouldCollide(
     JPH::ObjectLayer objectLayer,
     JPH::BroadPhaseLayer broadPhaseLayer
 ) const {
-    return matrixValue(collisions_, objectLayer, broadPhaseLayer.GetValue());
+    return objectLayer < collisions_.size() &&
+        broadPhaseLayer.GetValue() < collisions_[objectLayer].size() &&
+        collisions_[objectLayer][broadPhaseLayer.GetValue()];
 }
 
 ConfigurableObjectLayerPairFilter::ConfigurableObjectLayerPairFilter(
@@ -232,7 +68,11 @@ ConfigurableObjectLayerPairFilter::ConfigurableObjectLayerPairFilter(
 }
 
 bool ConfigurableObjectLayerPairFilter::ShouldCollide(JPH::ObjectLayer left, JPH::ObjectLayer right) const {
-    return matrixValue(collisions_, left, right);
+    return left < collisions_.size() && right < collisions_[left].size() && collisions_[left][right];
+}
+
+LoggingContactListener::LoggingContactListener(JoltPhysicsWorld& owner)
+    : owner_(owner) {
 }
 
 void LoggingContactListener::OnContactAdded(
@@ -246,13 +86,23 @@ void LoggingContactListener::OnContactAdded(
         left.GetID().GetIndex(),
         right.GetID().GetIndex()
     );
+    owner_.emitContactEvent({
+        JoltPhysicsWorld::toHandle(left.GetID()),
+        JoltPhysicsWorld::toHandle(right.GetID()),
+        PhysicsContactPhase::Added
+    });
 }
 
-void LoggingContactListener::OnContactRemoved(const JPH::SubShapeIDPair&) {
+void LoggingContactListener::OnContactRemoved(const JPH::SubShapeIDPair& pair) {
+    owner_.emitContactEvent({
+        JoltPhysicsWorld::toHandle(pair.GetBody1ID()),
+        JoltPhysicsWorld::toHandle(pair.GetBody2ID()),
+        PhysicsContactPhase::Removed
+    });
 }
 
 JoltPhysicsWorld::JoltPhysicsWorld(JoltPhysicsSettings settings)
-    : settings_(std::move(settings)) {
+    : PhysicsWorldBackend(std::move(settings)) {
     JPH::RegisterDefaultAllocator();
     JPH::Factory::sInstance = new JPH::Factory();
     JPH::RegisterTypes();
@@ -294,7 +144,7 @@ bool JoltPhysicsWorld::initialize() {
         *objectLayerPairFilter_
     );
 
-    contactListener_ = std::make_unique<LoggingContactListener>();
+    contactListener_ = std::make_unique<LoggingContactListener>(*this);
     physicsSystem_->SetContactListener(contactListener_.get());
     physicsSystem_->SetGravity(toJoltVector(settings_.gravity));
 
@@ -334,11 +184,11 @@ void JoltPhysicsWorld::update(float deltaTime) {
     physicsSystem_->Update(deltaTime, settings_.collisionSteps, tempAllocator_.get(), jobSystem_.get());
 }
 
-JPH::BodyID JoltPhysicsWorld::createDynamicCapsule(
+PhysicsBodyHandle JoltPhysicsWorld::createDynamicCapsule(
     const glm::vec3& position,
     float radius,
     float height,
-    JPH::ObjectLayer layer
+    PhysicsObjectLayer layer
 ) {
     JPH::BodyInterface& bodyInterface = physicsSystem_->GetBodyInterface();
     JPH::RefConst<JPH::Shape> shape = new JPH::CapsuleShape(
@@ -351,7 +201,7 @@ JPH::BodyID JoltPhysicsWorld::createDynamicCapsule(
         toJoltPosition(position),
         JPH::Quat::sIdentity(),
         JPH::EMotionType::Dynamic,
-        layer
+        static_cast<JPH::ObjectLayer>(layer)
     );
     bodySettings.mFriction = static_cast<JPH::Real>(0.5f);
     bodySettings.mRestitution = static_cast<JPH::Real>(0.0f);
@@ -367,17 +217,17 @@ JPH::BodyID JoltPhysicsWorld::createDynamicCapsule(
     JPH::Body* body = bodyInterface.CreateBody(bodySettings);
     if (!body) {
         Logger::get().error("Failed to create dynamic capsule body");
-        return JPH::BodyID();
+        return {};
     }
 
     bodyInterface.AddBody(body->GetID(), JPH::EActivation::Activate);
-    return body->GetID();
+    return toHandle(body->GetID());
 }
 
-JPH::BodyID JoltPhysicsWorld::createKinematicBox(
+PhysicsBodyHandle JoltPhysicsWorld::createKinematicBox(
     const glm::vec3& position,
     const glm::vec3& halfExtents,
-    JPH::ObjectLayer layer
+    PhysicsObjectLayer layer
 ) {
     JPH::BodyInterface& bodyInterface = physicsSystem_->GetBodyInterface();
     JPH::RefConst<JPH::Shape> shape = new JPH::BoxShape(toJoltVector(halfExtents));
@@ -386,7 +236,7 @@ JPH::BodyID JoltPhysicsWorld::createKinematicBox(
         toJoltPosition(position),
         JPH::Quat::sIdentity(),
         JPH::EMotionType::Kinematic,
-        layer
+        static_cast<JPH::ObjectLayer>(layer)
     );
     bodySettings.mFriction = static_cast<JPH::Real>(0.5f);
     bodySettings.mRestitution = static_cast<JPH::Real>(0.0f);
@@ -394,17 +244,17 @@ JPH::BodyID JoltPhysicsWorld::createKinematicBox(
     JPH::Body* body = bodyInterface.CreateBody(bodySettings);
     if (!body) {
         Logger::get().error("Failed to create kinematic box body");
-        return JPH::BodyID();
+        return {};
     }
 
     bodyInterface.AddBody(body->GetID(), JPH::EActivation::Activate);
-    return body->GetID();
+    return toHandle(body->GetID());
 }
 
-JPH::BodyID JoltPhysicsWorld::createStaticBox(
+PhysicsBodyHandle JoltPhysicsWorld::createStaticBox(
     const glm::vec3& position,
     const glm::vec3& halfExtents,
-    JPH::ObjectLayer layer
+    PhysicsObjectLayer layer
 ) {
     JPH::BodyInterface& bodyInterface = physicsSystem_->GetBodyInterface();
     JPH::RefConst<JPH::Shape> shape = new JPH::BoxShape(toJoltVector(halfExtents));
@@ -413,7 +263,7 @@ JPH::BodyID JoltPhysicsWorld::createStaticBox(
         toJoltPosition(position),
         JPH::Quat::sIdentity(),
         JPH::EMotionType::Static,
-        layer
+        static_cast<JPH::ObjectLayer>(layer)
     );
     bodySettings.mFriction = static_cast<JPH::Real>(0.5f);
     bodySettings.mRestitution = static_cast<JPH::Real>(0.0f);
@@ -421,81 +271,78 @@ JPH::BodyID JoltPhysicsWorld::createStaticBox(
     JPH::Body* body = bodyInterface.CreateBody(bodySettings);
     if (!body) {
         Logger::get().error("Failed to create static box body");
-        return JPH::BodyID();
+        return {};
     }
 
     bodyInterface.AddBody(body->GetID(), JPH::EActivation::DontActivate);
-    return body->GetID();
+    return toHandle(body->GetID());
 }
 
-glm::vec3 JoltPhysicsWorld::getBodyPosition(JPH::BodyID bodyId) const {
+glm::vec3 JoltPhysicsWorld::getBodyPosition(PhysicsBodyHandle bodyId) const {
     if (!physicsSystem_) {
         return glm::vec3(0.0f);
     }
-    return fromJolt(physicsSystem_->GetBodyInterface().GetCenterOfMassPosition(bodyId));
+    return fromJolt(physicsSystem_->GetBodyInterface().GetCenterOfMassPosition(toBodyId(bodyId)));
 }
 
-void JoltPhysicsWorld::setBodyPosition(JPH::BodyID bodyId, const glm::vec3& position) {
+void JoltPhysicsWorld::setBodyPosition(PhysicsBodyHandle bodyId, const glm::vec3& position) {
     if (!physicsSystem_) {
         return;
     }
-    physicsSystem_->GetBodyInterface().SetPosition(bodyId, toJoltPosition(position), JPH::EActivation::Activate);
+    physicsSystem_->GetBodyInterface().SetPosition(
+        toBodyId(bodyId),
+        toJoltPosition(position),
+        JPH::EActivation::Activate
+    );
 }
 
-glm::vec3 JoltPhysicsWorld::getBodyVelocity(JPH::BodyID bodyId) const {
+glm::vec3 JoltPhysicsWorld::getBodyVelocity(PhysicsBodyHandle bodyId) const {
     if (!physicsSystem_) {
         return glm::vec3(0.0f);
     }
-    return fromJolt(physicsSystem_->GetBodyInterface().GetLinearVelocity(bodyId));
+    return fromJolt(physicsSystem_->GetBodyInterface().GetLinearVelocity(toBodyId(bodyId)));
 }
 
-void JoltPhysicsWorld::setBodyVelocity(JPH::BodyID bodyId, const glm::vec3& velocity) {
+void JoltPhysicsWorld::setBodyVelocity(PhysicsBodyHandle bodyId, const glm::vec3& velocity) {
     if (!physicsSystem_) {
         return;
     }
-    physicsSystem_->GetBodyInterface().SetLinearVelocity(bodyId, toJoltVector(velocity));
+    physicsSystem_->GetBodyInterface().SetLinearVelocity(toBodyId(bodyId), toJoltVector(velocity));
 }
 
-void JoltPhysicsWorld::addImpulse(JPH::BodyID bodyId, const glm::vec3& impulse) {
+void JoltPhysicsWorld::addImpulse(PhysicsBodyHandle bodyId, const glm::vec3& impulse) {
     if (!physicsSystem_) {
         return;
     }
-    physicsSystem_->GetBodyInterface().AddImpulse(bodyId, toJoltVector(impulse));
+    physicsSystem_->GetBodyInterface().AddImpulse(toBodyId(bodyId), toJoltVector(impulse));
 }
 
-void JoltPhysicsWorld::addForce(JPH::BodyID bodyId, const glm::vec3& force) {
+void JoltPhysicsWorld::addForce(PhysicsBodyHandle bodyId, const glm::vec3& force) {
     if (!physicsSystem_) {
         return;
     }
-    physicsSystem_->GetBodyInterface().AddForce(bodyId, toJoltVector(force));
+    physicsSystem_->GetBodyInterface().AddForce(toBodyId(bodyId), toJoltVector(force));
 }
 
-void JoltPhysicsWorld::removeBody(JPH::BodyID bodyId) {
-    if (!physicsSystem_ || bodyId.IsInvalid()) {
+void JoltPhysicsWorld::removeBody(PhysicsBodyHandle bodyId) {
+    const JPH::BodyID joltBodyId = toBodyId(bodyId);
+    if (!physicsSystem_ || joltBodyId.IsInvalid()) {
         return;
     }
     JPH::BodyInterface& bodyInterface = physicsSystem_->GetBodyInterface();
-    bodyInterface.RemoveBody(bodyId);
-    bodyInterface.DestroyBody(bodyId);
+    bodyInterface.RemoveBody(joltBodyId);
+    bodyInterface.DestroyBody(joltBodyId);
 }
 
-std::optional<JPH::ObjectLayer> JoltPhysicsWorld::findLayer(std::string_view nameOrNumber) const {
-    const std::string value(nameOrNumber);
-    for (JPH::ObjectLayer index = 0; index < settings_.layers.layers.size(); ++index) {
-        if (settings_.layers.layers[index].name == value) {
-            return index;
-        }
-    }
+PhysicsBodyHandle JoltPhysicsWorld::toHandle(JPH::BodyID bodyId) {
+    return PhysicsBodyHandle(bodyId.GetIndexAndSequenceNumber());
+}
 
-    try {
-        size_t consumed = 0;
-        const unsigned long parsed = std::stoul(value, &consumed);
-        if (consumed == value.size() && parsed < settings_.layers.layers.size()) {
-            return static_cast<JPH::ObjectLayer>(parsed);
-        }
-    } catch (const std::exception&) {
+JPH::BodyID JoltPhysicsWorld::toBodyId(PhysicsBodyHandle handle) {
+    if (handle.IsInvalid()) {
+        return JPH::BodyID();
     }
-    return std::nullopt;
+    return JPH::BodyID(static_cast<JPH::uint32>(handle.raw()));
 }
 
 JPH::RVec3 JoltPhysicsWorld::toJoltPosition(const glm::vec3& value) {

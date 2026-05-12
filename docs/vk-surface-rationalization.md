@@ -37,9 +37,6 @@ RHI-level classes that remain first-class:
 These are useful engine capabilities, but they should not stay as broad public
 methods on `VulkanBackend` forever:
 
-- `loadMeshFromFile`
-- `createMaterialFromDesc`
-- `addObjectToScene`
 - `createTexture`
 - `createBuffer`
 - `createShader`
@@ -49,6 +46,19 @@ Long-term home:
 - renderer-facing asset/scene services
 - render-core resource creation services
 - gameplay/editor-facing scene submission helpers
+
+The older scene-facing helpers (`loadMeshFromFile`,
+`createMaterialFromDesc`, `addObjectToScene`) were dead public declarations
+with no active engine callers, so they have already been removed from the
+public `VulkanBackend` surface. If we reintroduce them, they should come back
+as part of a narrower renderer-facing scene or asset submission service rather
+than as backend methods.
+
+The resource creation trio also had no active engine callers on the backend
+surface, and `createTexture` was duplicating logic that already exists in
+`VulkanResourceManager`. They have now been removed from `VulkanBackend` too.
+If we need public runtime resource creation again, it should come back through a
+small RHI/render-core service rather than as backend catch-all methods.
 
 ## Deprecate From Public Backend Surface
 
@@ -79,6 +89,22 @@ These should live in:
 - editor integration services
 - renderer-private implementation
 
+Several of the older scene/bootstrap helpers were not just “misplaced”; they
+were completely dead:
+
+- `createEnhancedScene`
+- `createTaffyMeshes`
+- `createTaffyScene`
+- `createSceneLighting`
+- `simpleColorCyclingTest`
+- `createTestMasterAssetFromGLSL`
+- `renderWithOverlays`
+- `demonstrateOverlayControls`
+- `loadShader(const std::string&)`
+
+Those have now been removed from the `VulkanBackend` surface entirely where no
+live engine callers or matching implementations remained.
+
 ## Public Fields To Remove
 
 These should not remain publicly mutable state:
@@ -96,12 +122,49 @@ getter needed by current callers:
 
 ## Near-Term Cleanup Order
 
-1. Keep `handleInput`, `setMainMenuVisible`, and `setSequencerCallback` public
-   until app/editor routing has a narrower home.
-2. Keep resource creation methods public for now, but treat them as migration
-   candidates rather than stable final API.
+1. Route app/editor-facing backend controls through a narrower helper or bridge
+   instead of leaving them on `VulkanBackend` directly.
+2. Route any future public runtime resource creation through a narrow
+   RHI/render-core service rather than re-expanding `VulkanBackend`.
 3. Make dev/demo fields and overlay internals private immediately.
 4. Move overlay/demo bootstrap helpers out of the public section and keep them
    backend-private.
 5. Later, split legacy render-pass compatibility from dynamic rendering once
    UI/text/editor paths stop depending on the old topology.
+
+The first step is now underway via
+[C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_backend_controls.h](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_backend_controls.h)
+and
+[C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_backend_controls.cpp](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_backend_controls.cpp),
+which own:
+
+- input routing into backend UI/editor integration
+- main-menu visibility toggling
+- sequencer callback wiring
+
+The next step is also underway via
+[C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_editor_bridge.h](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_editor_bridge.h)
+and
+[C:\Projects\Tremor\editor\vk_editor_bridge.cpp](C:\Projects\Tremor\editor\vk_editor_bridge.cpp),
+which replace direct `ModelEditorIntegration` ownership on `VulkanBackend`
+with a runtime-facing bridge interface implemented in the editor module.
+
+The overlay/dev bootstrap path is now also moving behind
+[C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_overlay_bridge.h](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_overlay_bridge.h)
+and
+[C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_overlay_bridge.cpp](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_overlay_bridge.cpp),
+which now own:
+
+- overlay hot-reload ticking
+- development asset/bootstrap creation
+- default test asset loading
+
+The runtime UI/bootstrap path is now also moving behind
+[C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_ui_bridge.h](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_ui_bridge.h)
+and
+[C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_ui_bridge.cpp](C:\Projects\Tremor\Source\Runtime\TremorRenderer\vk_ui_bridge.cpp),
+which now own:
+
+- main menu / exit / editor button setup
+- mesh shader status label setup and refresh
+- transient UI message overlay setup and update

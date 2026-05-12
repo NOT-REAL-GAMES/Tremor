@@ -34,16 +34,16 @@
 #include "Source/Runtime/TremorRenderer/taffy_integration.h"
 #include "include/asset.h"
 
-namespace tremor::editor{
-    class ModelEditorIntegration;
-}
-
 namespace tremor::gfx {
 
     // Forward declarations
     class SDFTextRenderer;
     class UIRenderer;
     class SequencerUI;
+    class VulkanBackendControls;
+    class VulkanEditorBridge;
+    class VulkanOverlayBridge;
+    class VulkanUiBridge;
 
     class Buffer {
     public:
@@ -766,25 +766,6 @@ namespace tremor::gfx {
         void beginFrame() override;
         void endFrame() override;
         
-        // Input handling
-        void handleInput(const SDL_Event& event);
-        
-        // UI control
-        void setMainMenuVisible(bool visible);
-        
-        // Audio integration
-        using SequencerCallback = std::function<void(int)>;
-        void setSequencerCallback(SequencerCallback callback);
-
-        // Resource creation interface
-        uint32_t loadMeshFromFile(const std::string& filename);
-        uint32_t createMaterialFromDesc(const MaterialDesc& desc);
-        void addObjectToScene(uint32_t meshID, uint32_t materialID, const glm::mat4& transform);
-
-        TextureHandle createTexture(const TextureDesc& desc);
-        BufferHandle createBuffer(const BufferDesc& desc);
-        ShaderHandle createShader(const ShaderDesc& desc);
-
         // Vulkan-specific getters
         VkDevice getDevice() const { return device; }
         VkPhysicalDevice getPhysicalDevice() const { return physicalDevice; }
@@ -799,6 +780,10 @@ namespace tremor::gfx {
 
 
     private:
+        friend class VulkanBackendControls;
+        friend class VulkanOverlayBridge;
+        friend class VulkanUiBridge;
+
         // === CORE VULKAN OBJECTS ===
 
         // Instance and devices
@@ -827,8 +812,8 @@ namespace tremor::gfx {
         std::unique_ptr<SDFTextRenderer> m_textRenderer;
         std::unique_ptr<UIRenderer> m_uiRenderer;
         std::unique_ptr<SequencerUI> m_sequencerUI;
-        SequencerCallback m_sequencerCallback;
-        std::unique_ptr<tremor::editor::ModelEditorIntegration> m_editorIntegration;
+        std::function<void(int)> m_sequencerCallback;
+        std::unique_ptr<VulkanEditorBridge> m_editorIntegration;
         
         // Main menu button IDs for visibility control
         uint32_t m_toggleOverlayButtonId = 0;
@@ -1003,6 +988,11 @@ namespace tremor::gfx {
         bool createDepthResources();
         bool createRenderPass();
         bool createFramebuffers();
+        bool initializeCoreVulkan(SDL_Window* window);
+        bool initializeRenderResources();
+        bool initializeRenderSystems();
+        bool initializeEditorAndUi();
+        void initializeOverlayAndDevAssets();
         bool recreateSwapchainResources();
         bool refreshSwapchainDependents();
         
@@ -1029,24 +1019,6 @@ namespace tremor::gfx {
         void createCubeRenderableObject();
 
         // === TAFFY ASSET METHODS ===
-
-        void createTaffyMeshes();
-        void createEnhancedScene();
-        void createTaffyScene();
-        void createSceneLighting();
-        void simpleColorCyclingTest();
-        void initializeOverlayWorkflow();
-        void initializeOverlaySystem();
-        void createDevelopmentOverlays();
-        void loadTestAssetWithOverlays();
-        void updateOverlaySystem();
-        void initializeUiMessageOverlay();
-        void updateUiMessageOverlay();
-        void createTestMasterAssetFromGLSL();
-        void renderWithOverlays(VkCommandBuffer cmdBuffer);
-        void demonstrateOverlayControls();
-        void updateMeshShaderStatusLabel();
-        VkShaderModule loadShader(const std::string& filename);
 
         // === UPDATE METHODS ===
 

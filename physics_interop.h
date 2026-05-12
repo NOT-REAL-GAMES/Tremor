@@ -1,9 +1,8 @@
 #pragma once
 
 #include "flecs_interpreter.h"
-#include "jolt_physics_world.h"
+#include "Source/Runtime/TremorPhysics/physics_core.h"
 
-#include <cstdint>
 #include <optional>
 #include <string_view>
 
@@ -11,10 +10,8 @@
 
 namespace tremor::physics {
 
-using PhysicsBodyHandle = uint64_t;
-
 struct ScriptPhysicsBody {
-    PhysicsBodyHandle handle = 0;
+    PhysicsBodyHandle handle{};
     bool isKinematic = false;
 };
 

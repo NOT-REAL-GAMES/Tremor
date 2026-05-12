@@ -5,11 +5,12 @@
 #include "ui_message_center.h"
 #include "include/quan.h"
 #include "Source/Runtime/TremorRenderer/taffy_integration.h"
+#include "Source/Runtime/TremorRenderer/vk_overlay_bridge.h"
+#include "Source/Runtime/TremorRenderer/vk_editor_bridge.h"
+#include "Source/Runtime/TremorRenderer/vk_ui_bridge.h"
 #include "Source/Runtime/TremorRenderer/sdf_text_renderer.h"
 #include "Source/Runtime/TremorRenderer/ui_renderer.h"
 #include "Source/Runtime/TremorRenderer/sequencer_ui.h"
-#include "editor/grid_renderer.h"
-#include "editor/model_editor_integration.h"
 #include "include/tools.h"
 #include "include/asset.h"
 #include "overlay.h"
@@ -18,6 +19,38 @@
 #include <iomanip>
 
 static bool meshShadersActive = false;
+
+namespace {
+std::vector<uint8_t> repackQuantizedVertexPositionsToFloat(
+    const uint8_t* vertexData,
+    uint32_t vertexCount,
+    uint32_t vertexStride
+) {
+    std::vector<uint8_t> repacked(
+        vertexData,
+        vertexData + static_cast<size_t>(vertexCount) * vertexStride
+    );
+    if (vertexStride < sizeof(int64_t) * 3) {
+        return repacked;
+    }
+
+    constexpr uint64_t kVec3QBias = 9223372036854775808ULL;
+    constexpr float kVec3QInvScale = 1.0f / 128000.0f;
+
+    for (uint32_t vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+        uint8_t* vertexStart = repacked.data() + static_cast<size_t>(vertexIndex) * vertexStride;
+        const uint64_t* quantizedPosition = reinterpret_cast<const uint64_t*>(vertexStart);
+        const glm::vec3 floatPosition(
+            static_cast<float>(static_cast<int64_t>(quantizedPosition[0] - kVec3QBias)) * kVec3QInvScale,
+            static_cast<float>(static_cast<int64_t>(quantizedPosition[1] - kVec3QBias)) * kVec3QInvScale,
+            static_cast<float>(static_cast<int64_t>(quantizedPosition[2] - kVec3QBias)) * kVec3QInvScale
+        );
+        std::memcpy(vertexStart, &floatPosition, sizeof(floatPosition));
+    }
+
+    return repacked;
+}
+}
 
 // Helper function to copy buffer data
 void copyBuffer(VkDevice device, VkCommandPool commandPool, VkQueue queue,
@@ -132,6 +165,16 @@ namespace tremor::gfx {
         vertexStorageBinding.pImmutableSamplers = nullptr;
         bindings.push_back(vertexStorageBinding);
 
+        VkDescriptorSetLayoutBinding instanceStorageBinding{};
+        instanceStorageBinding.binding = 1;
+        instanceStorageBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        instanceStorageBinding.descriptorCount = 1;
+        instanceStorageBinding.stageFlags =
+            VK_SHADER_STAGE_VERTEX_BIT |
+            VK_SHADER_STAGE_MESH_BIT_EXT;
+        instanceStorageBinding.pImmutableSamplers = nullptr;
+        bindings.push_back(instanceStorageBinding);
+
         // Add other bindings if needed in the future (textures, uniforms, etc.)
         // For example:
         // Binding 1: Material data
@@ -170,8 +213,29 @@ namespace tremor::gfx {
         }
 
         TaffyOverlayManager::~TaffyOverlayManager() {
-            // Clean up all pipelines
-            
+            for (auto& [_, gpuData] : gpu_data_cache_) {
+                cleanupMeshAssetGPUData(gpuData);
+            }
+
+            for (auto& [_, pipelineInfo] : pipeline_cache_) {
+                if (pipelineInfo.pipeline != VK_NULL_HANDLE) {
+                    vkDestroyPipeline(device_, pipelineInfo.pipeline, nullptr);
+                }
+                if (pipelineInfo.layout != VK_NULL_HANDLE) {
+                    vkDestroyPipelineLayout(device_, pipelineInfo.layout, nullptr);
+                }
+                cleanupShaderModules(pipelineInfo);
+            }
+
+            if (meshShaderDescSetLayout != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(device_, meshShaderDescSetLayout, nullptr);
+                meshShaderDescSetLayout = VK_NULL_HANDLE;
+            }
+
+            if (descriptorPool != VK_NULL_HANDLE) {
+                vkDestroyDescriptorPool(device_, descriptorPool, nullptr);
+                descriptorPool = VK_NULL_HANDLE;
+            }
         }
 
         // Simplified render method - just pass asset path and command buffer
@@ -212,7 +276,66 @@ namespace tremor::gfx {
             const MeshAssetGPUData& gpuData = gpuDataIt->second;
 
             // Now render using the cached pipeline and GPU data
-            renderMeshAssetInternal(cmd, pipeline->pipeline, pipeline->layout, gpuData, viewProj, model);
+            renderMeshAssetInternal(cmd, pipeline->pipeline, pipeline->layout, gpuData, viewProj, model, 0);
+        }
+
+        void TaffyOverlayManager::renderMeshAssetBatch(
+            const std::string& asset_path,
+            VkCommandBuffer cmd,
+            const glm::mat4& viewProj,
+            const std::vector<glm::mat4>& models) {
+            if (models.empty()) {
+                return;
+            }
+
+            if (!ensureAssetLoaded(asset_path)) {
+                return;
+            }
+
+            PipelineInfo* pipeline = getOrCreatePipeline(asset_path);
+            if (!pipeline) {
+                std::cerr << "Failed to create pipeline for batch: " << asset_path << std::endl;
+                return;
+            }
+
+            auto gpuDataIt = gpu_data_cache_.find(asset_path);
+            if (gpuDataIt == gpu_data_cache_.end()) {
+                std::cerr << "No GPU data for batch asset: " << asset_path << std::endl;
+                return;
+            }
+
+            MeshAssetGPUData& gpuData = gpuDataIt->second;
+            if (!ensureInstanceBufferCapacity(gpuData, static_cast<uint32_t>(models.size()))) {
+                std::cerr << "Failed to resize instance buffer for batch: " << asset_path << std::endl;
+                return;
+            }
+
+            if (gpuData.instanceStorageMemory == VK_NULL_HANDLE) {
+                std::cerr << "Instance storage memory was null for batch: " << asset_path << std::endl;
+                return;
+            }
+
+            void* mappedInstances = nullptr;
+            vkMapMemory(
+                device_,
+                gpuData.instanceStorageMemory,
+                0,
+                sizeof(glm::mat4) * models.size(),
+                0,
+                &mappedInstances
+            );
+            std::memcpy(mappedInstances, models.data(), sizeof(glm::mat4) * models.size());
+            vkUnmapMemory(device_, gpuData.instanceStorageMemory);
+
+            renderMeshAssetInternal(
+                cmd,
+                pipeline->pipeline,
+                pipeline->layout,
+                gpuData,
+                viewProj,
+                glm::mat4(1.0f),
+                static_cast<uint32_t>(models.size())
+            );
         }
 
         // Asset loading and management
@@ -268,15 +391,7 @@ namespace tremor::gfx {
             // Clean up old GPU data before replacing
             auto oldDataIt = gpu_data_cache_.find(master_path);
             if (oldDataIt != gpu_data_cache_.end()) {
-                // Clean up old buffers
-                if (oldDataIt->second.vertexStorageBuffer) {
-                    vkDestroyBuffer(device_, oldDataIt->second.vertexStorageBuffer, nullptr);
-                }
-                if (oldDataIt->second.vertexStorageMemory) {
-                    vkFreeMemory(device_, oldDataIt->second.vertexStorageMemory, nullptr);
-                }
-                // Note: Descriptor sets are automatically returned to pool when freed
-                // The new uploadTaffyAsset call will allocate a fresh descriptor set
+                cleanupMeshAssetGPUData(oldDataIt->second);
             }
             
             // Update the GPU data cache with the new data
@@ -304,12 +419,7 @@ namespace tremor::gfx {
             // Clean up old GPU data
             auto gpuDataIt = gpu_data_cache_.find(asset_path);
             if (gpuDataIt != gpu_data_cache_.end()) {
-                if (gpuDataIt->second.vertexStorageBuffer) {
-                    vkDestroyBuffer(device_, gpuDataIt->second.vertexStorageBuffer, nullptr);
-                }
-                if (gpuDataIt->second.vertexStorageMemory) {
-                    vkFreeMemory(device_, gpuDataIt->second.vertexStorageMemory, nullptr);
-                }
+                cleanupMeshAssetGPUData(gpuDataIt->second);
                 gpu_data_cache_.erase(gpuDataIt);
             }
             
@@ -367,15 +477,7 @@ namespace tremor::gfx {
             if (oldDataIt != gpu_data_cache_.end()) {
                 // Wait for GPU to finish before cleaning up
                 vkDeviceWaitIdle(device_);
-                
-                // Clean up old buffers
-                if (oldDataIt->second.vertexStorageBuffer) {
-                    vkDestroyBuffer(device_, oldDataIt->second.vertexStorageBuffer, nullptr);
-                }
-                if (oldDataIt->second.vertexStorageMemory) {
-                    vkFreeMemory(device_, oldDataIt->second.vertexStorageMemory, nullptr);
-                }
-                // Note: We're reusing the same descriptor set to avoid pool exhaustion
+                cleanupMeshAssetGPUData(oldDataIt->second);
             }
             
             // Update the GPU data cache with the fresh upload of the original
@@ -848,7 +950,8 @@ namespace tremor::gfx {
         }
 
         void TaffyOverlayManager::renderMeshAssetInternal(VkCommandBuffer cmd, VkPipeline meshPipeline,
-            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj, const glm::mat4& model) {
+            VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj,
+            const glm::mat4& model, uint32_t instanceCount) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
 
             // Set viewport
@@ -890,6 +993,12 @@ namespace tremor::gfx {
             pushConstants.meshlet_desc_offset_bytes = gpuData.meshletDescOffset;
             pushConstants.meshlet_vertex_index_offset_bytes = gpuData.meshletVertexIndexOffset;
             pushConstants.meshlet_primitive_index_offset_bytes = gpuData.meshletPrimitiveIndexOffset;
+            pushConstants.instance_count = instanceCount;
+            pushConstants.instance_data_offset_bytes = 0;
+
+            if (instanceCount > 0) {
+                pushConstants.mvp = viewProj;
+            }
 
             if (gpuData.usesMeshShader) {
                 if (!vkCmdDrawMeshTasksEXT) {
@@ -907,7 +1016,8 @@ namespace tremor::gfx {
                     &pushConstants);
 
                 uint32_t workgroupCountX = gpuData.meshletCount > 0 ? gpuData.meshletCount : 1u;
-                vkCmdDrawMeshTasksEXT(cmd, workgroupCountX, 1, 1);
+                uint32_t workgroupCountY = instanceCount > 0 ? instanceCount : 1u;
+                vkCmdDrawMeshTasksEXT(cmd, workgroupCountX, workgroupCountY, 1);
                 return;
             }
 
@@ -921,11 +1031,113 @@ namespace tremor::gfx {
 
             if (gpuData.indexCount > 0) {
                 vkCmdBindIndexBuffer(cmd, gpuData.vertexStorageBuffer, gpuData.indexOffset, VK_INDEX_TYPE_UINT32);
-                vkCmdDrawIndexed(cmd, gpuData.indexCount, 1, 0, 0, 0);
+                vkCmdDrawIndexed(cmd, gpuData.indexCount, instanceCount > 0 ? instanceCount : 1u, 0, 0, 0);
             }
             else {
-                vkCmdDraw(cmd, gpuData.vertexCount, 1, 0, 0);
+                vkCmdDraw(cmd, gpuData.vertexCount, instanceCount > 0 ? instanceCount : 1u, 0, 0);
             }
+        }
+
+        bool TaffyOverlayManager::ensureInstanceBufferCapacity(MeshAssetGPUData& gpuData, uint32_t instanceCount) {
+            const uint32_t requiredCapacity = std::max(1u, instanceCount);
+            if (gpuData.instanceStorageBuffer != VK_NULL_HANDLE && gpuData.instanceCapacity >= requiredCapacity) {
+                return true;
+            }
+
+            if (gpuData.instanceStorageBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device_, gpuData.instanceStorageBuffer, nullptr);
+                gpuData.instanceStorageBuffer = VK_NULL_HANDLE;
+            }
+            if (gpuData.instanceStorageMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device_, gpuData.instanceStorageMemory, nullptr);
+                gpuData.instanceStorageMemory = VK_NULL_HANDLE;
+            }
+
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = sizeof(glm::mat4) * requiredCapacity;
+            bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+            if (vkCreateBuffer(device_, &bufferInfo, nullptr, &gpuData.instanceStorageBuffer) != VK_SUCCESS) {
+                std::cerr << "❌ Failed to create instance storage buffer!" << std::endl;
+                return false;
+            }
+
+            VkMemoryRequirements memRequirements;
+            vkGetBufferMemoryRequirements(device_, gpuData.instanceStorageBuffer, &memRequirements);
+
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memRequirements.size;
+            allocInfo.memoryTypeIndex = findMemoryType(
+                memRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+            );
+
+            if (vkAllocateMemory(device_, &allocInfo, nullptr, &gpuData.instanceStorageMemory) != VK_SUCCESS) {
+                std::cerr << "❌ Failed to allocate instance buffer memory!" << std::endl;
+                vkDestroyBuffer(device_, gpuData.instanceStorageBuffer, nullptr);
+                gpuData.instanceStorageBuffer = VK_NULL_HANDLE;
+                return false;
+            }
+
+            vkBindBufferMemory(device_, gpuData.instanceStorageBuffer, gpuData.instanceStorageMemory, 0);
+
+            const glm::mat4 identity(1.0f);
+            void* mappedData = nullptr;
+            vkMapMemory(device_, gpuData.instanceStorageMemory, 0, sizeof(glm::mat4), 0, &mappedData);
+            std::memcpy(mappedData, &identity, sizeof(glm::mat4));
+            vkUnmapMemory(device_, gpuData.instanceStorageMemory);
+
+            VkDescriptorBufferInfo vertexBufferDescInfo{};
+            vertexBufferDescInfo.buffer = gpuData.vertexStorageBuffer;
+            vertexBufferDescInfo.offset = 0;
+            vertexBufferDescInfo.range = VK_WHOLE_SIZE;
+
+            VkDescriptorBufferInfo instanceBufferDescInfo{};
+            instanceBufferDescInfo.buffer = gpuData.instanceStorageBuffer;
+            instanceBufferDescInfo.offset = 0;
+            instanceBufferDescInfo.range = VK_WHOLE_SIZE;
+
+            std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[0].dstSet = gpuData.descriptorSet;
+            descriptorWrites[0].dstBinding = 0;
+            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[0].descriptorCount = 1;
+            descriptorWrites[0].pBufferInfo = &vertexBufferDescInfo;
+
+            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[1].dstSet = gpuData.descriptorSet;
+            descriptorWrites[1].dstBinding = 1;
+            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[1].descriptorCount = 1;
+            descriptorWrites[1].pBufferInfo = &instanceBufferDescInfo;
+
+            vkUpdateDescriptorSets(device_, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+            gpuData.instanceCapacity = requiredCapacity;
+            return true;
+        }
+
+        void TaffyOverlayManager::cleanupMeshAssetGPUData(MeshAssetGPUData& gpuData) {
+            if (gpuData.vertexStorageBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device_, gpuData.vertexStorageBuffer, nullptr);
+                gpuData.vertexStorageBuffer = VK_NULL_HANDLE;
+            }
+            if (gpuData.vertexStorageMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device_, gpuData.vertexStorageMemory, nullptr);
+                gpuData.vertexStorageMemory = VK_NULL_HANDLE;
+            }
+            if (gpuData.instanceStorageBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device_, gpuData.instanceStorageBuffer, nullptr);
+                gpuData.instanceStorageBuffer = VK_NULL_HANDLE;
+            }
+            if (gpuData.instanceStorageMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device_, gpuData.instanceStorageMemory, nullptr);
+                gpuData.instanceStorageMemory = VK_NULL_HANDLE;
+            }
+            gpuData.instanceCapacity = 0;
         }
 
         TaffyOverlayManager::MeshAssetGPUData TaffyOverlayManager::uploadTaffyAsset(const Taffy::Asset& asset) {
@@ -1004,6 +1216,9 @@ namespace tremor::gfx {
                 }
 
                 const uint8_t* vertexData = geomData->data() + vertexDataOffset;
+                const std::vector<uint8_t> repackedVertexData = isVec3Q
+                    ? repackQuantizedVertexPositionsToFloat(vertexData, geomHeader.vertex_count, geomHeader.vertex_stride)
+                    : std::vector<uint8_t>{};
                 /*
                 // Debug: print vertex data
                 if (geomHeader.vertex_count > 0) {
@@ -1071,7 +1286,18 @@ namespace tremor::gfx {
                 // Copy the full geometry payload after the header so appended meshlet data stays intact.
                 void* mappedData;
                 vkMapMemory(device_, gpuData.vertexStorageMemory, 0, totalBufferSize, 0, &mappedData);
-                std::memcpy(mappedData, geomData->data() + vertexDataOffset, totalBufferSize);
+                if (isVec3Q) {
+                    std::memcpy(mappedData, repackedVertexData.data(), vertexDataSize);
+                    if (totalBufferSize > vertexDataSize) {
+                        std::memcpy(
+                            static_cast<uint8_t*>(mappedData) + vertexDataSize,
+                            geomData->data() + vertexDataOffset + vertexDataSize,
+                            totalBufferSize - vertexDataSize
+                        );
+                    }
+                } else {
+                    std::memcpy(mappedData, geomData->data() + vertexDataOffset, totalBufferSize);
+                }
                 
                 vkUnmapMemory(device_, gpuData.vertexStorageMemory);
 
@@ -1113,21 +1339,11 @@ namespace tremor::gfx {
                 }
 
                 // Update descriptor set to point to storage buffer
-                VkDescriptorBufferInfo bufferDescInfo{};
-                bufferDescInfo.buffer = gpuData.vertexStorageBuffer;
-                bufferDescInfo.offset = 0;
-                bufferDescInfo.range = totalBufferSize;
-
-                VkWriteDescriptorSet descriptorWrite{};
-                descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                descriptorWrite.dstSet = gpuData.descriptorSet;
-                descriptorWrite.dstBinding = 0;
-                descriptorWrite.dstArrayElement = 0;
-                descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                descriptorWrite.descriptorCount = 1;
-                descriptorWrite.pBufferInfo = &bufferDescInfo;
-
-                vkUpdateDescriptorSets(device_, 1, &descriptorWrite, 0, nullptr);
+                if (!ensureInstanceBufferCapacity(gpuData, 1u)) {
+                    cleanupMeshAssetGPUData(gpuData);
+                    gpuData.descriptorSet = VK_NULL_HANDLE;
+                    return gpuData;
+                }
 
                 std::cout << "✅ Descriptor set updated" << std::endl;
 
@@ -1192,6 +1408,9 @@ namespace tremor::gfx {
                 }
                 
                 const uint8_t* vertexData = geomData->data() + vertexDataOffset;
+                const std::vector<uint8_t> repackedVertexData = isVec3Q
+                    ? repackQuantizedVertexPositionsToFloat(vertexData, geomHeader.vertex_count, geomHeader.vertex_stride)
+                    : std::vector<uint8_t>{};
                 const uint8_t* indexData = geomHeader.index_count > 0
                     ? geomData->data() + indexDataOffset
                     : nullptr;
@@ -1233,7 +1452,11 @@ namespace tremor::gfx {
                 // Copy vertex and index data into the shared buffer
                 void* mappedData;
                 vkMapMemory(device_, gpuData.vertexStorageMemory, 0, totalBufferSize, 0, &mappedData);
-                std::memcpy(mappedData, vertexData, vertexDataSize);
+                if (isVec3Q) {
+                    std::memcpy(mappedData, repackedVertexData.data(), vertexDataSize);
+                } else {
+                    std::memcpy(mappedData, vertexData, vertexDataSize);
+                }
                 if (indexDataSize > 0 && indexData != nullptr) {
                     std::memcpy(static_cast<uint8_t*>(mappedData) + vertexDataSize, indexData, indexDataSize);
                 }
@@ -1264,21 +1487,9 @@ namespace tremor::gfx {
                     std::cerr << "⚠️  Warning: Failed to allocate descriptor set for traditional rendering" << std::endl;
                     // This is not critical for traditional rendering, so we continue
                 } else {
-                    VkDescriptorBufferInfo bufferDescInfo{};
-                    bufferDescInfo.buffer = gpuData.vertexStorageBuffer;
-                    bufferDescInfo.offset = 0;
-                    bufferDescInfo.range = totalBufferSize;
-
-                    VkWriteDescriptorSet descriptorWrite{};
-                    descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                    descriptorWrite.dstSet = gpuData.descriptorSet;
-                    descriptorWrite.dstBinding = 0;
-                    descriptorWrite.dstArrayElement = 0;
-                    descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    descriptorWrite.descriptorCount = 1;
-                    descriptorWrite.pBufferInfo = &bufferDescInfo;
-
-                    vkUpdateDescriptorSets(device_, 1, &descriptorWrite, 0, nullptr);
+                    if (!ensureInstanceBufferCapacity(gpuData, 1u)) {
+                        std::cerr << "⚠️  Warning: Failed to initialize instance buffer for traditional rendering" << std::endl;
+                    }
                 }
             }
 
@@ -1342,7 +1553,7 @@ namespace tremor::gfx {
             // Configure pool sizes for mesh shader resources
             std::array<VkDescriptorPoolSize, 1> poolSizes{};
             poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            poolSizes[0].descriptorCount = static_cast<uint32_t>(maxSets);
+            poolSizes[0].descriptorCount = static_cast<uint32_t>(maxSets * 2);
 
             VkDescriptorPoolCreateInfo poolInfo{};
             poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -5512,239 +5723,6 @@ namespace tremor::gfx {
         SamplerResource* m_defaultSampler = nullptr;
     };
 
-
-
-    void VulkanBackend::initializeOverlayWorkflow() {
-        // Run the example workflow to create test overlays
-
-        // Initialize the overlay system
-        initializeOverlaySystem();
-
-        // Asset loading moved to a single location to prevent multiple loads
-        // m_overlayManager->load_master_asset("assets/proper_triangle.taf");
-
-    }
-
-        void VulkanBackend::createEnhancedScene() {
-            //Logger::get().info("=== CREATING ENHANCED SCENE (FIXED) ===");
-
-            // CLEAR any existing octree
-            AABBQ worldBounds{
-                Vec3Q::fromFloat(glm::vec3(-20.0f, -20.0f, -20.0f)),
-                Vec3Q::fromFloat(glm::vec3(20.0f,  20.0f,  20.0f))
-            };
-            m_sceneOctree = Octree<RenderableObject>(worldBounds);
-
-            //Logger::get().info("Creating exactly 25 objects...");
-
-            // Create exactly 25 objects - no more, no less
-            for (int i = 0; i < 25; i++) {
-                RenderableObject obj;
-                obj.meshID = m_cubeMeshID;
-                obj.materialID = m_materialIDs[i % m_materialIDs.size()];
-                obj.instanceID = i;
-                obj.flags = 1; // Visible
-
-                // Simple grid positioning
-                float spacing = 2.5f;
-                float x = (i % 5 - 2) * spacing; // -6, -3, 0, 3, 6
-                float z = (i / 5 - 2) * spacing; // -6, -3, 0, 3, 6  
-                float y = 5.0f;
-
-                obj.transform = glm::translate(glm::mat4(1.0f), glm::vec3(x, y, z));
-                obj.prevTransform = obj.transform;
-
-                glm::mat4& transform = obj.transform;
-                //Logger::get().info("Object {}: matrix row 0=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
-                //    i, transform[0][0], transform[0][1], transform[0][2], transform[0][3]);
-                //Logger::get().info("Object {}: matrix row 1=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
-                //    i, transform[1][0], transform[1][1], transform[1][2], transform[1][3]);
-                //Logger::get().info("Object {}: matrix row 2=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
-                //    i, transform[2][0], transform[2][1], transform[2][2], transform[2][3]);
-                //Logger::get().info("Object {}: matrix row 3=({:.2f}, {:.2f}, {:.2f}, {:.2f})",
-                //    i, transform[3][0], transform[3][1], transform[3][2], transform[3][3]);
-
-                // Calculate bounds
-                AABBF localBounds{ glm::vec3(-0.5f), glm::vec3(0.5f) };
-                AABBF worldBounds = transformAABB(obj.transform, localBounds);
-                obj.bounds = AABBQ::fromFloat(worldBounds);
-
-                //Logger::get().info("Creating object {}: pos=({:.1f},{:.1f},{:.1f})", i, x, y, z);
-
-                // Insert ONCE into octree
-                try {
-                    m_sceneOctree.insert(obj, obj.bounds);
-                    //Logger::get().info("  Inserted object {} successfully", i);
-                }
-                catch (const std::exception& e) {
-                    //Logger::get().error("  Failed to insert object {}: {}", i, e.what());
-                }
-            }
-
-            // Verify exactly 25 objects
-            auto allOctreeObjects = m_sceneOctree.getAllObjects();
-            //Logger::get().info("VERIFICATION: Expected 25 objects, octree has {}", allOctreeObjects.size());
-
-            if (allOctreeObjects.size() != 25) {
-                //Logger::get().error("CRITICAL: Object count mismatch! Expected 25, got {}",
-                //    allOctreeObjects.size());
-
-                // Log all objects to find duplicates
-                std::map<uint32_t, int> instanceCounts;
-                for (const auto& obj : allOctreeObjects) {
-                    instanceCounts[obj.instanceID]++;
-                }
-
-                for (const auto& [instanceID, count] : instanceCounts) {
-                    if (count > 1) {
-                        //Logger::get().error("  Instance {} appears {} times (DUPLICATE!)",
-                        //    instanceID, count);
-                    }
-                }
-            }
-            m_clusteredRenderer->updateGPUBuffers();
-
-            // Create simple lighting
-            std::vector<ClusterLight> lights;
-            ClusterLight mainLight;
-            mainLight.position = glm::vec3(0.0f, 10.0f, 5.0f);
-            mainLight.color = glm::vec3(1.0f, 1.0f, 1.0f);
-            mainLight.intensity = 3.0f;
-            mainLight.radius = 50.0f;
-            mainLight.type = 0;
-            lights.push_back(mainLight);
-
-            m_clusteredRenderer->updateLights(lights);
-            //Logger::get().info("Scene creation complete");
-        }
-
-
-        void VulkanBackend::createSceneLighting() {
-            std::vector<ClusterLight> lights;
-
-            tremor::gfx::ClusterLight mainLight;
-            mainLight.position = glm::vec3(0.0f, 20.0f, 10.0f);
-            mainLight.color = glm::vec3(1.0f, 1.0f, 1.0f);
-            mainLight.intensity = 5.0f;
-            mainLight.radius = 100.0f;
-            mainLight.type = 0;
-            lights.push_back(mainLight);
-
-            m_clusteredRenderer->updateLights(lights);
-        }
-
-        void VulkanBackend::createTaffyMeshes() {
-            //Logger::get().info("=== LOADING TAFFY ASSETS ===");
-
-
-            // Try to load some Taffy assets
-            std::vector<std::string> asset_paths = {
-				"assets/triangle_hot_pink.taf",
-            };
-            std::cout << "=== ASSET LOADING DEBUG ===" << std::endl;
-            std::cout << "asset_paths.size(): " << asset_paths.size() << std::endl;
-            
-            for (size_t i = 0; i < asset_paths.size(); ++i) {
-                //Logger::get().info("asset_paths[ {} ]: {}", i, asset_paths[i]);
-            }
-
-            if (asset_paths.empty()) {
-                std::cout << "ERROR: asset_paths is empty!" << std::endl;
-            }
-            else {
-                //Logger::get().info("About to start loading loop...");
-            }
-            
-            for (const auto& path : asset_paths) {
-
-                auto loaded_asset = taffy_loader_->load_asset(path);
-                if (loaded_asset) {
-                    loaded_assets_.push_back(std::move(loaded_asset));
-                    //Logger::get().info("Successfully loaded Taffy asset: {}", path);
-                }
-                else {
-                    //Logger::get().warning("Failed to load Taffy asset: {}", path);
-
-                    // Fallback to creating a simple mesh manually
-                    if (path.find("cube") != std::string::npos) {
-                    }
-                }
-            }
-
-            // If no assets loaded, create fallback content
-            if (loaded_assets_.empty()) {
-                //Logger::get().info("No Taffy assets loaded, creating fallback content");
-            }
-            else {
-                //Logger::get().info("Loaded {} Taffy assets", loaded_assets_.size());
-            }
-        }
-
-        void VulkanBackend::createTaffyScene() {
-            //Logger::get().info("=== CREATING TAFFY-BASED SCENE ===");
-
-            // Clear existing octree
-            AABBQ worldBounds{
-                Vec3Q::fromFloat(glm::vec3(-50.0f, -50.0f, -50.0f)),
-                Vec3Q::fromFloat(glm::vec3(50.0f, 50.0f, 50.0f))
-            };
-            m_sceneOctree = Octree<RenderableObject>(worldBounds);
-
-            if (loaded_assets_.empty()) {
-                //Logger::get().error("No loaded assets to create scene from");
-                return;
-            }
-
-            // Create objects using loaded Taffy assets
-            int object_count = 0;
-            const int grid_size = 5;
-            const float spacing = 8.0f;
-
-            for (int x = 0; x < grid_size; ++x) {
-                for (int z = 0; z < grid_size; ++z) {
-                    // Pick a random asset (or cycle through them)
-                    const auto& asset = loaded_assets_[object_count % loaded_assets_.size()];
-
-                    RenderableObject obj;
-                    obj.meshID = asset->get_primary_mesh_id();
-                    obj.materialID = asset->get_primary_material_id();
-                    obj.instanceID = object_count;
-                    obj.flags = 1; // Visible
-
-                    // Position in grid
-                    float pos_x = (x - grid_size / 2) * spacing;
-                    float pos_z = (z - grid_size / 2) * spacing;
-                    float pos_y = 0.0f; // Ground level
-
-                    obj.transform = glm::translate(glm::mat4(1.0f), glm::vec3(pos_x, pos_y, pos_z));
-                    obj.prevTransform = obj.transform;
-
-                    // Use bounds from the Taffy mesh
-                    glm::vec3 bounds_min = asset->meshes[0]->get_bounds_min();
-                    glm::vec3 bounds_max = asset->meshes[0]->get_bounds_max();
-
-                    // Transform bounds to world space
-                    AABBF localBounds{ bounds_min, bounds_max };
-                    AABBF worldBounds = transformAABB(obj.transform, localBounds);
-                    obj.bounds = AABBQ::fromFloat(worldBounds);
-
-                    //Logger::get().info("Creating Taffy object {}: pos=({:.1f},{:.1f},{:.1f})",
-                    //    object_count, pos_x, pos_y, pos_z);
-
-                    // Insert into octree
-                    try {
-                        m_sceneOctree.insert(obj, obj.bounds);
-                        //Logger::get().info("  Inserted object {} successfully", object_count);
-                    }
-                    catch (const std::exception& e) {
-                        //Logger::get().error("  Failed to insert object {}: {}", object_count, e.what());
-                    }
-
-                    object_count++;
-                }
-            }
-        }
-
         // Create a method to create the UBO
         bool VulkanBackend::createUniformBuffer() {
             // Create the uniform buffer
@@ -6510,7 +6488,7 @@ namespace tremor::gfx {
                 return;
             }
 
-            updateOverlaySystem();
+            VulkanOverlayBridge::update(*this);
 
             // Update model editor
             if (m_editorIntegration) {
@@ -6707,9 +6685,6 @@ namespace tremor::gfx {
                 m_clusteredRenderer->render(m_commandBuffers[currentFrame], &cam);
             }
             
-            // Removed runtime overlay manipulation to prevent modifying the asset
-            // demonstrateOverlayControls();
-            
             // Asset should already be loaded during initialization
             // Removed duplicate load to prevent multiple instances
 
@@ -6783,147 +6758,6 @@ namespace tremor::gfx {
 			//m_overlayManager->renderMeshAsset("assets/cube.taf", m_commandBuffers[currentFrame], cam.getViewProjectionMatrix());
 
         }
-
-        /**
- * Initialize overlay system - call this in your existing initialize() method
- */
-
-        void VulkanBackend::initializeOverlaySystem() {
-            std::cout << "🎨 Initializing Taffy Overlay System..." << std::endl;
-
-            // Use the raw device handles from your existing vkDevice
-
-            last_overlay_check_ = std::chrono::steady_clock::now();
-
-            std::cout << "✅ Overlay system initialized!" << std::endl;
-        }
-
-        /**
-         * Create development overlays for testing
-         */
-        void VulkanBackend::createDevelopmentOverlays() {
-            // Check if we can write to current directory
-            bool canCreateAssets = false;
-            try {
-                // Try to create assets directory
-                if (std::filesystem::exists("assets") || std::filesystem::create_directories("assets")) {
-                    canCreateAssets = true;
-                }
-            } catch (const std::filesystem::filesystem_error& e) {
-                Logger::get().warning("Could not create assets directory: {}. Skipping asset creation.", e.what());
-                Logger::get().warning("To fix this, run the application from its intended directory (usually the 'bin' folder)");
-                return; // Skip all asset creation if we can't create the main assets directory
-            }
-
-            std::string overlay_dir = "assets/overlays";
-            try {
-                std::filesystem::create_directories(overlay_dir);
-            } catch (const std::filesystem::filesystem_error& e) {
-                Logger::get().warning("Could not create overlays directory: {}", e.what());
-            }
-
-            // Create preset overlays for testing
-
-            // Create audio test assets
-            std::string audio_dir = "assets/audio";
-            try {
-                std::filesystem::create_directories(audio_dir);
-            } catch (const std::filesystem::filesystem_error& e) {
-                Logger::get().warning("Could not create audio directory: {}", e.what());
-            }
-            
-            // Create audio assets only if we can create directories
-            try {
-                // Create a simple 440Hz sine wave (A4 note)
-                tremor::taffy::tools::createSineWaveAudioAsset("assets/audio/sine_440hz.taf", 440.0f, 2.0f);
-
-                // Create a lower frequency sine wave (220Hz, A3)
-                tremor::taffy::tools::createSineWaveAudioAsset("assets/audio/sine_220hz.taf", 220.0f, 2.0f);
-            } catch (const std::filesystem::filesystem_error& e) {
-                Logger::get().warning("Could not create audio assets: {}", e.what());
-            } catch (const std::exception& e) {
-                Logger::get().warning("Error creating audio assets: {}", e.what());
-            }
-            
-            // Create font test assets
-            std::string font_dir = "assets/fonts";
-            try {
-                std::filesystem::create_directories(font_dir);
-            } catch (const std::filesystem::filesystem_error& e) {
-                Logger::get().warning("Could not create fonts directory: {}", e.what());
-            }
-            
-            // Create test SDF font using Bebas Neue
-
-            // Note: Directory and asset creation may have failed if running from unexpected working directory
-            Logger::get().info("Development overlay initialization completed (some assets may not have been created if directories were inaccessible)");
-        }
-
-        /**
-         * Load test asset with overlays
-         */
-        void VulkanBackend::loadTestAssetWithOverlays() {
-            std::cout << "🎮 Loading test assets with overlays..." << std::endl;
-
-            // Define overlays to apply
-            std::vector<std::string> overlays = {
-                //"assets/overlays/metallic_material.tafo",
-                "assets/overlays/hot_pink_vertex.tafo"
-            };
-
-            // Load asset with overlays
-            
-            // Create a test triangle with Vec3Q positions to test our conversion fix
-            {
-                std::vector<MeshVertex> testVertices;
-                
-                // Create vertices with Vec3Q positions (testing the conversion)
-                MeshVertex v1;
-                v1.position = glm::vec3(-0.5f, -0.5f, 0.0f);
-                v1.normal = glm::vec3(0.0f, 0.0f, 1.0f);
-                v1.color = glm::vec4(1.0f, 1.0f, 0.0f, 1.0f); // Yellow
-                v1.texCoord = glm::vec2(0.0f, 0.0f);
-                testVertices.push_back(v1);
-                
-                MeshVertex v2;
-                v2.position = glm::vec3(0.5f, -0.5f, 0.0f);
-                v2.normal = glm::vec3(0.0f, 0.0f, 1.0f);
-                v2.color = glm::vec4(1.0f, 0.0f, 1.0f, 1.0f); // Magenta
-                v2.texCoord = glm::vec2(1.0f, 0.0f);
-                testVertices.push_back(v2);
-                
-                MeshVertex v3;
-                v3.position = glm::vec3(0.0f, 0.5f, 0.0f);
-                v3.normal = glm::vec3(0.0f, 0.0f, 1.0f);
-                v3.color = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // Red
-                v3.texCoord = glm::vec2(0.5f, 1.0f);
-                testVertices.push_back(v3);
-                
-                std::vector<uint32_t> testIndices = {0, 1, 2};
-                
-                std::cout << "📐 Creating test triangle with Vec3Q positions..." << std::endl;
-                uint32_t testMeshId = m_clusteredRenderer->loadMesh(testVertices, testIndices, "test_vec3q_triangle");
-                
-                if (testMeshId != UINT32_MAX) {
-                    std::cout << "✅ Test triangle created with mesh ID: " << testMeshId << std::endl;
-                } else {
-                    std::cout << "❌ Failed to create test triangle" << std::endl;
-                }
-            }
-        }
-
-        /**
-         * Update overlay system for hot-reloading
-         */
-        void VulkanBackend::updateOverlaySystem() {
-
-            auto now = std::chrono::steady_clock::now();
-            if (now - last_overlay_check_ > overlay_check_interval_) {
-                //m_overlayMeshShaderManager->check_for_overlay_changes();
-                last_overlay_check_ = now;
-            }
-        }
-
         void VulkanBackend::endFrame() {
         if (!m_frameReady) {
             return;
@@ -6933,7 +6767,7 @@ namespace tremor::gfx {
             //Logger::get().critical("endFrame() called, count {}", endFrameCount++);
         }
 
-            updateMeshShaderStatusLabel();
+            VulkanUiBridge::updateMeshShaderStatusLabel(*this, meshShadersActive);
 
         			// Render text overlay
 			
@@ -7026,11 +6860,13 @@ namespace tremor::gfx {
 				// Create orthographic projection for UI 
 				
 				// Render UI in the depth-less pass
-                updateUiMessageOverlay();
+                VulkanUiBridge::updateMessageOverlay(*this);
 				m_uiRenderer->render(m_commandBuffers[currentFrame], orthoProjection, vkSwapchain->extent());
 				
-				// Unblock grid rendering after UI is complete
-				tremor::editor::GridRenderer::setGlobalRenderingBlocked(false);
+				// Let editor integration clean up any editor-specific UI/render state
+				if (m_editorIntegration) {
+					m_editorIntegration->onUiRendered();
+				}
 				
 				// End UI rendering pass for dynamic rendering
 				if (vkDevice.get()->capabilities().dynamicRendering) {
@@ -7184,227 +7020,19 @@ namespace tremor::gfx {
             ShaderReflection combinedReflection;
             m_combinedReflection = combinedReflection;
 
-            w = window;
-
-            createInstance();
-            createDeviceAndSwapChain();
-
-            createCommandPool();
-            createCommandBuffers();
-
-            // Initialize MSAA
-            m_msaaSamples = getMaxUsableSampleCount();
-            //Logger::get().info("Using {}x MSAA", static_cast<uint32_t>(m_msaaSamples));
-
-            createDepthResources();
-            if (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT) {
-                createColorResources();
-            }
-            createUniformBuffer();
-            createLightBuffer();
-            createMaterialBuffer();
-
-            cam = tremor::gfx::Camera(10.0f, 16.0f / 9.0f, 0.1f, 100.0f);
-            cam.extent = vkSwapchain->extent();
-            if (cam.extent.height != 0) {
-                cam.setAspectRatio(
-                    static_cast<float>(cam.extent.width) /
-                    static_cast<float>(cam.extent.height));
-            }
-
-            cam.setPosition(glm::vec3(0.0f, 0.0f, 5.0f));
-            cam.lookAt(glm::vec3(0.0f, 0.0f, 0.0f));
-
-            if (vkDevice.get()->capabilities().dynamicRendering) {
-                dr = std::make_unique<DynamicRenderer>();
-                //Logger::get().info("Dynamic renderer created.");
-            }
-            else {
-                createRenderPass();
-                createFramebuffers();
-            }
-
-            sm = std::make_unique<ShaderManager>(vkDevice.get()->device());
-
-            createTestTexture();
-
-            createDescriptorSetLayouts();
-
-            createGraphicsPipeline();
-            createSyncObjects();
-
-            // Create world octree with 64-bit bounds
-            AABBQ worldBounds{
-                Vec3Q::fromFloat(glm::vec3(-20.0f, -20.0f, -20.0f)),
-                Vec3Q::fromFloat(glm::vec3(20.0f,  20.0f,  20.0f))
-            };
-            m_sceneOctree = tremor::gfx::Octree<tremor::gfx::RenderableObject>(worldBounds);
-
-            //createCubeRenderableObject();
-
-            // Replace clustered renderer initialization:
-            tremor::gfx::ClusterConfig clusterConfig{};
-            clusterConfig.xSlices = 16;
-            clusterConfig.ySlices = 9;
-            clusterConfig.zSlices = 24;
-            clusterConfig.nearPlane = 0.1f;
-            clusterConfig.farPlane = 1000.0f;
-            clusterConfig.logarithmicZ = true;
-
-
-
-
-			m_taffyMeshShaderManager = std::make_unique<tremor::gfx::TaffyMeshShaderManager>(
-                device,
-                physicalDevice
-			);
-
-            m_overlayManager = std::make_unique<TaffyOverlayManager>(
-                device,
-                physicalDevice,
-                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,  // Use null for dynamic rendering
-                vkSwapchain->extent(),
-                vkSwapchain->imageFormat(),
-                vkDevice->depthFormat(),
-                m_msaaSamples
-            );
-
-            m_clusteredRenderer = std::make_unique<tremor::gfx::VulkanClusteredRenderer>(
-                device,
-                physicalDevice,
-                graphicsQueue,        // Add this
-                vkDevice->graphicsQueueFamily(),  // Add this
-                m_commandPool->handle(),       // Add this - pass the command pool
-                clusterConfig,
-                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
-                vkDevice->capabilities().dynamicRendering,
-                m_msaaSamples
-            );
-
-            if (!m_clusteredRenderer->initialize((Format)vkDevice.get()->colorFormat(), (Format)vkDevice.get()->depthFormat())) {
-                //Logger::get().error("Failed to initialize enhanced clustered renderer");
+            if (!initializeCoreVulkan(window)) {
                 return false;
             }
-
-            // Initialize text renderer
-            m_textRenderer = std::make_unique<tremor::gfx::SDFTextRenderer>(
-                device, physicalDevice, m_commandPool->handle(), graphicsQueue);
-            bool textRendererInitialized = m_textRenderer->initialize(
-                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
-                vkSwapchain->imageFormat(),
-                m_msaaSamples);
-            if (!textRendererInitialized) {
-                Logger::get().warning("Failed to initialize SDF text renderer - text will not be rendered");
-                m_textRenderer.reset(); // Clear the unusable text renderer
+            if (!initializeRenderResources()) {
+                return false;
             }
-
-            // Initialize UI renderer
-            m_uiRenderer = std::make_unique<tremor::gfx::UIRenderer>(
-                device, physicalDevice, m_commandPool->handle(), graphicsQueue);
-            if (!m_uiRenderer->initialize(
-                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
-                vkSwapchain->imageFormat(),
-                m_msaaSamples)) {
-                Logger::get().error("Failed to initialize UI renderer");
-                // Continue anyway - UI is optional
-            } else {
-                // Set text renderer for the UI only if it was successfully initialized
-                if (m_textRenderer) {
-                    m_uiRenderer->setTextRenderer(m_textRenderer.get());
-                    Logger::get().info("Text renderer successfully linked to UI renderer");
-                } else {
-                    Logger::get().warning("No text renderer available - UI text will not render");
-                }
-                
-                // Add some test buttons
-                /*m_uiRenderer->addButton("Reload Assets", glm::vec2(20, 100), glm::vec2(160, 40),
-                    [this]() {
-                        Logger::get().info("🔄 Reload Assets button clicked!");
-                        reload_assets_requested = true;
-                    });*/
-                
-                /*
-                m_toggleOverlayButtonId = m_uiRenderer->addButton("Toggle Overlay", glm::vec2(20, 150), glm::vec2(160, 40),
-                    [this]() {
-                        Logger::get().info("🎨 Toggle Overlay button clicked!");
-                        hot_pink_enabled = !hot_pink_enabled;
-                    });
-                */
-                m_modelEditorButtonId = m_uiRenderer->addButton("Model Editor", glm::vec2(20, 200), glm::vec2(160, 40),
-                    [this]() {
-                        Logger::get().info("🔧 Model Editor button clicked!");
-                        if (m_editorIntegration) {
-                            bool isEnabled = m_editorIntegration->isEditorEnabled();
-                            m_editorIntegration->setEditorEnabled(!isEnabled);
-                            Logger::get().info("Model Editor {}", !isEnabled ? "enabled" : "disabled");
-                        }
-                    });
-                
-                m_exitButtonId = m_uiRenderer->addButton("Exit", glm::vec2(20, 250), glm::vec2(160, 40),
-                    []() {
-                        Logger::get().info("❌ Exit button clicked!");
-                        SDL_Event quit_event;
-                        quit_event.type = SDL_QUIT;
-                        SDL_PushEvent(&quit_event);
-                    });
-                
-                // Initialize sequencer
-                // m_sequencerUI = std::make_unique<tremor::gfx::SequencerUI>(m_uiRenderer.get());
-                // m_sequencerUI->initialize();
-                // m_sequencerUI->onStepTriggered([this](int step) {
-                //     Logger::get().info("🎵 Sequencer step {} triggered!", step);
-                //     // Call the external callback if set
-                //     if (m_sequencerCallback) {
-                //         m_sequencerCallback(step);
-                //     }
-                // });
+            if (!initializeRenderSystems()) {
+                return false;
             }
-
-            Logger::get().info("*** VulkanBackend::initialize() ABOUT TO CREATE ModelEditorIntegration ***");
-            // Initialize model editor integration
-            Logger::get().info("*** VulkanBackend: Creating ModelEditorIntegration ***");
-            m_editorIntegration = std::make_unique<tremor::editor::ModelEditorIntegration>(*this);
-            Logger::get().info("*** VulkanBackend: ModelEditorIntegration created, calling initialize() ***");
-            Logger::get().info("*** VulkanBackend: About to call m_editorIntegration->initialize() ***");
-            bool initResult = m_editorIntegration->initialize();
-            Logger::get().info("*** VulkanBackend: m_editorIntegration->initialize() returned: {} ***", initResult);
-            if (!initResult) {
-                Logger::get().error("*** VulkanBackend: Model Editor failed to initialize ***");
-                // Continue anyway - editor is optional
-            } else {
-                Logger::get().info("*** VulkanBackend: Model Editor initialized successfully ***");
+            if (!initializeEditorAndUi()) {
+                return false;
             }
-
-            createDevelopmentOverlays();
-            // loadTestAssetWithOverlays(); // Commented out - creating test triangle interferes with proper_triangle.taf
-
-            // Load test font
-            if (m_textRenderer) {
-                if (!m_textRenderer->loadFont("assets/fonts/test_font.taf")) {
-                    Logger::get().warning("Failed to load test font - UI will render without text");
-                }
-                
-                m_uiRenderer->addLabel("NOT REAL GAMES",glm::vec2(24,36),0xFF0050FF);
-                m_meshShaderStatusLabelId = m_uiRenderer->addLabel(
-                    "Mesh Shaders: Off",
-                    glm::vec2(1020.0f, 36.0f),
-                    0xFF4040FF,
-                    0.7f
-                );
-                initializeUiMessageOverlay();
-            }
-
-            initializeOverlaySystem();
-            initializeOverlayWorkflow();
-
-			// Load the cube instead of triangle
-			m_overlayManager->reloadAsset("assets/cube.taf");
-			m_overlayManager->load_master_asset("assets/cube.taf");
-
-            m_overlayManager->reloadAsset("assets/sphere.taf");
-			m_overlayManager->load_master_asset("assets/sphere.taf");
-
-            // Create enhanced content
+            initializeOverlayAndDevAssets();
 
             return true;
         };
@@ -7414,131 +7042,152 @@ namespace tremor::gfx {
             tremor::UiMessageCenter::instance().enqueue(text, durationSeconds, color);
         }
 
-        void VulkanBackend::initializeUiMessageOverlay() {
-            if (!m_uiRenderer || !m_uiMessageLabelIds.empty()) {
-                return;
+        bool VulkanBackend::initializeCoreVulkan(SDL_Window* window) {
+            w = window;
+
+            createInstance();
+            createDeviceAndSwapChain();
+            createCommandPool();
+            createCommandBuffers();
+
+            m_msaaSamples = getMaxUsableSampleCount();
+
+            if (vkDevice.get()->capabilities().dynamicRendering) {
+                dr = std::make_unique<DynamicRenderer>();
+            } else {
+                createRenderPass();
+                createFramebuffers();
             }
 
-            for (size_t i = 0; i < tremor::UiMessageCenter::MaxVisibleMessages; ++i) {
-                const float verticalOffset = static_cast<float>(tremor::UiMessageCenter::MaxVisibleMessages - 1 - i) * 34.0f;
-                uint32_t labelId = m_uiRenderer->addLabel(
-                    "",
-                    glm::vec2(24.0f, 680.0f - verticalOffset),
-                    0xFFD060FF,
-                    0.55f
-                );
-                m_uiRenderer->setElementVisible(labelId, false);
-                m_uiMessageLabelIds.push_back(labelId);
-            }
+            return true;
         }
 
-        void VulkanBackend::updateUiMessageOverlay() {
-            if (!m_uiRenderer || m_uiMessageLabelIds.empty()) {
-                return;
+        bool VulkanBackend::initializeRenderResources() {
+            createDepthResources();
+            if (m_msaaSamples != VK_SAMPLE_COUNT_1_BIT) {
+                createColorResources();
             }
 
-            static auto lastUpdateTime = std::chrono::high_resolution_clock::now();
-            const auto currentTime = std::chrono::high_resolution_clock::now();
-            const float deltaTimeSeconds = std::chrono::duration<float>(currentTime - lastUpdateTime).count();
-            lastUpdateTime = currentTime;
+            createUniformBuffer();
+            createLightBuffer();
+            createMaterialBuffer();
+            createTestTexture();
+            createDescriptorSetLayouts();
+            createGraphicsPipeline();
+            createSyncObjects();
 
-            auto& messageCenter = tremor::UiMessageCenter::instance();
-            messageCenter.update(deltaTimeSeconds);
+            cam = tremor::gfx::Camera(10.0f, 16.0f / 9.0f, 0.1f, 100.0f);
+            cam.extent = vkSwapchain->extent();
+            if (cam.extent.height != 0) {
+                cam.setAspectRatio(
+                    static_cast<float>(cam.extent.width) /
+                    static_cast<float>(cam.extent.height));
+            }
+            cam.setPosition(glm::vec3(0.0f, 0.0f, 5.0f));
+            cam.lookAt(glm::vec3(0.0f, 0.0f, 0.0f));
 
-            if (!messageCenter.consumeDirty()) {
-                return;
-            }
+            AABBQ worldBounds{
+                Vec3Q::fromFloat(glm::vec3(-20.0f, -20.0f, -20.0f)),
+                Vec3Q::fromFloat(glm::vec3(20.0f,  20.0f,  20.0f))
+            };
+            m_sceneOctree = tremor::gfx::Octree<tremor::gfx::RenderableObject>(worldBounds);
 
-            const std::vector<tremor::UiMessage> visibleMessages = messageCenter.snapshotVisibleMessages();
-            const size_t hiddenLabelCount = m_uiMessageLabelIds.size() - visibleMessages.size();
-
-            for (size_t labelIndex = 0; labelIndex < m_uiMessageLabelIds.size(); ++labelIndex) {
-                const uint32_t labelId = m_uiMessageLabelIds[labelIndex];
-                if (labelIndex < hiddenLabelCount) {
-                    m_uiRenderer->setElementText(labelId, "");
-                    m_uiRenderer->setElementVisible(labelId, false);
-                    continue;
-                }
-
-                const tremor::UiMessage& message = visibleMessages[labelIndex - hiddenLabelCount];
-                m_uiRenderer->setElementText(labelId, message.text);
-                m_uiRenderer->setElementTextColor(labelId, message.color);
-                m_uiRenderer->setElementVisible(labelId, true);
-            }
-        }
-        
-        void VulkanBackend::handleInput(const SDL_Event& event) {
-            if (event.type == SDL_WINDOWEVENT &&
-                    (event.window.event == SDL_WINDOWEVENT_RESIZED ||
-                     event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)) {
-                m_framebufferResized = true;
-            }
-
-            // Pass input to UI renderer first (UI elements take priority)
-            if (m_uiRenderer) {
-                m_uiRenderer->updateInput(event);
-            }
-            
-            // Then pass input to model editor 
-            if (m_editorIntegration) {
-                m_editorIntegration->handleInput(event);
-            }
-        }
-        
-        void VulkanBackend::setSequencerCallback(SequencerCallback callback) {
-            m_sequencerCallback = callback;
-            
-            // If sequencer is already initialized, update its callback
-            if (m_sequencerUI) {
-                m_sequencerUI->onStepTriggered([this](int step) {
-                    Logger::get().info("🎵 Sequencer step {} triggered!", step);
-                    if (m_sequencerCallback) {
-                        m_sequencerCallback(step);
-                    }
-                });
-            }
+            return true;
         }
 
+        bool VulkanBackend::initializeRenderSystems() {
+            sm = std::make_unique<ShaderManager>(vkDevice.get()->device());
 
-        TextureHandle VulkanBackend::createTexture(const TextureDesc& desc) {
-            // Implementation of texture creation with Vulkan
-            // This would include:
-            // 1. Create VkImage
-            // 2. Allocate and bind memory
-            // 3. Create VkImageView
-            // 4. Create VkSampler if needed
-            // 5. Return a handle to the texture
+            tremor::gfx::ClusterConfig clusterConfig{};
+            clusterConfig.xSlices = 16;
+            clusterConfig.ySlices = 9;
+            clusterConfig.zSlices = 24;
+            clusterConfig.nearPlane = 0.1f;
+            clusterConfig.farPlane = 1000.0f;
+            clusterConfig.logarithmicZ = true;
 
-            // Simplified implementation for example
-            VulkanTexture* texture = new VulkanTexture(device);
+            m_taffyMeshShaderManager = std::make_unique<tremor::gfx::TaffyMeshShaderManager>(
+                device,
+                physicalDevice
+            );
 
-            // Image creation
-            VkImageCreateInfo imageInfo{};
-            imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-            imageInfo.imageType = VK_IMAGE_TYPE_2D;
-            imageInfo.extent.width = desc.width;
-            imageInfo.extent.height = desc.height;
-            imageInfo.extent.depth = 1;
-            imageInfo.mipLevels = desc.mipLevels;
-            imageInfo.arrayLayers = 1;
-            imageInfo.format = convertFormat(desc.format);
-            imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+            m_overlayManager = std::make_unique<TaffyOverlayManager>(
+                device,
+                physicalDevice,
+                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
+                vkSwapchain->extent(),
+                vkSwapchain->imageFormat(),
+                vkDevice->depthFormat(),
+                m_msaaSamples
+            );
 
-            if (vkCreateImage(device, &imageInfo, nullptr, &texture->image.handle()) != VK_SUCCESS) {
-                delete texture;
-                return {};
+            m_clusteredRenderer = std::make_unique<tremor::gfx::VulkanClusteredRenderer>(
+                device,
+                physicalDevice,
+                graphicsQueue,
+                vkDevice->graphicsQueueFamily(),
+                m_commandPool->handle(),
+                clusterConfig,
+                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
+                vkDevice->capabilities().dynamicRendering,
+                m_msaaSamples
+            );
+
+            if (!m_clusteredRenderer->initialize((Format)vkDevice.get()->colorFormat(), (Format)vkDevice.get()->depthFormat())) {
+                return false;
             }
-            
-            // Return the created texture handle
-            return TextureHandle(texture);
-        }
-        BufferHandle createBuffer(const BufferDesc& desc);
-        ShaderHandle createShader(const ShaderDesc& desc);
 
+            m_textRenderer = std::make_unique<tremor::gfx::SDFTextRenderer>(
+                device, physicalDevice, m_commandPool->handle(), graphicsQueue);
+            const bool textRendererInitialized = m_textRenderer->initialize(
+                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
+                vkSwapchain->imageFormat(),
+                m_msaaSamples);
+            if (!textRendererInitialized) {
+                Logger::get().warning("Failed to initialize SDF text renderer - text will not be rendered");
+                m_textRenderer.reset();
+            }
+
+            m_uiRenderer = std::make_unique<tremor::gfx::UIRenderer>(
+                device, physicalDevice, m_commandPool->handle(), graphicsQueue);
+            if (!m_uiRenderer->initialize(
+                vkDevice->capabilities().dynamicRendering ? VkRenderPass(VK_NULL_HANDLE) : *rp,
+                vkSwapchain->imageFormat(),
+                m_msaaSamples)) {
+                Logger::get().error("Failed to initialize UI renderer");
+            } else if (m_textRenderer) {
+                m_uiRenderer->setTextRenderer(m_textRenderer.get());
+                Logger::get().info("Text renderer successfully linked to UI renderer");
+            } else {
+                Logger::get().warning("No text renderer available - UI text will not render");
+            }
+
+            return true;
+        }
+
+        bool VulkanBackend::initializeEditorAndUi() {
+            Logger::get().info("*** VulkanBackend::initialize() ABOUT TO CREATE editor bridge ***");
+            Logger::get().info("*** VulkanBackend: Creating VulkanEditorBridge ***");
+            m_editorIntegration = createVulkanEditorBridge(*this);
+            Logger::get().info("*** VulkanBackend: Editor bridge created, calling initialize() ***");
+            const bool initResult = m_editorIntegration->initialize();
+            Logger::get().info("*** VulkanBackend: editor bridge initialize() returned: {} ***", initResult);
+            if (!initResult) {
+                Logger::get().error("*** VulkanBackend: Model Editor failed to initialize ***");
+            } else {
+                Logger::get().info("*** VulkanBackend: Model Editor initialized successfully ***");
+            }
+
+            VulkanUiBridge::initializeRuntimeUi(*this);
+            return true;
+        }
+
+        void VulkanBackend::initializeOverlayAndDevAssets() {
+            VulkanOverlayBridge::createDevelopmentAssets(*this);
+            VulkanOverlayBridge::initialize(*this);
+            VulkanOverlayBridge::initializeWorkflow(*this);
+            VulkanOverlayBridge::loadDefaultAssets(*this);
+        }
         // Vulkan-specific methods
 
         bool VulkanBackend::createInstance() {
@@ -8345,35 +7994,6 @@ namespace tremor::gfx {
         }
         catch (const std::exception& e) {
             //Logger::get().error("Exception in updateUniformBuffers: {}", e.what());
-        }
-    }
-
-    void VulkanBackend::setMainMenuVisible(bool visible) {
-        if (m_uiRenderer) {
-            m_uiRenderer->setElementVisible(m_toggleOverlayButtonId, visible);
-            m_uiRenderer->setElementVisible(m_modelEditorButtonId, visible);
-            m_uiRenderer->setElementVisible(m_exitButtonId, visible);
-        }
-    }
-
-    void VulkanBackend::updateMeshShaderStatusLabel() {
-        if (!m_uiRenderer || m_meshShaderStatusLabelId == 0) {
-            return;
-        }
-
-        m_uiRenderer->setElementText(
-            m_meshShaderStatusLabelId,
-            meshShadersActive ? "Mesh Shaders: On" : "Mesh Shaders: Off"
-        );
-        m_uiRenderer->setElementTextColor(
-            m_meshShaderStatusLabelId,
-            meshShadersActive ? 0x30FF60FF : 0xFF4040FF
-        );
-
-        if (vkSwapchain) {
-            const float width = static_cast<float>(vkSwapchain->extent().width);
-            const float labelX = std::max(20.0f, width - 260.0f);
-            m_uiRenderer->setElementPosition(m_meshShaderStatusLabelId, glm::vec2(labelX, 36.0f));
         }
     }
 

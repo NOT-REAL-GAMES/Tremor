@@ -399,6 +399,8 @@ struct MeshShaderPushConstants {
     uint32_t meshlet_desc_offset_bytes;
     uint32_t meshlet_vertex_index_offset_bytes;
     uint32_t meshlet_primitive_index_offset_bytes;
+    uint32_t instance_count;
+    uint32_t instance_data_offset_bytes;
 };
 
 class TaffyOverlayManager {
@@ -408,6 +410,8 @@ public:
     struct MeshAssetGPUData {
         VkBuffer vertexStorageBuffer = VK_NULL_HANDLE;
         VkDeviceMemory vertexStorageMemory = VK_NULL_HANDLE;
+        VkBuffer instanceStorageBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory instanceStorageMemory = VK_NULL_HANDLE;
         VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
         uint32_t vertexCount = 0;
         uint32_t primitiveCount = 0;
@@ -418,6 +422,7 @@ public:
         uint32_t meshletDescOffset = 0;
         uint32_t meshletVertexIndexOffset = 0;
         uint32_t meshletPrimitiveIndexOffset = 0;
+        uint32_t instanceCapacity = 0;
         bool usesMeshShader = false;
     };
 
@@ -443,6 +448,8 @@ public:
 
     void renderMeshAsset(const std::string& asset_path, VkCommandBuffer cmd, const glm::mat4& viewProj,
         const Vec3Q& renderOrigin = Vec3Q(), const Vec3Q& objectPosition = Vec3Q());
+    void renderMeshAssetBatch(const std::string& asset_path, VkCommandBuffer cmd,
+        const glm::mat4& viewProj, const std::vector<glm::mat4>& models);
 
     void load_master_asset(const std::string& master_path);
     void loadAssetWithOverlay(const std::string& master_path, const std::string& overlay_path);
@@ -499,8 +506,11 @@ private:
     void rebuildPipeline(const std::string& asset_path);
     void cleanupShaderModules(const PipelineInfo& pipelineInfo);
     void renderMeshAssetInternal(VkCommandBuffer cmd, VkPipeline meshPipeline,
-        VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj, const glm::mat4& model);
+        VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj,
+        const glm::mat4& model, uint32_t instanceCount = 0);
     MeshAssetGPUData uploadTaffyAsset(const Taffy::Asset& asset);
+    bool ensureInstanceBufferCapacity(MeshAssetGPUData& gpuData, uint32_t instanceCount);
+    void cleanupMeshAssetGPUData(MeshAssetGPUData& gpuData);
     bool extractShadersFromAsset(const Taffy::Asset& asset,
         VkShaderModule& vertexShaderModule,
         VkShaderModule& meshShaderModule,

@@ -32,13 +32,19 @@
 #include "audio/taffy_audio_processor.h"
 #include "audio/taffy_polyphonic_processor.h"
 #include "renderer/taffy_integration.h"
+#include "vk_backend_controls.h"
 #include "include/taffy_audio_tools.h"
 #include "include/taffy_streaming.h"
 #include "dmc_survivors.h"
+#include "Source/Runtime/TremorPhysics/physics_backend.h"
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <filesystem>
-#include <cstring>
 #include <cmath>
+#include <cstring>
 #include <fstream>
+#include <string>
 
 // Forward declaration for chunked TAF creation
 bool createChunkedStreamingTAF(const std::string& inputWavPath,
@@ -51,6 +57,49 @@ template<typename T>
 concept StringLike = requires(T t) {
     { std::string_view(t) } -> std::convertible_to<std::string_view>;
 };
+
+namespace {
+
+tremor::physics::PhysicsBackendKind parsePhysicsBackendName(std::string_view rawValue) {
+    std::string normalized(rawValue);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+
+    if (normalized == "physx") {
+        return tremor::physics::PhysicsBackendKind::PhysX;
+    }
+    return tremor::physics::PhysicsBackendKind::Jolt;
+}
+
+tremor::physics::PhysicsBackendKind choosePhysicsBackend(int argc, char** argv) {
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument(argv[index] != nullptr ? argv[index] : "");
+        if (argument == "--physx") {
+            return tremor::physics::PhysicsBackendKind::PhysX;
+        }
+        if (argument == "--jolt") {
+            return tremor::physics::PhysicsBackendKind::Jolt;
+        }
+
+        constexpr std::string_view prefix = "--physics=";
+        if (argument.substr(0, prefix.size()) == prefix) {
+            return parsePhysicsBackendName(argument.substr(prefix.size()));
+        }
+    }
+
+    if (const char* envValue = std::getenv("TREMOR_PHYSICS_BACKEND")) {
+        return parsePhysicsBackendName(envValue);
+    }
+
+    return tremor::physics::PhysicsBackendKind::Jolt;
+}
+
+const char* physicsBackendName(tremor::physics::PhysicsBackendKind backendKind) {
+    return backendKind == tremor::physics::PhysicsBackendKind::PhysX ? "PhysX" : "Jolt";
+}
+
+} // namespace
 
 #include "RenderBackend.h"
 
@@ -70,6 +119,7 @@ public:
     int currentWaveform = 17;  // Start with imported sample
     int gateResetCounter = 0;  // Counter to reset gate after triggering
     bool bitCrushEnabled = false;  // Enable bit crusher effect
+    tremor::physics::PhysicsBackendKind physicsBackendKind = tremor::physics::PhysicsBackendKind::Jolt;
 
     std::unique_ptr<tremor::gfx::RenderBackend> rb;
     std::unique_ptr<tremor::audio::TaffyPolyphonicProcessor> audioProcessor;
@@ -181,9 +231,14 @@ public:
     }
 
 
-    Engine() : audioDevice(0) {
+    Engine(int argcIn, char** argvIn)
+        : argc(argcIn),
+          argv(argvIn),
+          audioDevice(0),
+          physicsBackendKind(choosePhysicsBackend(argcIn, argvIn)) {
         Logger::get().critical("Engine constructor called!");
         Logger::get().critical("  Engine instance: {}", (void*)this);
+        Logger::get().info("Selected gameplay physics backend: {}", physicsBackendName(physicsBackendKind));
 
         if (SDL_Init(SDL_INIT_EVERYTHING) < 0) {
             Logger::get().critical("SDL INITIALIZATION FAILED.");
@@ -207,7 +262,7 @@ public:
 
         // Initialize DMC Survivors game
         Logger::get().info("Initializing DMC Survivors game...");
-        game = std::make_unique<DMCSurvivors::Game>();
+        game = std::make_unique<DMCSurvivors::Game>(physicsBackendKind);
         Logger::get().info("DMC Survivors game initialized!");
 
         // Initialize audio
@@ -217,7 +272,7 @@ public:
         // Set up sequencer callback to trigger drum sample
         if (rb) {
             auto* vulkanBackend = static_cast<tremor::gfx::VulkanBackend*>(rb.get());
-            vulkanBackend->setSequencerCallback([this](int step) {
+            tremor::gfx::VulkanBackendControls::setSequencerCallback(*vulkanBackend, [this](int step) {
                 Logger::get().info("🥁 Sequencer step {} triggered - playing drum sample!", step);
                 
                 // Make sure we're on the kick drum sample
@@ -325,7 +380,8 @@ public:
         while (SDL_PollEvent(&event)) {
             // Pass event to render backend for UI handling
             if (rb) {
-                static_cast<tremor::gfx::VulkanBackend*>(rb.get())->handleInput(event);
+                tremor::gfx::VulkanBackendControls::handleInput(
+                    *static_cast<tremor::gfx::VulkanBackend*>(rb.get()), event);
             }
 
             if (event.type == SDL_QUIT) {
@@ -557,7 +613,7 @@ int main(int argc, char** argv) {
 
 	Logger::get().info("Welcome. Starting Tremor...");
 
-    Engine engine;
+    Engine engine(argc, argv);
     Logger::get().critical("Engine constructed, starting main loop...");
 
 	do {

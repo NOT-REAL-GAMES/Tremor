@@ -15,7 +15,17 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 if(MSVC)
     string(APPEND CMAKE_CXX_FLAGS " /Zc:enumTypes-")
     string(APPEND CMAKE_C_FLAGS   " /Zc:enumTypes-")
+    string(APPEND CMAKE_CXX_FLAGS_DEBUG " /D_DEBUG /UNDEBUG")
+    string(APPEND CMAKE_C_FLAGS_DEBUG   " /D_DEBUG /UNDEBUG")
+    string(APPEND CMAKE_CXX_FLAGS_RELEASE " /DNDEBUG /U_DEBUG")
+    string(APPEND CMAKE_C_FLAGS_RELEASE   " /DNDEBUG /U_DEBUG")
+    string(APPEND CMAKE_CXX_FLAGS_RELWITHDEBINFO " /DNDEBUG /U_DEBUG")
+    string(APPEND CMAKE_C_FLAGS_RELWITHDEBINFO   " /DNDEBUG /U_DEBUG")
+    string(APPEND CMAKE_CXX_FLAGS_MINSIZEREL " /DNDEBUG /U_DEBUG")
+    string(APPEND CMAKE_C_FLAGS_MINSIZEREL   " /DNDEBUG /U_DEBUG")
 endif()
+
+
 
 # Ensure proper C++23 support for C++ files only
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -73,6 +83,7 @@ endif()
 
 # Add flecs using FetchContent
 include(FetchContent)
+include(ExternalProject)
 FetchContent_Declare(
     flecs
     GIT_REPOSITORY https://github.com/SanderMertens/flecs.git
@@ -136,6 +147,9 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(shaderc)
 
+option(TREMOR_FETCH_PHYSX "Fetch PhysX 5 source for Tremor's PhysX backend work" ON)
+set(TREMOR_PHYSX_TAG "107.3-physx-5.6.1" CACHE STRING "Pinned PhysX release tag from NVIDIA-Omniverse/PhysX")
+
 
 # Configure Jolt options before making it available
 set(TARGET_UNIT_TESTS OFF CACHE BOOL "" FORCE)
@@ -153,6 +167,200 @@ FetchContent_MakeAvailable(Jolt)
 
 target_compile_definitions(Jolt PRIVATE NOGDI)
 target_compile_options(Jolt PRIVATE /W0)
+
+if(TREMOR_FETCH_PHYSX)
+    FetchContent_Declare(
+        PhysX
+        GIT_REPOSITORY https://github.com/NVIDIA-Omniverse/PhysX.git
+        GIT_TAG ${TREMOR_PHYSX_TAG}
+    )
+
+    FetchContent_GetProperties(PhysX)
+    if(NOT physx_POPULATED)
+        FetchContent_Populate(PhysX)
+    endif()
+
+    set(TREMOR_PHYSX_SOURCE_DIR "${physx_SOURCE_DIR}" CACHE PATH "Fetched PhysX source root")
+    set(TREMOR_PHYSX_ROOT_DIR "${physx_SOURCE_DIR}/physx" CACHE PATH "Fetched PhysX SDK root")
+    set(TREMOR_PHYSX_INCLUDE_DIR "${TREMOR_PHYSX_ROOT_DIR}/include" CACHE PATH "Fetched PhysX public headers")
+
+    if(MSVC)
+        if(MSVC_VERSION GREATER_EQUAL 1930)
+            set(_tremor_physx_compiler_suffix "vc143")
+        elseif(MSVC_VERSION GREATER_EQUAL 1920)
+            set(_tremor_physx_compiler_suffix "vc142")
+        elseif(MSVC_VERSION GREATER_EQUAL 1910)
+            set(_tremor_physx_compiler_suffix "vc141")
+        else()
+            message(FATAL_ERROR "Unsupported MSVC toolset for PhysX integration")
+        endif()
+
+        set(TREMOR_PHYSX_BUILD_DIR "${CMAKE_BINARY_DIR}/physx-build" CACHE PATH "PhysX isolated build directory")
+        set(TREMOR_PHYSX_OUTPUT_DIR "${CMAKE_BINARY_DIR}/physx-artifacts" CACHE PATH "PhysX isolated output root")
+        set(TREMOR_PHYSX_DUMMY_THIRDPARTY_DIR "${CMAKE_BINARY_DIR}/physx-thirdparty-dummy" CACHE PATH "Dummy third-party root for PhysX configure-time copy assumptions")
+        set(TREMOR_PHYSX_PLATFORM_BIN_NAME "win.x86_64.${_tremor_physx_compiler_suffix}.mt")
+        set(_tremor_physx_library_root "${TREMOR_PHYSX_OUTPUT_DIR}/bin/${TREMOR_PHYSX_PLATFORM_BIN_NAME}")
+        set(_tremor_physx_build_config "$<IF:$<CONFIG:Debug>,debug,$<IF:$<CONFIG:Release>,release,$<IF:$<CONFIG:RelWithDebInfo>,profile,release>>>")
+
+        file(MAKE_DIRECTORY "${TREMOR_PHYSX_DUMMY_THIRDPARTY_DIR}/bin/win64")
+        foreach(_tremor_physx_dummy_dll IN ITEMS freeglut.dll freeglutd.dll PhysXDevice64.dll)
+            if(NOT EXISTS "${TREMOR_PHYSX_DUMMY_THIRDPARTY_DIR}/bin/win64/${_tremor_physx_dummy_dll}")
+                file(WRITE "${TREMOR_PHYSX_DUMMY_THIRDPARTY_DIR}/bin/win64/${_tremor_physx_dummy_dll}" "")
+            endif()
+        endforeach()
+
+        set(_tremor_physx_cmake_args
+            -DPHYSX_ROOT_DIR=${TREMOR_PHYSX_ROOT_DIR}
+            -DTARGET_BUILD_PLATFORM=windows
+            -DPUBLIC_RELEASE=OFF
+            -DPX_GENERATE_STATIC_LIBRARIES=ON
+            -DPX_BUILDSNIPPETS=OFF
+            -DPX_BUILDPVDRUNTIME=OFF
+            -DPX_GENERATE_GPU_PROJECTS=OFF
+            -DPX_GENERATE_GPU_PROJECTS_ONLY=OFF
+            -DPX_COPY_EXTERNAL_DLL=OFF
+            -DPHYSX_SLN_FREEGLUT_PATH=${TREMOR_PHYSX_DUMMY_THIRDPARTY_DIR}/bin
+            -DPHYSX_SLN_PHYSXDEVICE_PATH=${TREMOR_PHYSX_DUMMY_THIRDPARTY_DIR}/bin/win64
+            -DNV_USE_STATIC_WINCRT=ON
+            -DNV_USE_DEBUG_WINCRT=ON
+            -DPX_OUTPUT_LIB_DIR=${TREMOR_PHYSX_OUTPUT_DIR}
+            -DPX_OUTPUT_BIN_DIR=${TREMOR_PHYSX_OUTPUT_DIR}
+            -DCMAKE_INSTALL_PREFIX=${TREMOR_PHYSX_OUTPUT_DIR}/install
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=${CMAKE_MSVC_RUNTIME_LIBRARY}
+        )
+
+        if(CMAKE_MAKE_PROGRAM)
+            list(APPEND _tremor_physx_cmake_args
+                -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
+            )
+        endif()
+        if(CMAKE_C_COMPILER)
+            list(APPEND _tremor_physx_cmake_args
+                -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+            )
+        endif()
+        if(CMAKE_CXX_COMPILER)
+            list(APPEND _tremor_physx_cmake_args
+                -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+            )
+        endif()
+        if(CMAKE_RC_COMPILER)
+            list(APPEND _tremor_physx_cmake_args
+                -DCMAKE_RC_COMPILER=${CMAKE_RC_COMPILER}
+            )
+        endif()
+        if(CMAKE_BUILD_TYPE)
+            list(APPEND _tremor_physx_cmake_args
+                -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+            )
+        endif()
+
+        set(_tremor_physx_external_project_args
+            PREFIX ${CMAKE_BINARY_DIR}/physx-external
+            SOURCE_DIR ${TREMOR_PHYSX_ROOT_DIR}/compiler/public
+            BINARY_DIR ${TREMOR_PHYSX_BUILD_DIR}
+            DOWNLOAD_COMMAND ""
+            UPDATE_COMMAND ""
+            INSTALL_COMMAND ""
+            CMAKE_ARGS
+                ${_tremor_physx_cmake_args}
+            BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --config ${_tremor_physx_build_config} --target PhysXFoundation PhysXPvdSDK PhysXCommon PhysXCooking PhysX PhysXExtensions
+            BUILD_BYPRODUCTS
+                ${TREMOR_PHYSX_ROOT_DIR}/include/PxConfig.h
+                ${_tremor_physx_library_root}/debug/PhysXFoundation_static.lib
+                ${_tremor_physx_library_root}/debug/PhysXPvdSDK_static.lib
+                ${_tremor_physx_library_root}/debug/PhysXCommon_static.lib
+                ${_tremor_physx_library_root}/debug/PhysXCooking_static.lib
+                ${_tremor_physx_library_root}/debug/PhysX_static.lib
+                ${_tremor_physx_library_root}/debug/PhysXExtensions_static.lib
+                ${_tremor_physx_library_root}/release/PhysXFoundation_static.lib
+                ${_tremor_physx_library_root}/release/PhysXPvdSDK_static.lib
+                ${_tremor_physx_library_root}/release/PhysXCommon_static.lib
+                ${_tremor_physx_library_root}/release/PhysXCooking_static.lib
+                ${_tremor_physx_library_root}/release/PhysX_static.lib
+                ${_tremor_physx_library_root}/release/PhysXExtensions_static.lib
+                ${_tremor_physx_library_root}/profile/PhysXFoundation_static.lib
+                ${_tremor_physx_library_root}/profile/PhysXPvdSDK_static.lib
+                ${_tremor_physx_library_root}/profile/PhysXCommon_static.lib
+                ${_tremor_physx_library_root}/profile/PhysXCooking_static.lib
+                ${_tremor_physx_library_root}/profile/PhysX_static.lib
+                ${_tremor_physx_library_root}/profile/PhysXExtensions_static.lib
+        )
+
+        if(CMAKE_GENERATOR)
+            list(APPEND _tremor_physx_external_project_args
+                CMAKE_GENERATOR "${CMAKE_GENERATOR}"
+            )
+        endif()
+        if(CMAKE_GENERATOR_INSTANCE)
+            list(APPEND _tremor_physx_external_project_args
+                CMAKE_GENERATOR_INSTANCE "${CMAKE_GENERATOR_INSTANCE}"
+            )
+        endif()
+        if(CMAKE_GENERATOR_PLATFORM)
+            list(APPEND _tremor_physx_external_project_args
+                CMAKE_GENERATOR_PLATFORM "${CMAKE_GENERATOR_PLATFORM}"
+            )
+        endif()
+        if(CMAKE_GENERATOR_TOOLSET)
+            list(APPEND _tremor_physx_external_project_args
+                CMAKE_GENERATOR_TOOLSET "${CMAKE_GENERATOR_TOOLSET}"
+            )
+        endif()
+
+        ExternalProject_Add(TremorPhysXBuild ${_tremor_physx_external_project_args})
+
+        function(tremor_import_physx_static target_name physx_lib_name)
+            add_library(${target_name} STATIC IMPORTED GLOBAL)
+            set_target_properties(${target_name} PROPERTIES
+                IMPORTED_CONFIGURATIONS "DEBUG;RELEASE;RELWITHDEBINFO;MINSIZEREL"
+                IMPORTED_LOCATION_DEBUG "${_tremor_physx_library_root}/debug/${physx_lib_name}.lib"
+                IMPORTED_LOCATION_RELEASE "${_tremor_physx_library_root}/release/${physx_lib_name}.lib"
+                IMPORTED_LOCATION_RELWITHDEBINFO "${_tremor_physx_library_root}/profile/${physx_lib_name}.lib"
+                IMPORTED_LOCATION_MINSIZEREL "${_tremor_physx_library_root}/release/${physx_lib_name}.lib"
+            )
+        endfunction()
+
+        tremor_import_physx_static(TremorPhysXFoundation "PhysXFoundation_static")
+        tremor_import_physx_static(TremorPhysXPvdSDK "PhysXPvdSDK_static")
+        tremor_import_physx_static(TremorPhysXCommon "PhysXCommon_static")
+        tremor_import_physx_static(TremorPhysXCooking "PhysXCooking_static")
+        tremor_import_physx_static(TremorPhysX "PhysX_static")
+        tremor_import_physx_static(TremorPhysXExtensions "PhysXExtensions_static")
+
+        add_library(TremorPhysXSDK INTERFACE)
+        target_include_directories(TremorPhysXSDK INTERFACE
+            ${TREMOR_PHYSX_INCLUDE_DIR}
+        )
+        target_compile_definitions(TremorPhysXSDK INTERFACE
+            TREMOR_HAS_PHYSX_SDK=1
+            PX_PHYSX_STATIC_LIB=1
+            $<$<CONFIG:Debug>:_DEBUG>
+            $<$<NOT:$<CONFIG:Debug>>:NDEBUG>
+        )
+        if(MSVC)
+            target_compile_options(TremorPhysXSDK INTERFACE
+                $<$<CONFIG:Debug>:/UNDEBUG>
+                $<$<NOT:$<CONFIG:Debug>>:/U_DEBUG>
+            )
+        endif()
+        target_link_libraries(TremorPhysXSDK INTERFACE
+            TremorPhysXExtensions
+            TremorPhysX
+            TremorPhysXCooking
+            TremorPhysXCommon
+            TremorPhysXPvdSDK
+            TremorPhysXFoundation
+        )
+    else()
+        message(WARNING "PhysX auto-build is currently only wired for MSVC; the PhysX backend will remain stubbed on this platform.")
+    endif()
+
+    message(STATUS "PhysX 5 source fetched from NVIDIA-Omniverse/PhysX (${TREMOR_PHYSX_TAG})")
+    message(STATUS "  PhysX source root: ${TREMOR_PHYSX_SOURCE_DIR}")
+    message(STATUS "  PhysX SDK root: ${TREMOR_PHYSX_ROOT_DIR}")
+    message(STATUS "  PhysX include: ${TREMOR_PHYSX_INCLUDE_DIR}")
+endif()
 
 
 # Ensure Jolt uses the correct C++ standard
@@ -299,7 +507,17 @@ target_include_directories(Tremor PRIVATE
 
 target_compile_definitions(Tremor PRIVATE 
     ASIO_STANDALONE 
-    ASIO_HAS_STD_COROUTINE)
+    ASIO_HAS_STD_COROUTINE
+    $<$<CONFIG:Debug>:_DEBUG>
+    $<$<NOT:$<CONFIG:Debug>>:NDEBUG>
+)
+
+if(MSVC)
+    target_compile_options(Tremor PRIVATE
+        $<$<CONFIG:Debug>:/UNDEBUG>
+        $<$<NOT:$<CONFIG:Debug>>:/U_DEBUG>
+    )
+endif()
 
 # Link libraries
 target_link_libraries(Tremor PRIVATE
@@ -321,6 +539,11 @@ target_link_libraries(Tremor PRIVATE
     glslang::glslang
     Jolt
 )
+
+if(TARGET TremorPhysXSDK)
+    target_link_libraries(Tremor PRIVATE TremorPhysXSDK)
+    add_dependencies(Tremor TremorPhysXBuild)
+endif()
 
 if(TARGET SDL2::SDL2main)
     target_link_libraries(Tremor PRIVATE SDL2::SDL2main)

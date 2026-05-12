@@ -136,7 +136,7 @@ std::optional<flecs::entity> resolveScriptEntity(
 
 void removeBodyIfPresent(PhysicsInteropAdapter& adapter, flecs::entity entity) {
     if (const ScriptPhysicsBody* body = entity.get<ScriptPhysicsBody>()) {
-        if (body->handle != 0) {
+        if (!body->handle.IsInvalid()) {
             adapter.removeBody(body->handle);
         }
         entity.remove<ScriptPhysicsBody>();
@@ -156,7 +156,7 @@ bool attachBody(
 
 const ScriptPhysicsBody* getPhysicsBodyOrLog(flecs::entity entity, std::string_view commandName) {
     const ScriptPhysicsBody* body = entity.get<ScriptPhysicsBody>();
-    if (!body || body->handle == 0) {
+    if (!body || body->handle.IsInvalid()) {
         Logger::get().error("{} failed: entity has no ScriptPhysicsBody", commandName);
         return nullptr;
     }
@@ -199,7 +199,7 @@ void registerPhysicsInteropCommands(
 
         const std::optional<PhysicsBodyHandle> handle =
             adapter.createDynamicCapsule(*position, *radius, *height, layer);
-        if (!handle || *handle == 0) {
+        if (!handle || handle->IsInvalid()) {
             Logger::get().error("physics_create_dynamic_body failed: adapter did not create a body");
             return false;
         }
@@ -237,7 +237,7 @@ void registerPhysicsInteropCommands(
 
         const std::optional<PhysicsBodyHandle> handle =
             adapter.createKinematicBox(*position, *halfExtents, layer);
-        if (!handle || *handle == 0) {
+        if (!handle || handle->IsInvalid()) {
             Logger::get().error("physics_create_kinematic_box failed: adapter did not create a body");
             return false;
         }
@@ -275,7 +275,7 @@ void registerPhysicsInteropCommands(
 
         const std::optional<PhysicsBodyHandle> handle =
             adapter.createStaticBox(*position, *halfExtents, layer);
-        if (!handle || *handle == 0) {
+        if (!handle || handle->IsInvalid()) {
             Logger::get().error("physics_create_static_box failed: adapter did not create a body");
             return false;
         }

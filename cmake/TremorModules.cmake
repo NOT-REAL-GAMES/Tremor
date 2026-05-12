@@ -59,12 +59,20 @@ set(TREMOR_RUNTIME_GAMEPLAY_HEADERS
 )
 
 set(TREMOR_RUNTIME_PHYSICS_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorPhysics/physics_core.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorPhysics/physics_backend.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorPhysics/physics_backend_adapter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorPhysics/physx_physics_world.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dmc_physics.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/jolt_physics_world.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/jolt_physics_adapter.cpp
 )
 
 set(TREMOR_RUNTIME_PHYSICS_HEADERS
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorPhysics/physics_core.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorPhysics/physics_backend.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorPhysics/physics_backend_adapter.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorPhysics/physx_physics_world.h
     ${CMAKE_CURRENT_SOURCE_DIR}/dmc_physics.h
     ${CMAKE_CURRENT_SOURCE_DIR}/jolt_physics_world.h
     ${CMAKE_CURRENT_SOURCE_DIR}/jolt_physics_adapter.h
@@ -108,6 +116,9 @@ set(TREMOR_RUNTIME_RHI_HEADERS
 )
 
 set(TREMOR_RUNTIME_RENDERER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/vk_backend_controls.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/vk_overlay_bridge.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/vk_ui_bridge.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/taffy_integration.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/taffy_mesh.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/sdf_text_renderer.cpp
@@ -116,6 +127,10 @@ set(TREMOR_RUNTIME_RENDERER_SOURCES
 )
 
 set(TREMOR_RUNTIME_RENDERER_HEADERS
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/vk_backend_controls.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/vk_overlay_bridge.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/vk_ui_bridge.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/vk_editor_bridge.h
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/vk_renderer_support.h
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/taffy_integration.h
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/taffy_mesh.h
@@ -124,6 +139,10 @@ set(TREMOR_RUNTIME_RENDERER_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderer/sequencer_ui.h
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderCore/gfx_resource_types.h
     ${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/TremorRenderCore/gfx_resource_handles.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/vk_backend_controls.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/vk_overlay_bridge.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/vk_ui_bridge.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/vk_editor_bridge.h
     ${CMAKE_CURRENT_SOURCE_DIR}/vk_renderer_support.h
     ${CMAKE_CURRENT_SOURCE_DIR}/renderer/taffy_integration.h
     ${CMAKE_CURRENT_SOURCE_DIR}/renderer/taffy_mesh.h
@@ -142,6 +161,7 @@ set(TREMOR_EDITOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/gizmo_renderer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/model_editor_integration_impl.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/model_editor_main_integration.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/editor/vk_editor_bridge.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/editor/file_dialog.cpp
 )
 

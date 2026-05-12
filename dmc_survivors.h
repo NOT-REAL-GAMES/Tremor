@@ -12,9 +12,10 @@
 #include "include/quan.h"
 #include "flecs_interpreter.h"
 #include "vk.h"  // Include VulkanBackend for rendering
-#include "dmc_physics.h"  // Include Jolt Physics integration
-#include "jolt_physics_adapter.h"
+#include "dmc_physics.h"
 #include "physics_interop.h"
+#include "Source/Runtime/TremorPhysics/physics_backend.h"
+#include "Source/Runtime/TremorPhysics/physics_backend_adapter.h"
 #include "render_interop.h"
 #include "script_ecs_components.h"
 #include "script_render_system.h"
@@ -23,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <deque>
+#include <mutex>
 #include <vector>
 #include <utility>
 #include "logger.h"
@@ -281,15 +283,19 @@ private:
     std::vector<flecs::entity> entitiesMarkedForDeletion;
     std::unique_ptr<tremor::script::FlecsInterpreterHost> interpreterHost;
 
-    // Jolt Physics integration
     std::unique_ptr<DMCSurvivors::PhysicsWorld> physicsWorld;
-    std::unique_ptr<tremor::physics::JoltPhysicsAdapter> physicsAdapter;
+    std::unique_ptr<tremor::physics::PhysicsInteropBackendAdapter> physicsAdapter;
     tremor::physics::PhysicsLayerConfigBuilder physicsLayerConfig;
     tremor::render::RenderInteropRegistry renderRegistry;
     tremor::render::ScriptRenderCamera renderCamera;
+    tremor::physics::PhysicsBackendKind physicsBackendKind = tremor::physics::PhysicsBackendKind::Jolt;
+    std::mutex physicsContactEventsMutex;
+    std::vector<tremor::physics::PhysicsContactEvent> pendingPhysicsContactEvents;
 
 public:
-    Game() {
+    explicit Game(
+        tremor::physics::PhysicsBackendKind backendKind = tremor::physics::PhysicsBackendKind::Jolt
+    ) : physicsBackendKind(backendKind) {
         // Initialize physics world first
         initializePhysics();
 
@@ -314,6 +320,7 @@ public:
             physicsWorld->Update(deltaTime);
         }
 
+        flushPendingPhysicsContactEvents();
         world.progress(deltaTime);
         if (interpreterHost) {
             interpreterHost->update(deltaTime);
@@ -433,38 +440,192 @@ public:
                    cameraPos.x, cameraPos.y, cameraPos.z);*/
         }
 
+        std::vector<glm::mat4> cubeModels;
+        std::vector<glm::mat4> sphereModels;
+
         // Render player entities
-        world.each([&](flecs::entity entity, const Position& pos, const Player& playerTag, const MeshRenderer& mesh) {
+        world.each([&](flecs::entity, const Position& pos, const Player&, const MeshRenderer&) {
             glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
-            glm::mat4 transform = glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(1.0f, 2.0f, 1.0f));
-            overlayManager->renderMeshAsset("assets/cube.taf", cmd, viewProj * transform);
+            cubeModels.push_back(
+                glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(1.0f, 2.0f, 1.0f))
+            );
         });
 
         // Render enemy entities
-        world.each([&](flecs::entity entity, const Position& pos, const Enemy& enemyTag, const MeshRenderer& mesh) {
+        world.each([&](flecs::entity, const Position& pos, const Enemy&, const MeshRenderer&) {
             glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
-            glm::mat4 transform = glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(1.2f));
-            overlayManager->renderMeshAsset("assets/sphere.taf", cmd, viewProj * transform);
+            sphereModels.push_back(
+                glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(1.2f))
+            );
         });
 
         // Render projectiles
-        world.each([&](flecs::entity entity, const Position& pos, const Projectile& proj, const MeshRenderer& mesh) {
+        world.each([&](flecs::entity, const Position& pos, const Projectile&, const MeshRenderer&) {
             glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
-            glm::mat4 transform = glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(0.2f));
-            overlayManager->renderMeshAsset("assets/cube.taf", cmd, viewProj * transform);
+            cubeModels.push_back(
+                glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(0.2f))
+            );
         });
 
         // Render XP orbs
-        world.each([&](flecs::entity entity, const Position& pos, const RedOrb& orb, const MeshRenderer& mesh) {
+        world.each([&](flecs::entity, const Position& pos, const RedOrb&, const MeshRenderer&) {
             glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
             glm::mat4 transform = glm::translate(glm::mat4(1.0f), worldPos);
             transform = glm::translate(transform, glm::vec3(0, 0.5f, 0));
-            transform = glm::scale(transform, glm::vec3(0.4f));
-            overlayManager->renderMeshAsset("assets/cube.taf", cmd, viewProj * transform);
+            cubeModels.push_back(glm::scale(transform, glm::vec3(0.4f)));
         });
+
+        overlayManager->renderMeshAssetBatch("assets/cube.taf", cmd, viewProj, cubeModels);
+        overlayManager->renderMeshAssetBatch("assets/sphere.taf", cmd, viewProj, sphereModels);
     }
 
-private:
+  private:
+    static const char* physicsBackendName(tremor::physics::PhysicsBackendKind backendKind) {
+        return backendKind == tremor::physics::PhysicsBackendKind::PhysX ? "PhysX" : "Jolt";
+    }
+
+    static const char* physicsContactEventName(tremor::physics::PhysicsContactPhase phase) {
+        switch (phase) {
+            case tremor::physics::PhysicsContactPhase::Added:
+                return "physics_contact_added";
+            case tremor::physics::PhysicsContactPhase::Persisted:
+                return "physics_contact_persisted";
+            case tremor::physics::PhysicsContactPhase::Removed:
+                return "physics_contact_removed";
+        }
+        return "physics_contact_added";
+    }
+
+    static void applyDmcPhysicsLayerPolicy(tremor::physics::PhysicsLayerConfig& config) {
+        using namespace tremor::physics;
+
+        auto blockObjectCollision = [&config](PhysicsObjectLayer left, PhysicsObjectLayer right) {
+            if (left >= config.objectCollisions.size() || right >= config.objectCollisions.size()) {
+                return;
+            }
+            config.objectCollisions[left][right] = false;
+            config.objectCollisions[right][left] = false;
+        };
+
+        auto blockBroadPhaseCollision = [&config](PhysicsObjectLayer left, PhysicsObjectLayer right) {
+            if (left >= config.layers.size() || right >= config.layers.size()) {
+                return;
+            }
+
+            const size_t leftBroadPhase = static_cast<size_t>(config.layers[left].broadPhase);
+            const size_t rightBroadPhase = static_cast<size_t>(config.layers[right].broadPhase);
+
+            if (left < config.broadPhaseCollisions.size() &&
+                rightBroadPhase < config.broadPhaseCollisions[left].size()) {
+                config.broadPhaseCollisions[left][rightBroadPhase] = false;
+            }
+
+            if (right < config.broadPhaseCollisions.size() &&
+                leftBroadPhase < config.broadPhaseCollisions[right].size()) {
+                config.broadPhaseCollisions[right][leftBroadPhase] = false;
+            }
+        };
+
+        blockObjectCollision(DefaultPhysicsLayers::Player, DefaultPhysicsLayers::Enemy);
+        blockObjectCollision(DefaultPhysicsLayers::Enemy, DefaultPhysicsLayers::Enemy);
+        blockBroadPhaseCollision(DefaultPhysicsLayers::Player, DefaultPhysicsLayers::Enemy);
+        blockBroadPhaseCollision(DefaultPhysicsLayers::Enemy, DefaultPhysicsLayers::Enemy);
+    }
+
+    void queuePhysicsContactEvent(const tremor::physics::PhysicsContactEvent& event) {
+        std::lock_guard<std::mutex> lock(physicsContactEventsMutex);
+        pendingPhysicsContactEvents.push_back(event);
+    }
+
+    void syncPhysicsBodyToPosition(flecs::entity entity, const Position& position) {
+        if (!physicsWorld) {
+            return;
+        }
+
+        const PhysicsBody* physicsBody = entity.get<PhysicsBody>();
+        if (physicsBody == nullptr || physicsBody->bodyId.IsInvalid()) {
+            return;
+        }
+
+        physicsWorld->SetBodyPosition(physicsBody->bodyId, position.getFloat());
+    }
+
+    void resolveCharacterOverlap(flecs::entity e1, flecs::entity e2) {
+        if (e1.id() >= e2.id()) {
+            return;
+        }
+
+        const bool playerEnemyPair =
+            (e1.has<Player>() && e2.has<Enemy>()) ||
+            (e1.has<Enemy>() && e2.has<Player>());
+        const bool enemyEnemyPair = e1.has<Enemy>() && e2.has<Enemy>();
+        if (!playerEnemyPair && !enemyEnemyPair) {
+            return;
+        }
+
+        Position* pos1 = e1.get_mut<Position>();
+        Position* pos2 = e2.get_mut<Position>();
+        const CollisionRadius* rad1 = e1.get<CollisionRadius>();
+        const CollisionRadius* rad2 = e2.get<CollisionRadius>();
+        if (pos1 == nullptr || pos2 == nullptr || rad1 == nullptr || rad2 == nullptr) {
+            return;
+        }
+
+        glm::vec3 delta = pos1->getFloat() - pos2->getFloat();
+        delta.y = 0.0f;
+
+        const float minDistance = rad1->value + rad2->value;
+        const float distance = glm::length(delta);
+        if (!(distance < minDistance)) {
+            return;
+        }
+
+        glm::vec3 normal = distance > 0.0001f
+            ? delta / distance
+            : glm::vec3(1.0f, 0.0f, 0.0f);
+        const float penetration = minDistance - distance;
+        if (!(penetration > 0.0f)) {
+            return;
+        }
+
+        const glm::vec3 correction = normal * (penetration + 0.001f);
+        glm::vec3 newPos1 = pos1->getFloat() + correction * 0.5f;
+        glm::vec3 newPos2 = pos2->getFloat() - correction * 0.5f;
+        newPos1.y = pos1->getFloat().y;
+        newPos2.y = pos2->getFloat().y;
+
+        pos1->setFloat(newPos1);
+        pos2->setFloat(newPos2);
+
+        syncPhysicsBodyToPosition(e1, *pos1);
+        syncPhysicsBodyToPosition(e2, *pos2);
+    }
+
+    void flushPendingPhysicsContactEvents() {
+        if (!interpreterHost) {
+            return;
+        }
+
+        std::vector<tremor::physics::PhysicsContactEvent> eventsToDispatch;
+        {
+            std::lock_guard<std::mutex> lock(physicsContactEventsMutex);
+            if (pendingPhysicsContactEvents.empty()) {
+                return;
+            }
+            eventsToDispatch.swap(pendingPhysicsContactEvents);
+        }
+
+        for (const auto& event : eventsToDispatch) {
+            interpreterHost->emitEvent({
+                physicsContactEventName(event.phase),
+                {
+                    {"left_body", std::to_string(event.leftBody.raw())},
+                    {"right_body", std::to_string(event.rightBody.raw())}
+                }
+            });
+        }
+    }
+
     void setupInterpreterHost() {
         interpreterHost = std::make_unique<tremor::script::FlecsInterpreterHost>(world);
         tremor::ecs::registerScriptComponentCommands(*interpreterHost);
@@ -517,7 +678,7 @@ private:
         });
 
         if (physicsWorld) {
-            physicsAdapter = std::make_unique<tremor::physics::JoltPhysicsAdapter>(*physicsWorld);
+            physicsAdapter = std::make_unique<tremor::physics::PhysicsInteropBackendAdapter>(*physicsWorld);
             tremor::physics::registerPhysicsInteropCommands(*interpreterHost, *physicsAdapter);
         }
     }
@@ -1028,14 +1189,32 @@ action command emit_ui_message wave advanced
     }
 
     void setupCollisionSystem() {
-        world.system<const Position, const CollisionRadius>("CollisionSystem")
-            .each([this](flecs::entity e1, const Position& pos1, const CollisionRadius& rad1) {
-                world.each([&](flecs::entity e2, const Position& pos2, const CollisionRadius& rad2) {
-                    if (e1 == e2) return;
+        world.system<>("CollisionSystem")
+            .kind(flecs::OnUpdate)
+            .run([this](flecs::iter&) {
+                if (!player.is_alive()) {
+                    return;
+                }
 
-                    float dist = glm::length(pos1.getFloat() - pos2.getFloat());
-                    if (dist < rad1.value + rad2.value) {
-                        handleCollision(e1, e2);
+                const Position* playerPos = player.get<Position>();
+                const CollisionRadius* playerRadius = player.get<CollisionRadius>();
+                if (playerPos == nullptr || playerRadius == nullptr) {
+                    return;
+                }
+
+                world.each([&](flecs::entity other, const Position& otherPos, const CollisionRadius& otherRadius) {
+                    if (other == player) {
+                        return;
+                    }
+
+                    if (!other.has<Enemy>() && !other.has<RedOrb>()) {
+                        return;
+                    }
+
+                    const float dist = glm::length(playerPos->getFloat() - otherPos.getFloat());
+                    if (dist < playerRadius->value + otherRadius.value) {
+                        resolveCharacterOverlap(player, other);
+                        handleCollision(player, other);
                     }
                 });
             });
@@ -1375,23 +1554,52 @@ action command emit_ui_message wave advanced
     }
 
     void initializePhysics() {
-        Logger::get().info("🎯 Initializing Jolt Physics for DMC Survivors...");
+        Logger::get().info(
+            "🎯 Initializing {} physics backend for DMC Survivors...",
+            physicsBackendName(physicsBackendKind)
+        );
 
-        tremor::physics::JoltPhysicsSettings settings;
+        tremor::physics::PhysicsSettings settings;
         if (!physicsLayerConfig.empty()) {
             settings.layers = physicsLayerConfig.build();
         }
+        applyDmcPhysicsLayerPolicy(settings.layers);
 
-        physicsWorld = std::make_unique<DMCSurvivors::PhysicsWorld>(std::move(settings));
-        if (!physicsWorld->Initialize()) {
-            Logger::get().error("Failed to initialize Jolt Physics!");
-            physicsWorld.reset();
-        } else {
-            Logger::get().info("✅ Jolt Physics initialized successfully!");
+        auto tryInitializeBackend = [this](tremor::physics::PhysicsBackendKind backendKindToTry, const tremor::physics::PhysicsSettings& settingsToUse) {
+            auto candidate = tremor::physics::createPhysicsWorldBackend(backendKindToTry, settingsToUse);
+            if (!candidate || !candidate->Initialize()) {
+                return std::unique_ptr<DMCSurvivors::PhysicsWorld>{};
+            }
+            physicsBackendKind = backendKindToTry;
+            return candidate;
+        };
 
-            // Create ground plane
-            createGroundPlane();
+        physicsWorld = tryInitializeBackend(physicsBackendKind, settings);
+        if (!physicsWorld) {
+            Logger::get().error("Failed to initialize {} physics backend!", physicsBackendName(physicsBackendKind));
+
+            if (physicsBackendKind == tremor::physics::PhysicsBackendKind::PhysX) {
+                Logger::get().warning("Falling back to Jolt physics backend...");
+                physicsWorld = tryInitializeBackend(tremor::physics::PhysicsBackendKind::Jolt, settings);
+            }
         }
+
+        if (!physicsWorld) {
+            Logger::get().error("Failed to initialize physics backend after fallback attempt!");
+            return;
+        }
+
+        physicsWorld->setContactCallback([this](const tremor::physics::PhysicsContactEvent& event) {
+            queuePhysicsContactEvent(event);
+        });
+
+        Logger::get().info(
+            "✅ Physics backend initialized successfully: {}",
+            physicsBackendName(physicsBackendKind)
+        );
+
+        // Create ground plane
+        createGroundPlane();
     }
 
     void createGroundPlane() {
