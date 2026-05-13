@@ -1,6 +1,7 @@
 #include "vk_backend_controls.h"
 
 #include "vk.h"
+#include "vk_ui_bridge.h"
 #include "vk_editor_bridge.h"
 #include "ui_renderer.h"
 #include "sequencer_ui.h"
@@ -23,6 +24,15 @@ namespace tremor::gfx {
 
         if (backend.m_editorIntegration) {
             backend.m_editorIntegration->handleInput(event);
+        }
+
+        if (event.type == SDL_KEYDOWN && event.key.repeat == 0 && event.key.keysym.sym == SDLK_F3) {
+            setProfilerOverlayVisible(backend, !backend.m_profilerOverlayVisible);
+            backend.enqueueUiMessage(
+                backend.m_profilerOverlayVisible ? "Profiler overlay enabled" : "Profiler overlay disabled",
+                2.0f,
+                0x80E0FFFF
+            );
         }
     }
 
@@ -47,6 +57,10 @@ namespace tremor::gfx {
                 }
             });
         }
+    }
+
+    void VulkanBackendControls::setProfilerOverlayVisible(VulkanBackend& backend, bool visible) {
+        VulkanUiBridge::setProfilerOverlayVisible(backend, visible);
     }
 
 } // namespace tremor::gfx

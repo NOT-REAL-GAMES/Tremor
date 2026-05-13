@@ -245,6 +245,7 @@ struct PhysXPhysicsWorld::Impl {
     physx::PxMaterial* defaultMaterial = nullptr;
     std::unordered_map<uint64_t, physx::PxRigidActor*> actors;
     std::unordered_map<const physx::PxActor*, PhysicsBodyHandle> actorHandles;
+    std::unordered_map<uint64_t, float> defaultSleepThresholds;
     std::vector<physx::PxU32> filterShaderData;
     SimulationEvents simulationEvents;
     PhysXPhysicsWorld& world;
@@ -259,6 +260,9 @@ struct PhysXPhysicsWorld::Impl {
         const PhysicsBodyHandle handle(nextHandle++);
         actors.emplace(handle.raw(), actor);
         actorHandles.emplace(actor, handle);
+        if (physx::PxRigidDynamic* dynamicActor = actor->is<physx::PxRigidDynamic>()) {
+            defaultSleepThresholds.emplace(handle.raw(), dynamicActor->getSleepThreshold());
+        }
         return handle;
     }
 
@@ -663,6 +667,83 @@ void PhysXPhysicsWorld::addForce(PhysicsBodyHandle bodyId, const glm::vec3& forc
 #endif
 }
 
+bool PhysXPhysicsWorld::isBodySleeping(PhysicsBodyHandle bodyId) const {
+#if defined(TREMOR_HAS_PHYSX_SDK) && __has_include(<PxConfig.h>) && __has_include(<PxPhysicsAPI.h>)
+    if (!impl_) {
+        return false;
+    }
+
+    if (physx::PxRigidActor* actor = impl_->findActor(bodyId)) {
+        if (physx::PxRigidDynamic* dynamicActor = actor->is<physx::PxRigidDynamic>()) {
+            return dynamicActor->isSleeping();
+        }
+    }
+#else
+    (void)bodyId;
+#endif
+    return false;
+}
+
+void PhysXPhysicsWorld::wakeBody(PhysicsBodyHandle bodyId) {
+#if defined(TREMOR_HAS_PHYSX_SDK) && __has_include(<PxConfig.h>) && __has_include(<PxPhysicsAPI.h>)
+    if (!impl_) {
+        return;
+    }
+
+    if (physx::PxRigidActor* actor = impl_->findActor(bodyId)) {
+        if (physx::PxRigidDynamic* dynamicActor = actor->is<physx::PxRigidDynamic>()) {
+            dynamicActor->wakeUp();
+        }
+    }
+#else
+    (void)bodyId;
+    logUnavailable("wakeBody");
+#endif
+}
+
+void PhysXPhysicsWorld::sleepBody(PhysicsBodyHandle bodyId) {
+#if defined(TREMOR_HAS_PHYSX_SDK) && __has_include(<PxConfig.h>) && __has_include(<PxPhysicsAPI.h>)
+    if (!impl_) {
+        return;
+    }
+
+    if (physx::PxRigidActor* actor = impl_->findActor(bodyId)) {
+        if (physx::PxRigidDynamic* dynamicActor = actor->is<physx::PxRigidDynamic>()) {
+            dynamicActor->putToSleep();
+        }
+    }
+#else
+    (void)bodyId;
+    logUnavailable("sleepBody");
+#endif
+}
+
+void PhysXPhysicsWorld::setBodySleepingAllowed(PhysicsBodyHandle bodyId, bool allowed) {
+#if defined(TREMOR_HAS_PHYSX_SDK) && __has_include(<PxConfig.h>) && __has_include(<PxPhysicsAPI.h>)
+    if (!impl_) {
+        return;
+    }
+
+    if (physx::PxRigidActor* actor = impl_->findActor(bodyId)) {
+        if (physx::PxRigidDynamic* dynamicActor = actor->is<physx::PxRigidDynamic>()) {
+            const float defaultThreshold = [&]() {
+                const auto found = impl_->defaultSleepThresholds.find(bodyId.raw());
+                return found != impl_->defaultSleepThresholds.end() ? found->second : 5e-5f;
+            }();
+
+            dynamicActor->setSleepThreshold(allowed ? defaultThreshold : 0.0f);
+            if (!allowed) {
+                dynamicActor->wakeUp();
+            }
+        }
+    }
+#else
+    (void)bodyId;
+    (void)allowed;
+    logUnavailable("setBodySleepingAllowed");
+#endif
+}
+
 void PhysXPhysicsWorld::removeBody(PhysicsBodyHandle bodyId) {
 #if defined(TREMOR_HAS_PHYSX_SDK) && __has_include(<PxConfig.h>) && __has_include(<PxPhysicsAPI.h>)
     if (!impl_) {
@@ -679,6 +760,7 @@ void PhysXPhysicsWorld::removeBody(PhysicsBodyHandle bodyId) {
         impl_->scene->removeActor(*found->second, false);
         found->second->release();
     }
+    impl_->defaultSleepThresholds.erase(found->first);
     impl_->actors.erase(found);
 #else
     (void)bodyId;

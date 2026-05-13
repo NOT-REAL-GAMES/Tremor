@@ -33,6 +33,7 @@
 #include "audio/taffy_polyphonic_processor.h"
 #include "renderer/taffy_integration.h"
 #include "vk_backend_controls.h"
+#include "tremor_profiler.h"
 #include "include/taffy_audio_tools.h"
 #include "include/taffy_streaming.h"
 #include "dmc_survivors.h"
@@ -353,6 +354,9 @@ public:
             return false;
         }
 
+        auto& profiler = tremor::trace::Profiler::instance();
+        profiler.beginFrame();
+
         static int loopCount = 0;
 
         // Calculate frame time
@@ -376,22 +380,25 @@ public:
             frameCount++;
         }
 
-        SDL_Event event{};
-        while (SDL_PollEvent(&event)) {
-            // Pass event to render backend for UI handling
-            if (rb) {
-                tremor::gfx::VulkanBackendControls::handleInput(
-                    *static_cast<tremor::gfx::VulkanBackend*>(rb.get()), event);
-            }
+        {
+            TREMOR_PROFILE_SCOPE("SDL Events");
+            SDL_Event event{};
+            while (SDL_PollEvent(&event)) {
+                // Pass event to render backend for UI handling
+                if (rb) {
+                    tremor::gfx::VulkanBackendControls::handleInput(
+                        *static_cast<tremor::gfx::VulkanBackend*>(rb.get()), event);
+                }
 
-            if (event.type == SDL_QUIT) {
-                SDL_DestroyWindow(window);
-                SDL_Quit();
-                return false;
-            }
-            
-            // Handle keyboard input for waveform switching
-            if (event.type == SDL_KEYDOWN) {
+                if (event.type == SDL_QUIT) {
+                    profiler.endFrame();
+                    SDL_DestroyWindow(window);
+                    SDL_Quit();
+                    return false;
+                }
+
+                // Handle keyboard input for waveform switching
+                if (event.type == SDL_KEYDOWN) {
                 /*switch (event.key.keysym.sym) {
                     case SDLK_1:
                         switchWaveform(0); // Sine
@@ -508,12 +515,14 @@ public:
                         Logger::get().info("🎵 Loading waveform {} (chunked TAF)...", currentWaveform);
                         switchWaveform(currentWaveform);
                         break;
-                }*/
+                    }*/
+                }
             }
         }
 
         // Handle game input
         if (game) {
+            TREMOR_PROFILE_SCOPE("Game Update");
             DMCSurvivors::InputCommand input{};
 
             // Get keyboard state for movement
@@ -551,7 +560,10 @@ public:
         }
 
         auto* vulkanBackend = static_cast<tremor::gfx::VulkanBackend*>(rb.get());
-        rb.get()->beginFrame();
+        {
+            TREMOR_PROFILE_SCOPE("Render BeginFrame");
+            rb.get()->beginFrame();
+        }
 
         if (renderCallCount < 5) {
             Logger::get().critical("beginFrame returned, about to render entities");
@@ -559,6 +571,7 @@ public:
 
         // Render game entities AFTER beginFrame but BEFORE endFrame
         if (game && vulkanBackend->isFrameReady()) {
+            TREMOR_PROFILE_SCOPE("Game Render");
             game->renderEntities(rb.get());
         }
 
@@ -567,6 +580,7 @@ public:
         }
 
         if (vulkanBackend->isFrameReady()) {
+            TREMOR_PROFILE_SCOPE("Render EndFrame");
             rb.get()->endFrame();
         }
         
@@ -574,6 +588,8 @@ public:
             Logger::get().critical("endFrame returned, render loop iteration {} complete", renderCallCount);
             renderCallCount++;
         }
+
+        profiler.endFrame();
 
         // Reset gate when counter expires
         static bool gateIsHigh = false;

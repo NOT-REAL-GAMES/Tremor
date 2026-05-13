@@ -119,6 +119,18 @@ public:
     virtual void addForce(PhysicsBodyHandle bodyId, const glm::vec3& force) = 0;
     void AddForce(PhysicsBodyHandle bodyId, const glm::vec3& force) { addForce(bodyId, force); }
 
+    virtual bool isBodySleeping(PhysicsBodyHandle bodyId) const = 0;
+    bool IsBodySleeping(PhysicsBodyHandle bodyId) const { return isBodySleeping(bodyId); }
+
+    virtual void wakeBody(PhysicsBodyHandle bodyId) = 0;
+    void WakeBody(PhysicsBodyHandle bodyId) { wakeBody(bodyId); }
+
+    virtual void sleepBody(PhysicsBodyHandle bodyId) = 0;
+    void SleepBody(PhysicsBodyHandle bodyId) { sleepBody(bodyId); }
+
+    virtual void setBodySleepingAllowed(PhysicsBodyHandle bodyId, bool allowed) = 0;
+    void SetBodySleepingAllowed(PhysicsBodyHandle bodyId, bool allowed) { setBodySleepingAllowed(bodyId, allowed); }
+
     virtual void removeBody(PhysicsBodyHandle bodyId) = 0;
     void RemoveBody(PhysicsBodyHandle bodyId) { removeBody(bodyId); }
 

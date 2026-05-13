@@ -6,11 +6,19 @@
 #include "ui_message_center.h"
 #include "ui_renderer.h"
 #include "logger.h"
+#include "tremor_profiler.h"
 
 #include <algorithm>
 #include <chrono>
+#include <format>
 
 namespace tremor::gfx {
+
+    namespace {
+        constexpr size_t kProfilerVisibleLines = 7;
+        constexpr float kProfilerLineHeight = 26.0f;
+        constexpr float kProfilerScale = 0.42f;
+    }
 
     void VulkanUiBridge::initializeRuntimeUi(VulkanBackend& backend) {
         if (!backend.m_uiRenderer) {
@@ -50,6 +58,7 @@ namespace tremor::gfx {
                 0.7f
             );
             initializeMessageOverlay(backend);
+            initializeProfilerOverlay(backend);
         }
     }
 
@@ -69,6 +78,24 @@ namespace tremor::gfx {
             backend.m_uiRenderer->setElementVisible(labelId, false);
             backend.m_uiMessageLabelIds.push_back(labelId);
         }
+    }
+
+    void VulkanUiBridge::initializeProfilerOverlay(VulkanBackend& backend) {
+        if (!backend.m_uiRenderer || !backend.m_profilerLabelIds.empty()) {
+            return;
+        }
+
+        for (size_t i = 0; i < kProfilerVisibleLines; ++i) {
+            const uint32_t labelId = backend.m_uiRenderer->addLabel(
+                "",
+                glm::vec2(24.0f, 24.0f + static_cast<float>(i) * kProfilerLineHeight),
+                i == 0 ? 0x80E0FFFF : 0xD0D0FFFF,
+                kProfilerScale
+            );
+            backend.m_profilerLabelIds.push_back(labelId);
+        }
+
+        setProfilerOverlayVisible(backend, backend.m_profilerOverlayVisible);
     }
 
     void VulkanUiBridge::updateMessageOverlay(VulkanBackend& backend) {
@@ -106,6 +133,62 @@ namespace tremor::gfx {
         }
     }
 
+    void VulkanUiBridge::updateProfilerOverlay(VulkanBackend& backend) {
+        if (!backend.m_uiRenderer || backend.m_profilerLabelIds.empty()) {
+            return;
+        }
+
+        if (!backend.m_profilerOverlayVisible) {
+            return;
+        }
+
+        const auto snapshot = tremor::trace::Profiler::instance().snapshot();
+        const double fps = snapshot.frameMs > 0.0 ? 1000.0 / snapshot.frameMs : 0.0;
+        std::vector<std::string> lines;
+        lines.reserve(kProfilerVisibleLines);
+        lines.push_back(std::format(
+            "CPU {:.2f} ms  {:.0f} FPS  avg {:.2f}  max {:.2f}",
+            snapshot.frameMs,
+            fps,
+            snapshot.avgFrameMs,
+            snapshot.maxFrameMs
+        ));
+
+        for (const auto& record : snapshot.topRecords) {
+            lines.push_back(std::format(
+                "{:<18} {:>5.2f} ms  avg {:>5.2f}",
+                record.name.substr(0, 18),
+                record.lastMs,
+                record.avgMs
+            ));
+            if (lines.size() >= kProfilerVisibleLines) {
+                break;
+            }
+        }
+
+        if (backend.vkSwapchain) {
+            const float width = static_cast<float>(backend.vkSwapchain->extent().width);
+            const float baseX = std::max(24.0f, width - 420.0f);
+            for (size_t i = 0; i < backend.m_profilerLabelIds.size(); ++i) {
+                backend.m_uiRenderer->setElementPosition(
+                    backend.m_profilerLabelIds[i],
+                    glm::vec2(baseX, 72.0f + static_cast<float>(i) * kProfilerLineHeight)
+                );
+            }
+        }
+
+        for (size_t i = 0; i < backend.m_profilerLabelIds.size(); ++i) {
+            const uint32_t labelId = backend.m_profilerLabelIds[i];
+            if (i < lines.size()) {
+                backend.m_uiRenderer->setElementText(labelId, lines[i]);
+                backend.m_uiRenderer->setElementVisible(labelId, true);
+            } else {
+                backend.m_uiRenderer->setElementText(labelId, "");
+                backend.m_uiRenderer->setElementVisible(labelId, false);
+            }
+        }
+    }
+
     void VulkanUiBridge::updateMeshShaderStatusLabel(VulkanBackend& backend, bool meshShadersActive) {
         if (!backend.m_uiRenderer || backend.m_meshShaderStatusLabelId == 0) {
             return;
@@ -124,6 +207,17 @@ namespace tremor::gfx {
             const float width = static_cast<float>(backend.vkSwapchain->extent().width);
             const float labelX = std::max(20.0f, width - 260.0f);
             backend.m_uiRenderer->setElementPosition(backend.m_meshShaderStatusLabelId, glm::vec2(labelX, 36.0f));
+        }
+    }
+
+    void VulkanUiBridge::setProfilerOverlayVisible(VulkanBackend& backend, bool visible) {
+        backend.m_profilerOverlayVisible = visible;
+        if (!backend.m_uiRenderer) {
+            return;
+        }
+
+        for (uint32_t labelId : backend.m_profilerLabelIds) {
+            backend.m_uiRenderer->setElementVisible(labelId, visible);
         }
     }
 

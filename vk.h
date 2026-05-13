@@ -821,6 +821,8 @@ namespace tremor::gfx {
         uint32_t m_exitButtonId = 0;
         uint32_t m_meshShaderStatusLabelId = 0;
         std::vector<uint32_t> m_uiMessageLabelIds;
+        std::vector<uint32_t> m_profilerLabelIds;
+        bool m_profilerOverlayVisible = true;
 
         // Camera
         Camera cam;

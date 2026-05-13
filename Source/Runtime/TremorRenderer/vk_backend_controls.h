@@ -14,6 +14,7 @@ namespace tremor::gfx {
         static void handleInput(VulkanBackend& backend, const SDL_Event& event);
         static void setMainMenuVisible(VulkanBackend& backend, bool visible);
         static void setSequencerCallback(VulkanBackend& backend, SequencerCallback callback);
+        static void setProfilerOverlayVisible(VulkanBackend& backend, bool visible);
     };
 
 } // namespace tremor::gfx

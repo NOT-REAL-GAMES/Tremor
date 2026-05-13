@@ -40,6 +40,10 @@ public:
     void setBodyVelocity(PhysicsBodyHandle bodyId, const glm::vec3& velocity) override;
     void addImpulse(PhysicsBodyHandle bodyId, const glm::vec3& impulse) override;
     void addForce(PhysicsBodyHandle bodyId, const glm::vec3& force) override;
+    bool isBodySleeping(PhysicsBodyHandle bodyId) const override;
+    void wakeBody(PhysicsBodyHandle bodyId) override;
+    void sleepBody(PhysicsBodyHandle bodyId) override;
+    void setBodySleepingAllowed(PhysicsBodyHandle bodyId, bool allowed) override;
     void removeBody(PhysicsBodyHandle bodyId) override;
 
 private:

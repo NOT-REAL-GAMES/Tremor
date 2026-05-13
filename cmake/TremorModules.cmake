@@ -8,7 +8,13 @@ set(TREMOR_APP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
 )
 
+set(TREMOR_FOUNDATION_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Foundation/TremorTrace/tremor_profiler.cpp
+)
+
 set(TREMOR_FOUNDATION_HEADERS
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source/Foundation/TremorTrace/tremor_profiler.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/tremor_profiler.h
     ${CMAKE_CURRENT_SOURCE_DIR}/tremor_platform.h
     ${CMAKE_CURRENT_SOURCE_DIR}/tremor_core.h
     ${CMAKE_CURRENT_SOURCE_DIR}/tremor_graphics_platform.h
@@ -176,6 +182,7 @@ set(TREMOR_EDITOR_HEADERS
 
 set(TREMOR_ALL_SOURCES
     ${TREMOR_APP_SOURCES}
+    ${TREMOR_FOUNDATION_SOURCES}
     ${TREMOR_RUNTIME_ASSET_SOURCES}
     ${TREMOR_RUNTIME_SCRIPTING_SOURCES}
     ${TREMOR_RUNTIME_PHYSICS_SOURCES}
@@ -203,6 +210,7 @@ function(tremor_assign_source_groups)
     source_group("Source\\Bootstrap" FILES ${TREMOR_APP_SOURCES})
 
     source_group("Source\\Foundation\\TremorCore" FILES
+        ${TREMOR_FOUNDATION_SOURCES}
         ${TREMOR_FOUNDATION_HEADERS})
 
     source_group("Source\\Runtime\\TremorAssets" FILES

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+
 #include "../../../tremor_core.h"
 #include "../../../tremor_graphics_platform.h"
 #include "../TremorRHI/vk_rhi.h"
@@ -406,13 +408,14 @@ struct MeshShaderPushConstants {
 class TaffyOverlayManager {
 public:
     static constexpr uint32_t OverlayFlag_DebugMeshlets = 1u << 0;
+    static constexpr uint32_t FramesInFlight = 2;
 
     struct MeshAssetGPUData {
         VkBuffer vertexStorageBuffer = VK_NULL_HANDLE;
         VkDeviceMemory vertexStorageMemory = VK_NULL_HANDLE;
-        VkBuffer instanceStorageBuffer = VK_NULL_HANDLE;
-        VkDeviceMemory instanceStorageMemory = VK_NULL_HANDLE;
-        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        std::array<VkBuffer, FramesInFlight> instanceStorageBuffers{};
+        std::array<VkDeviceMemory, FramesInFlight> instanceStorageMemories{};
+        std::array<VkDescriptorSet, FramesInFlight> descriptorSets{};
         uint32_t vertexCount = 0;
         uint32_t primitiveCount = 0;
         uint32_t vertexStrideFloats = 0;
@@ -422,7 +425,7 @@ public:
         uint32_t meshletDescOffset = 0;
         uint32_t meshletVertexIndexOffset = 0;
         uint32_t meshletPrimitiveIndexOffset = 0;
-        uint32_t instanceCapacity = 0;
+        std::array<uint32_t, FramesInFlight> instanceCapacities{};
         bool usesMeshShader = false;
     };
 
@@ -467,8 +470,21 @@ public:
     VkDescriptorPool getDescriptorPool() const { return descriptorPool; }
     VkDescriptorSetLayout getMeshShaderDescriptorSetLayout() const { return meshShaderDescSetLayout; }
     VkExtent2D getSwapchainExtent() const { return swapchain_extent_; }
+    void setActiveFrameIndex(uint32_t frameIndex) { activeFrameIndex_ = frameIndex % FramesInFlight; }
 
 private:
+    struct RenderStateCache {
+        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        VkBuffer indexBuffer = VK_NULL_HANDLE;
+        VkDeviceSize indexOffset = 0;
+        VkExtent2D viewportExtent{ 0, 0 };
+        bool viewportBound = false;
+        bool scissorBound = false;
+    };
+
     struct PipelineInfo {
         VkPipeline pipeline = VK_NULL_HANDLE;
         VkPipelineLayout layout = VK_NULL_HANDLE;
@@ -489,6 +505,7 @@ private:
     VkSampleCountFlagBits sample_count_;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSetLayout meshShaderDescSetLayout = VK_NULL_HANDLE;
+    uint32_t activeFrameIndex_ = 0;
 
     std::unordered_map<std::string, std::unique_ptr<Taffy::Asset>> loaded_assets_;
     std::unordered_map<std::string, MeshAssetGPUData> gpu_data_cache_;
@@ -497,6 +514,7 @@ private:
     std::unordered_set<std::string> failed_asset_loads_;
     std::unordered_map<std::string, std::string> applied_overlays_;
     uint32_t meshShaderOverlayFlags_ = 0;
+    RenderStateCache renderStateCache_{};
 
     bool ensureAssetLoaded(const std::string& asset_path);
     PipelineInfo* getOrCreatePipeline(const std::string& asset_path);

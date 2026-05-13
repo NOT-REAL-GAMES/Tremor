@@ -1093,11 +1093,10 @@ namespace tremor::gfx {
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
         
-        // Calculate total vertex count
-        uint32_t vertexCount = 0;
-        for (const auto& text : textInstances_) {
-            vertexCount += text.text.length() * 6; // 6 vertices per character
-        }
+        // Draw only the geometry we actually built. This matters for strings that
+        // contain glyphs missing from the font atlas, since rebuildGeometryCache()
+        // skips those characters entirely.
+        const uint32_t vertexCount = static_cast<uint32_t>(geometryCache_.vertices.size());
         
         // Debug vertex count
         if (vertexCount == 0) {

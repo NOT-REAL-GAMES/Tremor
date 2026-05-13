@@ -21,13 +21,16 @@
 #include "script_render_system.h"
 #include <random>
 #include <cmath>
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <deque>
 #include <mutex>
 #include <vector>
 #include <utility>
+#include <filesystem>
 #include "logger.h"
+#include "tremor_profiler.h"
 
 namespace DMCSurvivors {
 
@@ -291,6 +294,9 @@ private:
     tremor::physics::PhysicsBackendKind physicsBackendKind = tremor::physics::PhysicsBackendKind::Jolt;
     std::mutex physicsContactEventsMutex;
     std::vector<tremor::physics::PhysicsContactEvent> pendingPhysicsContactEvents;
+    static constexpr float EnemyPhysicsPromoteDistance = 18.0f;
+    static constexpr float EnemyPhysicsDemoteDistance = 24.0f;
+    static constexpr size_t MaxActiveEnemyPhysicsBodies = 24;
 
 public:
     explicit Game(
@@ -313,16 +319,25 @@ public:
     }
 
     void update(float deltaTime) {
+        TREMOR_PROFILE_SCOPE("DMC Update");
         gameTime += deltaTime;
 
         // Update physics world
         if (physicsWorld) {
+            TREMOR_PROFILE_SCOPE("Physics Step");
             physicsWorld->Update(deltaTime);
         }
 
-        flushPendingPhysicsContactEvents();
-        world.progress(deltaTime);
+        {
+            TREMOR_PROFILE_SCOPE("Physics Contacts");
+            flushPendingPhysicsContactEvents();
+        }
+        {
+            TREMOR_PROFILE_SCOPE("World Progress");
+            world.progress(deltaTime);
+        }
         if (interpreterHost) {
+            TREMOR_PROFILE_SCOPE("Script Update");
             interpreterHost->update(deltaTime);
         }
 
@@ -384,8 +399,12 @@ public:
 
     // Render all entities - called from main loop
     void renderEntities(void* renderBackend) {
-        if (tremor::render::renderScriptFrame(renderRegistry, renderCamera, world, renderBackend)) {
-            return;
+        TREMOR_PROFILE_SCOPE("DMC Render");
+        {
+            TREMOR_PROFILE_SCOPE("Script Render Hook");
+            if (tremor::render::renderScriptFrame(renderRegistry, renderCamera, world, renderBackend)) {
+                return;
+            }
         }
 
         // Cast to VulkanBackend for mesh rendering
@@ -440,43 +459,53 @@ public:
                    cameraPos.x, cameraPos.y, cameraPos.z);*/
         }
 
+        static const std::string cubeCrowdAssetPath = "assets/cube.taf";
+        static const std::string sphereCrowdAssetPath = "assets/sphere.taf";
+
         std::vector<glm::mat4> cubeModels;
         std::vector<glm::mat4> sphereModels;
 
-        // Render player entities
-        world.each([&](flecs::entity, const Position& pos, const Player&, const MeshRenderer&) {
-            glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
-            cubeModels.push_back(
-                glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(1.0f, 2.0f, 1.0f))
-            );
-        });
+        {
+            TREMOR_PROFILE_SCOPE("Crowd Gather");
 
-        // Render enemy entities
-        world.each([&](flecs::entity, const Position& pos, const Enemy&, const MeshRenderer&) {
-            glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
-            sphereModels.push_back(
-                glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(1.2f))
-            );
-        });
+            // Render player entities
+            world.each([&](flecs::entity, const Position& pos, const Player&, const MeshRenderer&) {
+                glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
+                cubeModels.push_back(
+                    glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(1.0f, 2.0f, 1.0f))
+                );
+            });
 
-        // Render projectiles
-        world.each([&](flecs::entity, const Position& pos, const Projectile&, const MeshRenderer&) {
-            glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
-            cubeModels.push_back(
-                glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(0.2f))
-            );
-        });
+            // Render enemy entities
+            world.each([&](flecs::entity, const Position& pos, const Enemy&, const MeshRenderer&) {
+                glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
+                sphereModels.push_back(
+                    glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(1.2f))
+                );
+            });
 
-        // Render XP orbs
-        world.each([&](flecs::entity, const Position& pos, const RedOrb&, const MeshRenderer&) {
-            glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
-            glm::mat4 transform = glm::translate(glm::mat4(1.0f), worldPos);
-            transform = glm::translate(transform, glm::vec3(0, 0.5f, 0));
-            cubeModels.push_back(glm::scale(transform, glm::vec3(0.4f)));
-        });
+            // Render projectiles
+            world.each([&](flecs::entity, const Position& pos, const Projectile&, const MeshRenderer&) {
+                glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
+                cubeModels.push_back(
+                    glm::scale(glm::translate(glm::mat4(1.0f), worldPos), glm::vec3(0.2f))
+                );
+            });
 
-        overlayManager->renderMeshAssetBatch("assets/cube.taf", cmd, viewProj, cubeModels);
-        overlayManager->renderMeshAssetBatch("assets/sphere.taf", cmd, viewProj, sphereModels);
+            // Render XP orbs
+            world.each([&](flecs::entity, const Position& pos, const RedOrb&, const MeshRenderer&) {
+                glm::vec3 worldPos = pos.quantized.relativeTo(cameraPos);
+                glm::mat4 transform = glm::translate(glm::mat4(1.0f), worldPos);
+                transform = glm::translate(transform, glm::vec3(0, 0.5f, 0));
+                cubeModels.push_back(glm::scale(transform, glm::vec3(0.4f)));
+            });
+        }
+
+        {
+            TREMOR_PROFILE_SCOPE("Crowd Draw");
+            overlayManager->renderMeshAssetBatch(cubeCrowdAssetPath, cmd, viewProj, cubeModels);
+            overlayManager->renderMeshAssetBatch(sphereCrowdAssetPath, cmd, viewProj, sphereModels);
+        }
     }
 
   private:
@@ -548,6 +577,51 @@ public:
         }
 
         physicsWorld->SetBodyPosition(physicsBody->bodyId, position.getFloat());
+    }
+
+    BodyID createEnemyPhysicsBodyAt(const glm::vec3& position, const glm::vec3& velocity = glm::vec3(0.0f)) {
+        if (!physicsWorld) {
+            return {};
+        }
+
+        BodyID enemyPhysicsBody = physicsWorld->CreateDynamicBody(
+            position,
+            0.4f,
+            1.6f,
+            DMCSurvivors::Layers::ENEMY
+        );
+
+        if (!enemyPhysicsBody.IsInvalid()) {
+            physicsWorld->SetBodySleepingAllowed(enemyPhysicsBody, true);
+            if (glm::dot(velocity, velocity) > 0.0001f) {
+                physicsWorld->SetBodyVelocity(enemyPhysicsBody, velocity);
+            }
+        }
+
+        return enemyPhysicsBody;
+    }
+
+    void promoteEnemyToPhysics(flecs::entity enemy, const Position& position, const Velocity& velocity) {
+        if (!physicsWorld || enemy.has<PhysicsBody>()) {
+            return;
+        }
+
+        const BodyID bodyId = createEnemyPhysicsBodyAt(position.getFloat(), velocity.value);
+        if (!bodyId.IsInvalid()) {
+            enemy.set<PhysicsBody>({bodyId, false});
+        }
+    }
+
+    void demoteEnemyFromPhysics(flecs::entity enemy, Position& position, Velocity& velocity, const PhysicsBody& physicsBody) {
+        if (!physicsWorld || physicsBody.bodyId.IsInvalid()) {
+            enemy.remove<PhysicsBody>();
+            return;
+        }
+
+        position.setFloat(physicsWorld->GetBodyPosition(physicsBody.bodyId));
+        velocity.value = physicsWorld->GetBodyVelocity(physicsBody.bodyId);
+        physicsWorld->RemoveBody(physicsBody.bodyId);
+        enemy.remove<PhysicsBody>();
     }
 
     void resolveCharacterOverlap(flecs::entity e1, flecs::entity e2) {
@@ -944,6 +1018,18 @@ action command emit_ui_message wave advanced
         world.system<const Velocity, const PhysicsBody>("PhysicsMovementSystem")
             .each([this](flecs::entity e, const Velocity& vel, const PhysicsBody& physicsBody) {
                 if (physicsWorld && !physicsBody.bodyId.IsInvalid()) {
+                    const glm::vec2 horizontalVelocity(vel.value.x, vel.value.z);
+                    const bool hasHorizontalMotion = glm::dot(horizontalVelocity, horizontalVelocity) > 0.0001f;
+                    const bool isSleeping = physicsWorld->IsBodySleeping(physicsBody.bodyId);
+
+                    if (!hasHorizontalMotion && isSleeping) {
+                        return;
+                    }
+
+                    if (hasHorizontalMotion && isSleeping) {
+                        physicsWorld->WakeBody(physicsBody.bodyId);
+                    }
+
                     // Get current physics velocity
                     glm::vec3 currentVel = physicsWorld->GetBodyVelocity(physicsBody.bodyId);
 
@@ -954,6 +1040,21 @@ action command emit_ui_message wave advanced
 
                     physicsWorld->SetBodyVelocity(physicsBody.bodyId, newVel);
                 }
+            });
+
+        world.system<Position, const Velocity>("NonPhysicsMovementSystem")
+            .without<PhysicsBody>()
+            .each([](flecs::entity e, Position& pos, const Velocity& vel) {
+                const float dt = e.world().delta_time();
+                if (dt <= 0.0f) {
+                    return;
+                }
+
+                if (glm::dot(vel.value, vel.value) <= 0.0001f) {
+                    return;
+                }
+
+                pos.setFloat(pos.getFloat() + vel.value * dt);
             });
 
         // Physics sync system - sync ECS positions FROM physics bodies AFTER physics update
@@ -1061,7 +1162,29 @@ action command emit_ui_message wave advanced
 
         // Enemy AI system
         world.system<Position, Velocity, const EnemyAI, const Enemy>("EnemyAISystem")
-            .each([](flecs::entity e, Position& pos, Velocity& vel, const EnemyAI& ai, const Enemy&) {
+            .each([this](flecs::entity e, Position& pos, Velocity& vel, const EnemyAI& ai, const Enemy&) {
+                const PhysicsBody* physicsBody = e.get<PhysicsBody>();
+                auto setEnemySleepState = [&](bool shouldSleep) {
+                    if (!physicsWorld || physicsBody == nullptr || physicsBody->bodyId.IsInvalid()) {
+                        return;
+                    }
+
+                    physicsWorld->SetBodySleepingAllowed(physicsBody->bodyId, true);
+                    const bool isSleeping = physicsWorld->IsBodySleeping(physicsBody->bodyId);
+                    if (shouldSleep) {
+                        if (!isSleeping) {
+                            physicsWorld->SleepBody(physicsBody->bodyId);
+                        }
+                    } else if (isSleeping) {
+                        physicsWorld->WakeBody(physicsBody->bodyId);
+                    }
+                };
+
+                if (const LaunchState* launch = e.get<LaunchState>(); launch && launch->isLaunched) {
+                    setEnemySleepState(false);
+                    return;
+                }
+
                 if (ai.stunDuration > 0) {
                     vel.value = glm::vec3(0.0f);
                     return;
@@ -1072,6 +1195,15 @@ action command emit_ui_message wave advanced
                     if (targetPos) {
                         glm::vec3 direction = targetPos->getFloat() - pos.getFloat();
                         float distance = glm::length(direction);
+                        const float sleepDistance = ai.aggroRange + 5.0f;
+
+                        if (distance >= sleepDistance) {
+                            vel.value = glm::vec3(0.0f);
+                            setEnemySleepState(true);
+                            return;
+                        }
+
+                        setEnemySleepState(false);
 
                         if (distance > ai.attackRange && distance < ai.aggroRange) {
                             direction.y = 0; // Keep on ground
@@ -1080,7 +1212,105 @@ action command emit_ui_message wave advanced
                         } else if (distance <= ai.attackRange) {
                             vel.value = glm::vec3(0.0f);
                             // Attack logic would go here
+                        } else {
+                            vel.value = glm::vec3(0.0f);
                         }
+                    } else {
+                        vel.value = glm::vec3(0.0f);
+                        setEnemySleepState(true);
+                    }
+                } else {
+                    vel.value = glm::vec3(0.0f);
+                    setEnemySleepState(true);
+                }
+            });
+
+        world.system<>("EnemyPhysicsLODSystem")
+            .kind(flecs::OnUpdate)
+            .run([this](flecs::iter&) {
+                if (!physicsWorld || !player.is_alive()) {
+                    return;
+                }
+
+                const Position* playerPos = player.get<Position>();
+                if (playerPos == nullptr) {
+                    return;
+                }
+
+                struct EnemyPhysicsCandidate {
+                    flecs::entity entity;
+                    float distanceSq = 0.0f;
+                    bool hasPhysics = false;
+                    bool launched = false;
+                    bool eligible = false;
+                };
+
+                const glm::vec3 playerPosition = playerPos->getFloat();
+                const float promoteDistanceSq = EnemyPhysicsPromoteDistance * EnemyPhysicsPromoteDistance;
+                const float demoteDistanceSq = EnemyPhysicsDemoteDistance * EnemyPhysicsDemoteDistance;
+
+                std::vector<EnemyPhysicsCandidate> candidates;
+                candidates.reserve(128);
+
+                world.each([&](flecs::entity enemy, Position& pos, Velocity& vel, const Enemy&) {
+                    const glm::vec3 delta = pos.getFloat() - playerPosition;
+                    const float distanceSq = glm::dot(delta, delta);
+                    const PhysicsBody* physicsBody = enemy.get<PhysicsBody>();
+                    const LaunchState* launch = enemy.get<LaunchState>();
+                    const bool launched = launch != nullptr && launch->isLaunched;
+                    const bool hasPhysics = physicsBody != nullptr && !physicsBody->bodyId.IsInvalid();
+
+                    const bool eligible = launched ||
+                        (!hasPhysics && distanceSq <= promoteDistanceSq) ||
+                        (hasPhysics && distanceSq <= demoteDistanceSq);
+
+                    candidates.push_back({enemy, distanceSq, hasPhysics, launched, eligible});
+                });
+
+                std::sort(candidates.begin(), candidates.end(), [](const EnemyPhysicsCandidate& left, const EnemyPhysicsCandidate& right) {
+                    if (left.launched != right.launched) {
+                        return left.launched > right.launched;
+                    }
+                    return left.distanceSq < right.distanceSq;
+                });
+
+                std::vector<uint64_t> selectedEnemies;
+                selectedEnemies.reserve(MaxActiveEnemyPhysicsBodies);
+                for (const auto& candidate : candidates) {
+                    if (!candidate.eligible) {
+                        continue;
+                    }
+
+                    if (selectedEnemies.size() >= MaxActiveEnemyPhysicsBodies) {
+                        break;
+                    }
+
+                    selectedEnemies.push_back(candidate.entity.id());
+                }
+
+                auto isSelected = [&selectedEnemies](flecs::entity enemy) {
+                    return std::find(selectedEnemies.begin(), selectedEnemies.end(), enemy.id()) != selectedEnemies.end();
+                };
+
+                for (const auto& candidate : candidates) {
+                    Position* pos = candidate.entity.get_mut<Position>();
+                    Velocity* vel = candidate.entity.get_mut<Velocity>();
+                    if (pos == nullptr || vel == nullptr) {
+                        continue;
+                    }
+
+                    const PhysicsBody* physicsBody = candidate.entity.get<PhysicsBody>();
+                    if (isSelected(candidate.entity)) {
+                        if (physicsBody == nullptr || physicsBody->bodyId.IsInvalid()) {
+                            promoteEnemyToPhysics(candidate.entity, *pos, *vel);
+                        }
+                    } else if (physicsBody != nullptr && !physicsBody->bodyId.IsInvalid()) {
+                        const LaunchState* launch = candidate.entity.get<LaunchState>();
+                        if (launch != nullptr && launch->isLaunched) {
+                            continue;
+                        }
+
+                        demoteEnemyFromPhysics(candidate.entity, *pos, *vel, *physicsBody);
                     }
                 }
             });
@@ -1232,6 +1462,7 @@ action command emit_ui_message wave advanced
                 1.8f,   // height (humanoid)
                 DMCSurvivors::Layers::PLAYER
             );
+            physicsWorld->SetBodySleepingAllowed(playerPhysicsBody, false);
         }
 
         player = world.entity("Player")
@@ -1281,18 +1512,17 @@ action command emit_ui_message wave advanced
         float healthMult = intensity;
         float damageMult = 1.0f + wave * 0.1f;
 
-        // Create physics body for enemy
         BodyID enemyPhysicsBody;
-        if (physicsWorld) {
-            enemyPhysicsBody = physicsWorld->CreateDynamicBody(
-                spawnPos,
-                0.4f,   // radius
-                1.6f,   // height (slightly smaller than player)
-                DMCSurvivors::Layers::ENEMY
-            );
+        if (playerPos) {
+            const glm::vec3 toPlayer = spawnPos - playerPos->getFloat();
+            if (glm::dot(toPlayer, toPlayer) <= EnemyPhysicsPromoteDistance * EnemyPhysicsPromoteDistance) {
+                enemyPhysicsBody = createEnemyPhysicsBodyAt(spawnPos);
+            }
+        } else {
+            enemyPhysicsBody = createEnemyPhysicsBodyAt(spawnPos);
         }
 
-        auto enemy = world.entity()
+        auto enemyBuilder = world.entity()
             .set<Position>({spawnPos})
             .set<Velocity>({glm::vec3(0.0f)})
             .set<Rotation>({glm::quat(1.0f, 0.0f, 0.0f, 0.0f)})
@@ -1300,10 +1530,15 @@ action command emit_ui_message wave advanced
             .set<CollisionRadius>({0.4f})
             .set<CombatStats>({10.0f * damageMult, 0.8f, 0.05f, 1.5f})
             .set<LaunchState>({})
-            .set<PhysicsBody>({enemyPhysicsBody, false})
             .set<Enemy>({})
             .set<EnemyAI>({player, 30.0f, 2.0f})
             .set<MeshRenderer>({1, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f)});
+
+        if (!enemyPhysicsBody.IsInvalid()) {
+            enemyBuilder.set<PhysicsBody>({enemyPhysicsBody, false});
+        }
+
+        auto enemy = enemyBuilder;
 
         if (interpreterHost) {
             interpreterHost->emitEvent({

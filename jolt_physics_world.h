@@ -7,6 +7,7 @@
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyActivationListener.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
 #include <Jolt/Physics/Collision/ObjectLayer.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
@@ -124,6 +125,10 @@ public:
     void setBodyVelocity(PhysicsBodyHandle bodyId, const glm::vec3& velocity) override;
     void addImpulse(PhysicsBodyHandle bodyId, const glm::vec3& impulse) override;
     void addForce(PhysicsBodyHandle bodyId, const glm::vec3& force) override;
+    bool isBodySleeping(PhysicsBodyHandle bodyId) const override;
+    void wakeBody(PhysicsBodyHandle bodyId) override;
+    void sleepBody(PhysicsBodyHandle bodyId) override;
+    void setBodySleepingAllowed(PhysicsBodyHandle bodyId, bool allowed) override;
     void removeBody(PhysicsBodyHandle bodyId) override;
 
     JPH::PhysicsSystem* getSystem() { return physicsSystem_.get(); }

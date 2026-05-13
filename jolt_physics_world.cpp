@@ -324,6 +324,71 @@ void JoltPhysicsWorld::addForce(PhysicsBodyHandle bodyId, const glm::vec3& force
     physicsSystem_->GetBodyInterface().AddForce(toBodyId(bodyId), toJoltVector(force));
 }
 
+bool JoltPhysicsWorld::isBodySleeping(PhysicsBodyHandle bodyId) const {
+    if (!physicsSystem_) {
+        return false;
+    }
+
+    const JPH::BodyID joltBodyId = toBodyId(bodyId);
+    if (joltBodyId.IsInvalid()) {
+        return false;
+    }
+
+    return !physicsSystem_->GetBodyInterface().IsActive(joltBodyId);
+}
+
+void JoltPhysicsWorld::wakeBody(PhysicsBodyHandle bodyId) {
+    if (!physicsSystem_) {
+        return;
+    }
+
+    const JPH::BodyID joltBodyId = toBodyId(bodyId);
+    if (joltBodyId.IsInvalid()) {
+        return;
+    }
+
+    physicsSystem_->GetBodyInterface().ActivateBody(joltBodyId);
+}
+
+void JoltPhysicsWorld::sleepBody(PhysicsBodyHandle bodyId) {
+    if (!physicsSystem_) {
+        return;
+    }
+
+    const JPH::BodyID joltBodyId = toBodyId(bodyId);
+    if (joltBodyId.IsInvalid()) {
+        return;
+    }
+
+    physicsSystem_->GetBodyInterface().DeactivateBody(joltBodyId);
+}
+
+void JoltPhysicsWorld::setBodySleepingAllowed(PhysicsBodyHandle bodyId, bool allowed) {
+    if (!physicsSystem_) {
+        return;
+    }
+
+    const JPH::BodyID joltBodyId = toBodyId(bodyId);
+    if (joltBodyId.IsInvalid()) {
+        return;
+    }
+
+    JPH::BodyLockWrite lock(physicsSystem_->GetBodyLockInterface(), joltBodyId);
+    if (!lock.Succeeded()) {
+        return;
+    }
+
+    JPH::Body& body = lock.GetBody();
+    if (body.IsStatic()) {
+        return;
+    }
+
+    body.SetAllowSleeping(allowed);
+    if (!allowed) {
+        physicsSystem_->GetBodyInterface().ActivateBody(joltBodyId);
+    }
+}
+
 void JoltPhysicsWorld::removeBody(PhysicsBodyHandle bodyId) {
     const JPH::BodyID joltBodyId = toBodyId(bodyId);
     if (!physicsSystem_ || joltBodyId.IsInvalid()) {

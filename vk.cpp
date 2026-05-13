@@ -11,6 +11,7 @@
 #include "Source/Runtime/TremorRenderer/sdf_text_renderer.h"
 #include "Source/Runtime/TremorRenderer/ui_renderer.h"
 #include "Source/Runtime/TremorRenderer/sequencer_ui.h"
+#include "tremor_profiler.h"
 #include "include/tools.h"
 #include "include/asset.h"
 #include "overlay.h"
@@ -284,6 +285,7 @@ namespace tremor::gfx {
             VkCommandBuffer cmd,
             const glm::mat4& viewProj,
             const std::vector<glm::mat4>& models) {
+            TREMOR_PROFILE_SCOPE("Overlay Batch");
             if (models.empty()) {
                 return;
             }
@@ -310,7 +312,8 @@ namespace tremor::gfx {
                 return;
             }
 
-            if (gpuData.instanceStorageMemory == VK_NULL_HANDLE) {
+            const uint32_t frameIndex = activeFrameIndex_;
+            if (gpuData.instanceStorageMemories[frameIndex] == VK_NULL_HANDLE) {
                 std::cerr << "Instance storage memory was null for batch: " << asset_path << std::endl;
                 return;
             }
@@ -318,14 +321,14 @@ namespace tremor::gfx {
             void* mappedInstances = nullptr;
             vkMapMemory(
                 device_,
-                gpuData.instanceStorageMemory,
+                gpuData.instanceStorageMemories[frameIndex],
                 0,
                 sizeof(glm::mat4) * models.size(),
                 0,
                 &mappedInstances
             );
             std::memcpy(mappedInstances, models.data(), sizeof(glm::mat4) * models.size());
-            vkUnmapMemory(device_, gpuData.instanceStorageMemory);
+            vkUnmapMemory(device_, gpuData.instanceStorageMemories[frameIndex]);
 
             renderMeshAssetInternal(
                 cmd,
@@ -952,34 +955,62 @@ namespace tremor::gfx {
         void TaffyOverlayManager::renderMeshAssetInternal(VkCommandBuffer cmd, VkPipeline meshPipeline,
             VkPipelineLayout pipelineLayout, const MeshAssetGPUData& gpuData, const glm::mat4& viewProj,
             const glm::mat4& model, uint32_t instanceCount) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
+            if (renderStateCache_.commandBuffer != cmd) {
+                renderStateCache_.commandBuffer = cmd;
+                renderStateCache_.pipeline = VK_NULL_HANDLE;
+                renderStateCache_.pipelineLayout = VK_NULL_HANDLE;
+                renderStateCache_.descriptorSet = VK_NULL_HANDLE;
+                renderStateCache_.indexBuffer = VK_NULL_HANDLE;
+                renderStateCache_.indexOffset = 0;
+                renderStateCache_.viewportExtent = { 0, 0 };
+                renderStateCache_.viewportBound = false;
+                renderStateCache_.scissorBound = false;
+            }
+
+            if (renderStateCache_.pipeline != meshPipeline) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline);
+                renderStateCache_.pipeline = meshPipeline;
+            }
 
             // Set viewport
-            VkViewport viewport{};
-            viewport.x = 0.0f;
-            viewport.y = 0.0f;
-            viewport.width = static_cast<float>(swapchain_extent_.width);
-            viewport.height = static_cast<float>(swapchain_extent_.height);
-            viewport.minDepth = 0.0f;
-            viewport.maxDepth = 1.0f;
-            //Logger::get().info("Viewport: {}x{} at ({}, {})", viewport.width, viewport.height, viewport.x, viewport.y);
-            //Logger::get().info("Depth range: {} to {}", viewport.minDepth, viewport.maxDepth);
-            //Logger::get().info("Swapchain extent: {}x{}", swapchain_extent_.width, swapchain_extent_.height);
-            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            if (!renderStateCache_.viewportBound || renderStateCache_.viewportExtent.width != swapchain_extent_.width ||
+                renderStateCache_.viewportExtent.height != swapchain_extent_.height) {
+                VkViewport viewport{};
+                viewport.x = 0.0f;
+                viewport.y = 0.0f;
+                viewport.width = static_cast<float>(swapchain_extent_.width);
+                viewport.height = static_cast<float>(swapchain_extent_.height);
+                viewport.minDepth = 0.0f;
+                viewport.maxDepth = 1.0f;
+                vkCmdSetViewport(cmd, 0, 1, &viewport);
+                renderStateCache_.viewportBound = true;
+                renderStateCache_.viewportExtent = swapchain_extent_;
+            }
 
             // Set scissor
-            VkRect2D scissor{};
-            scissor.offset = { 0, 0 };
-            scissor.extent = swapchain_extent_;
-            vkCmdSetScissor(cmd, 0, 1, &scissor);
+            if (!renderStateCache_.scissorBound || renderStateCache_.viewportExtent.width != swapchain_extent_.width ||
+                renderStateCache_.viewportExtent.height != swapchain_extent_.height) {
+                VkRect2D scissor{};
+                scissor.offset = { 0, 0 };
+                scissor.extent = swapchain_extent_;
+                vkCmdSetScissor(cmd, 0, 1, &scissor);
+                renderStateCache_.scissorBound = true;
+                renderStateCache_.viewportExtent = swapchain_extent_;
+            }
 
             // Bind descriptor set with vertex storage buffer
-            if (gpuData.descriptorSet == VK_NULL_HANDLE) {
+            const VkDescriptorSet descriptorSet = gpuData.descriptorSets[activeFrameIndex_];
+            if (descriptorSet == VK_NULL_HANDLE) {
                 //Logger::get().error("Descriptor set is null!");
                 return;
             }
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                pipelineLayout, 0, 1, &gpuData.descriptorSet, 0, nullptr);
+            if (renderStateCache_.descriptorSet != descriptorSet ||
+                renderStateCache_.pipelineLayout != pipelineLayout) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+                renderStateCache_.descriptorSet = descriptorSet;
+                renderStateCache_.pipelineLayout = pipelineLayout;
+            }
 
             MeshShaderPushConstants pushConstants{};
             pushConstants.mvp = viewProj * model;
@@ -1030,7 +1061,12 @@ namespace tremor::gfx {
                 &pushConstants);
 
             if (gpuData.indexCount > 0) {
-                vkCmdBindIndexBuffer(cmd, gpuData.vertexStorageBuffer, gpuData.indexOffset, VK_INDEX_TYPE_UINT32);
+                if (renderStateCache_.indexBuffer != gpuData.vertexStorageBuffer ||
+                    renderStateCache_.indexOffset != gpuData.indexOffset) {
+                    vkCmdBindIndexBuffer(cmd, gpuData.vertexStorageBuffer, gpuData.indexOffset, VK_INDEX_TYPE_UINT32);
+                    renderStateCache_.indexBuffer = gpuData.vertexStorageBuffer;
+                    renderStateCache_.indexOffset = gpuData.indexOffset;
+                }
                 vkCmdDrawIndexed(cmd, gpuData.indexCount, instanceCount > 0 ? instanceCount : 1u, 0, 0, 0);
             }
             else {
@@ -1040,17 +1076,19 @@ namespace tremor::gfx {
 
         bool TaffyOverlayManager::ensureInstanceBufferCapacity(MeshAssetGPUData& gpuData, uint32_t instanceCount) {
             const uint32_t requiredCapacity = std::max(1u, instanceCount);
-            if (gpuData.instanceStorageBuffer != VK_NULL_HANDLE && gpuData.instanceCapacity >= requiredCapacity) {
+            const uint32_t frameIndex = activeFrameIndex_;
+            if (gpuData.instanceStorageBuffers[frameIndex] != VK_NULL_HANDLE &&
+                gpuData.instanceCapacities[frameIndex] >= requiredCapacity) {
                 return true;
             }
 
-            if (gpuData.instanceStorageBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(device_, gpuData.instanceStorageBuffer, nullptr);
-                gpuData.instanceStorageBuffer = VK_NULL_HANDLE;
+            if (gpuData.instanceStorageBuffers[frameIndex] != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device_, gpuData.instanceStorageBuffers[frameIndex], nullptr);
+                gpuData.instanceStorageBuffers[frameIndex] = VK_NULL_HANDLE;
             }
-            if (gpuData.instanceStorageMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(device_, gpuData.instanceStorageMemory, nullptr);
-                gpuData.instanceStorageMemory = VK_NULL_HANDLE;
+            if (gpuData.instanceStorageMemories[frameIndex] != VK_NULL_HANDLE) {
+                vkFreeMemory(device_, gpuData.instanceStorageMemories[frameIndex], nullptr);
+                gpuData.instanceStorageMemories[frameIndex] = VK_NULL_HANDLE;
             }
 
             VkBufferCreateInfo bufferInfo{};
@@ -1059,13 +1097,13 @@ namespace tremor::gfx {
             bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
             bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-            if (vkCreateBuffer(device_, &bufferInfo, nullptr, &gpuData.instanceStorageBuffer) != VK_SUCCESS) {
+            if (vkCreateBuffer(device_, &bufferInfo, nullptr, &gpuData.instanceStorageBuffers[frameIndex]) != VK_SUCCESS) {
                 std::cerr << "❌ Failed to create instance storage buffer!" << std::endl;
                 return false;
             }
 
             VkMemoryRequirements memRequirements;
-            vkGetBufferMemoryRequirements(device_, gpuData.instanceStorageBuffer, &memRequirements);
+            vkGetBufferMemoryRequirements(device_, gpuData.instanceStorageBuffers[frameIndex], &memRequirements);
 
             VkMemoryAllocateInfo allocInfo{};
             allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -1075,20 +1113,20 @@ namespace tremor::gfx {
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
             );
 
-            if (vkAllocateMemory(device_, &allocInfo, nullptr, &gpuData.instanceStorageMemory) != VK_SUCCESS) {
+            if (vkAllocateMemory(device_, &allocInfo, nullptr, &gpuData.instanceStorageMemories[frameIndex]) != VK_SUCCESS) {
                 std::cerr << "❌ Failed to allocate instance buffer memory!" << std::endl;
-                vkDestroyBuffer(device_, gpuData.instanceStorageBuffer, nullptr);
-                gpuData.instanceStorageBuffer = VK_NULL_HANDLE;
+                vkDestroyBuffer(device_, gpuData.instanceStorageBuffers[frameIndex], nullptr);
+                gpuData.instanceStorageBuffers[frameIndex] = VK_NULL_HANDLE;
                 return false;
             }
 
-            vkBindBufferMemory(device_, gpuData.instanceStorageBuffer, gpuData.instanceStorageMemory, 0);
+            vkBindBufferMemory(device_, gpuData.instanceStorageBuffers[frameIndex], gpuData.instanceStorageMemories[frameIndex], 0);
 
             const glm::mat4 identity(1.0f);
             void* mappedData = nullptr;
-            vkMapMemory(device_, gpuData.instanceStorageMemory, 0, sizeof(glm::mat4), 0, &mappedData);
+            vkMapMemory(device_, gpuData.instanceStorageMemories[frameIndex], 0, sizeof(glm::mat4), 0, &mappedData);
             std::memcpy(mappedData, &identity, sizeof(glm::mat4));
-            vkUnmapMemory(device_, gpuData.instanceStorageMemory);
+            vkUnmapMemory(device_, gpuData.instanceStorageMemories[frameIndex]);
 
             VkDescriptorBufferInfo vertexBufferDescInfo{};
             vertexBufferDescInfo.buffer = gpuData.vertexStorageBuffer;
@@ -1096,27 +1134,27 @@ namespace tremor::gfx {
             vertexBufferDescInfo.range = VK_WHOLE_SIZE;
 
             VkDescriptorBufferInfo instanceBufferDescInfo{};
-            instanceBufferDescInfo.buffer = gpuData.instanceStorageBuffer;
+            instanceBufferDescInfo.buffer = gpuData.instanceStorageBuffers[frameIndex];
             instanceBufferDescInfo.offset = 0;
             instanceBufferDescInfo.range = VK_WHOLE_SIZE;
 
             std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[0].dstSet = gpuData.descriptorSet;
+            descriptorWrites[0].dstSet = gpuData.descriptorSets[frameIndex];
             descriptorWrites[0].dstBinding = 0;
             descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[0].descriptorCount = 1;
             descriptorWrites[0].pBufferInfo = &vertexBufferDescInfo;
 
             descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[1].dstSet = gpuData.descriptorSet;
+            descriptorWrites[1].dstSet = gpuData.descriptorSets[frameIndex];
             descriptorWrites[1].dstBinding = 1;
             descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[1].descriptorCount = 1;
             descriptorWrites[1].pBufferInfo = &instanceBufferDescInfo;
 
             vkUpdateDescriptorSets(device_, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
-            gpuData.instanceCapacity = requiredCapacity;
+            gpuData.instanceCapacities[frameIndex] = requiredCapacity;
             return true;
         }
 
@@ -1129,15 +1167,18 @@ namespace tremor::gfx {
                 vkFreeMemory(device_, gpuData.vertexStorageMemory, nullptr);
                 gpuData.vertexStorageMemory = VK_NULL_HANDLE;
             }
-            if (gpuData.instanceStorageBuffer != VK_NULL_HANDLE) {
-                vkDestroyBuffer(device_, gpuData.instanceStorageBuffer, nullptr);
-                gpuData.instanceStorageBuffer = VK_NULL_HANDLE;
+            for (uint32_t frameIndex = 0; frameIndex < TaffyOverlayManager::FramesInFlight; ++frameIndex) {
+                if (gpuData.instanceStorageBuffers[frameIndex] != VK_NULL_HANDLE) {
+                    vkDestroyBuffer(device_, gpuData.instanceStorageBuffers[frameIndex], nullptr);
+                    gpuData.instanceStorageBuffers[frameIndex] = VK_NULL_HANDLE;
+                }
+                if (gpuData.instanceStorageMemories[frameIndex] != VK_NULL_HANDLE) {
+                    vkFreeMemory(device_, gpuData.instanceStorageMemories[frameIndex], nullptr);
+                    gpuData.instanceStorageMemories[frameIndex] = VK_NULL_HANDLE;
+                }
+                gpuData.instanceCapacities[frameIndex] = 0;
+                gpuData.descriptorSets[frameIndex] = VK_NULL_HANDLE;
             }
-            if (gpuData.instanceStorageMemory != VK_NULL_HANDLE) {
-                vkFreeMemory(device_, gpuData.instanceStorageMemory, nullptr);
-                gpuData.instanceStorageMemory = VK_NULL_HANDLE;
-            }
-            gpuData.instanceCapacity = 0;
         }
 
         TaffyOverlayManager::MeshAssetGPUData TaffyOverlayManager::uploadTaffyAsset(const Taffy::Asset& asset) {
@@ -1303,18 +1344,21 @@ namespace tremor::gfx {
 
                 //std::cout << "✅ Storage buffer created with " << totalBufferSize << " bytes" << std::endl;
 
-                // Allocate descriptor set
+                // Allocate per-frame descriptor sets so each in-flight frame can point
+                // at its own instance buffer without racing the GPU.
                 VkDescriptorSetAllocateInfo descAllocInfo{};
                 descAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
                 descAllocInfo.descriptorPool = descriptorPool;
-                descAllocInfo.descriptorSetCount = 1;
-                descAllocInfo.pSetLayouts = &meshShaderDescSetLayout;
+                std::array<VkDescriptorSetLayout, TaffyOverlayManager::FramesInFlight> meshLayouts{};
+                meshLayouts.fill(meshShaderDescSetLayout);
+                descAllocInfo.descriptorSetCount = static_cast<uint32_t>(meshLayouts.size());
+                descAllocInfo.pSetLayouts = meshLayouts.data();
 
                 std::cout << "🔍 Descriptor allocation debug:" << std::endl;
                 std::cout << "  Descriptor pool: " << (void*)descriptorPool << std::endl;
                 std::cout << "  Descriptor set layout: " << (void*)meshShaderDescSetLayout << std::endl;
 
-                VkResult allocResult = vkAllocateDescriptorSets(device_, &descAllocInfo, &gpuData.descriptorSet);
+                VkResult allocResult = vkAllocateDescriptorSets(device_, &descAllocInfo, gpuData.descriptorSets.data());
                 if (allocResult == VK_ERROR_OUT_OF_POOL_MEMORY || allocResult == VK_ERROR_FRAGMENTED_POOL) {
                     std::cout << "⚠️  Descriptor pool exhausted, recreating..." << std::endl;
                     Logger::get().error("DESCRIPTOR POOL EXHAUSTED! This is likely causing the hang.");
@@ -1326,7 +1370,7 @@ namespace tremor::gfx {
                     descAllocInfo.descriptorPool = descriptorPool;
                     
                     // Try allocation again
-                    allocResult = vkAllocateDescriptorSets(device_, &descAllocInfo, &gpuData.descriptorSet);
+                    allocResult = vkAllocateDescriptorSets(device_, &descAllocInfo, gpuData.descriptorSets.data());
                 }
                 
                 if (allocResult != VK_SUCCESS) {
@@ -1339,9 +1383,18 @@ namespace tremor::gfx {
                 }
 
                 // Update descriptor set to point to storage buffer
-                if (!ensureInstanceBufferCapacity(gpuData, 1u)) {
+                const uint32_t previousFrameIndex = activeFrameIndex_;
+                bool instanceBuffersReady = true;
+                for (uint32_t frameIndex = 0; frameIndex < TaffyOverlayManager::FramesInFlight; ++frameIndex) {
+                    activeFrameIndex_ = frameIndex;
+                    if (!ensureInstanceBufferCapacity(gpuData, 1u)) {
+                        instanceBuffersReady = false;
+                        break;
+                    }
+                }
+                activeFrameIndex_ = previousFrameIndex;
+                if (!instanceBuffersReady) {
                     cleanupMeshAssetGPUData(gpuData);
-                    gpuData.descriptorSet = VK_NULL_HANDLE;
                     return gpuData;
                 }
 
@@ -1474,20 +1527,32 @@ namespace tremor::gfx {
                 gpuData.indexCount = geomHeader.index_count;
                 gpuData.usesMeshShader = false;
                 
-                // For traditional rendering, we might not need a descriptor set
-                // but let's allocate one anyway for consistency
+                // Allocate per-frame descriptor sets so each in-flight frame can use
+                // its own instance buffer without stomping the previous frame.
                 VkDescriptorSetAllocateInfo descAllocInfo{};
                 descAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
                 descAllocInfo.descriptorPool = descriptorPool;
-                descAllocInfo.descriptorSetCount = 1;
-                descAllocInfo.pSetLayouts = &meshShaderDescSetLayout;
+                std::array<VkDescriptorSetLayout, TaffyOverlayManager::FramesInFlight> traditionalLayouts{};
+                traditionalLayouts.fill(meshShaderDescSetLayout);
+                descAllocInfo.descriptorSetCount = static_cast<uint32_t>(traditionalLayouts.size());
+                descAllocInfo.pSetLayouts = traditionalLayouts.data();
                 
-                VkResult allocResult = vkAllocateDescriptorSets(device_, &descAllocInfo, &gpuData.descriptorSet);
+                VkResult allocResult = vkAllocateDescriptorSets(device_, &descAllocInfo, gpuData.descriptorSets.data());
                 if (allocResult != VK_SUCCESS) {
                     std::cerr << "⚠️  Warning: Failed to allocate descriptor set for traditional rendering" << std::endl;
                     // This is not critical for traditional rendering, so we continue
                 } else {
-                    if (!ensureInstanceBufferCapacity(gpuData, 1u)) {
+                    const uint32_t previousFrameIndex = activeFrameIndex_;
+                    bool instanceBuffersReady = true;
+                    for (uint32_t frameIndex = 0; frameIndex < TaffyOverlayManager::FramesInFlight; ++frameIndex) {
+                        activeFrameIndex_ = frameIndex;
+                        if (!ensureInstanceBufferCapacity(gpuData, 1u)) {
+                            instanceBuffersReady = false;
+                            break;
+                        }
+                    }
+                    activeFrameIndex_ = previousFrameIndex;
+                    if (!instanceBuffersReady) {
                         std::cerr << "⚠️  Warning: Failed to initialize instance buffer for traditional rendering" << std::endl;
                     }
                 }
@@ -6484,6 +6549,10 @@ namespace tremor::gfx {
                 Logger::get().critical("beginFrame() called, frame {}", frameCount++);
             }
 
+            if (m_overlayManager) {
+                m_overlayManager->setActiveFrameIndex(static_cast<uint32_t>(currentFrame));
+            }
+
             if (m_framebufferResized && !recreateSwapchainResources()) {
                 return;
             }
@@ -6861,6 +6930,7 @@ namespace tremor::gfx {
 				
 				// Render UI in the depth-less pass
                 VulkanUiBridge::updateMessageOverlay(*this);
+                VulkanUiBridge::updateProfilerOverlay(*this);
 				m_uiRenderer->render(m_commandBuffers[currentFrame], orthoProjection, vkSwapchain->extent());
 				
 				// Let editor integration clean up any editor-specific UI/render state
